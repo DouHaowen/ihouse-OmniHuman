@@ -115,6 +115,35 @@ def _extract_json_text(raw: str) -> str:
     return raw.strip()
 
 
+def _extract_usage_from_message(message: Any) -> dict:
+    usage_obj = getattr(message, 'usage', None)
+    usage = {
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'cache_creation_input_tokens': 0,
+        'cache_read_input_tokens': 0,
+        'web_search_calls': 0,
+    }
+    if usage_obj is not None:
+        for key in ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'):
+            try:
+                usage[key] = int(getattr(usage_obj, key, 0) or 0)
+            except Exception:
+                usage[key] = 0
+    for block in getattr(message, 'content', []) or []:
+        block_type = getattr(block, 'type', '') or ''
+        if 'web_search' in block_type or 'server_tool_use' in block_type:
+            usage['web_search_calls'] += 1
+    return usage
+
+
+def _merge_usage(base: dict | None, extra: dict | None) -> dict:
+    merged = dict(base or {})
+    for key, value in (extra or {}).items():
+        merged[key] = int(merged.get(key, 0) or 0) + int(value or 0)
+    return merged
+
+
 def _extract_message_text(message: Any) -> str:
     parts = []
     for block in getattr(message, 'content', []) or []:
@@ -163,9 +192,10 @@ def _attempt_simple_json_repairs(raw: str) -> dict | None:
     return None
 
 
-def _repair_json_with_claude(raw: str) -> dict:
+def _repair_json_with_claude(raw: str) -> tuple[dict, dict]:
     current = raw
     last_error = None
+    usage_total = {}
     for attempt in range(3):
         repair_prompt = f"""
 下面这段内容本来应该是一个 JSON，但当前格式有问题，无法被 json.loads 解析。
@@ -188,27 +218,28 @@ def _repair_json_with_claude(raw: str) -> dict:
             messages=[{'role': 'user', 'content': repair_prompt}],
             system=REPAIR_SYSTEM_PROMPT,
         )
+        usage_total = _merge_usage(usage_total, _extract_usage_from_message(message))
         repaired_text = _extract_json_candidate(_extract_message_text(message))
         try:
-            return json.loads(repaired_text)
+            return json.loads(repaired_text), usage_total
         except json.JSONDecodeError as exc:
             current = repaired_text
             last_error = exc
     raise ValueError(f'Claude 联网返回内容无法修复为合法 JSON: {last_error}')
 
 
-def _parse_json_response(raw: str) -> dict:
+def _parse_json_response(raw: str) -> tuple[dict, dict]:
     candidate = _extract_json_candidate(raw)
     try:
-        return json.loads(candidate)
+        return json.loads(candidate), {}
     except json.JSONDecodeError:
         repaired = _attempt_simple_json_repairs(candidate)
         if repaired is not None:
-            return repaired
+            return repaired, {}
         return _repair_json_with_claude(candidate)
 
 
-def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_search: bool, target_market: str = "cn", department_id: str = "real_estate") -> dict:
+def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_search: bool, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
     prompts = [
         user_prompt,
         user_prompt + """
@@ -221,11 +252,14 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
 """,
     ]
     last_error = None
+    total_usage = {}
     for prompt in prompts:
         message = client.messages.create(**_build_message_kwargs(prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id))
+        total_usage = _merge_usage(total_usage, _extract_usage_from_message(message))
         raw = _extract_message_text(message)
         try:
-            return _parse_json_response(raw)
+            data, repair_usage = _parse_json_response(raw)
+            return data, _merge_usage(total_usage, repair_usage)
         except Exception as exc:
             last_error = exc
     if last_error:
@@ -279,7 +313,7 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
 - material_search_keyword 必须是英文且适合后续找素材
 """
 
-    revised = _request_json_from_claude(prompt, max_tokens=1600, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    revised, usage = _request_json_from_claude(prompt, max_tokens=1600, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     for key in ('type', 'start', 'end', 'duration'):
         revised[key] = target.get(key)
 
@@ -291,6 +325,7 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
             'duration': target.get('duration'),
             'script': revised.get('script', target.get('script', '')),
             'action': revised.get('action', target.get('action', '')),
+            '_meta': {'usage': usage},
         }
 
     return {
@@ -302,6 +337,7 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
         'material_keyword': revised.get('material_keyword', target.get('material_keyword', '')),
         'material_search_keyword': revised.get('material_search_keyword', target.get('material_search_keyword', '')),
         'material_desc': revised.get('material_desc', target.get('material_desc', '')),
+        '_meta': {'usage': usage},
     }
 
 
@@ -315,7 +351,8 @@ def generate_script(topic: str, enable_web_search: bool = False, target_market: 
         print('🌐 已启用 Claude 实时联网检索')
 
     prompt = f"请为以下选题生成视频文案：{topic}"
-    data = _request_json_from_claude(prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    data, usage = _request_json_from_claude(prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    data['_meta'] = {'usage': usage}
     print(f"✅ 文案生成完成，共 {len(data['segments'])} 段，总时长 {data['total_duration']} 秒")
     return data
 

@@ -104,51 +104,6 @@
       font-weight: 700;
     }
 
-    .admin-stats {
-      display:grid;
-      gap:12px;
-    }
-
-    .admin-stat-card {
-      border-radius: 22px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.82);
-      padding: 14px;
-      display: grid;
-      gap: 8px;
-    }
-
-    .admin-stat-head {
-      display:flex;
-      justify-content:space-between;
-      align-items:center;
-      gap:12px;
-    }
-
-    .admin-stat-name {
-      font-size: 15px;
-      font-weight: 800;
-      color: var(--ink);
-    }
-
-    .admin-stat-count {
-      color: var(--brand-deep);
-      font-size: 13px;
-      font-weight: 800;
-      white-space: nowrap;
-    }
-
-    .admin-history-list {
-      display:grid;
-      gap:6px;
-    }
-
-    .admin-history-item {
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.6;
-      word-break: break-word;
-    }
     .page {
       max-width: 1640px;
       margin: 0 auto;
@@ -1056,7 +1011,8 @@
             <select id="topInterfaceLanguageSelect" class="select-input" style="min-height:42px; padding:10px 14px; background:rgba(255,255,255,0.86);"></select>
           </div>
           <div class="user-chip" id="sessionUser" style="display:none;"></div>
-          <button class="btn btn-ghost" type="button" id="logoutBtn" style="display:none; min-height:42px;">退出登录</button>
+          <a class="btn btn-secondary" id="adminDashboardBtn" href="/admin/dashboard" style="display:none; min-height:42px; text-decoration:none;">管理员看板</a>
+          <a class="btn btn-ghost" id="logoutBtn" href="/logout" style="display:none; min-height:42px; text-decoration:none;">退出登录</a>
           <div class="topbar-status" id="heroStatus">工作台已就绪</div>
         </div>
       </div>
@@ -1066,23 +1022,22 @@
           <div class="intro-inner">
             <div class="eyebrow" id="workflowEyebrow">iHouse Workflow</div>
             <h1 id="workflowTitle">内容生产流程</h1>
-            <p id="workflowIntro">AI 驱动的短视频全流程工作台 — 从选题到成片，一页搞定。</p>
             <div class="usage-list">
               <div class="usage-item">
                 <div class="usage-num">01</div>
-                <div class="usage-copy"><strong id="usageTitle1">输入选题</strong><span id="usageDesc1">一句话描述内容方向，AI 自动生成完整视频脚本与分镜结构。</span></div>
+                <div class="usage-copy"><strong id="usageTitle1">输入选题</strong><span id="usageDesc1">输入本次视频主题，系统先生成标题、封面标题和分镜脚本。</span></div>
               </div>
               <div class="usage-item">
                 <div class="usage-num">02</div>
-                <div class="usage-copy"><strong id="usageTitle2">确认脚本</strong><span id="usageDesc2">逐段预览文案与素材描述，支持 AI 辅助改写，确认后再进入生产。</span></div>
+                <div class="usage-copy"><strong id="usageTitle2">确认脚本</strong><span id="usageDesc2">逐段检查并修改文案、动作提示词和素材描述。</span></div>
               </div>
               <div class="usage-item">
                 <div class="usage-num">03</div>
-                <div class="usage-copy"><strong id="usageTitle3">选择风格</strong><span id="usageDesc3"><span id="voiceLabel">配音方案</span>与数字人主播自由搭配，适配不同市场与内容调性。</span></div>
+                <div class="usage-copy"><strong id="usageTitle3">开始生产</strong><span id="usageDesc3">确认配音方案和主播图片后，一键生成整条视频素材。</span></div>
               </div>
               <div class="usage-item">
                 <div class="usage-num">04</div>
-                <div class="usage-copy"><strong id="usageTitle4">成片输出</strong><span id="usageDesc4">自动完成配音、数字人、素材匹配与视频合成，支持逐段复核与一键成片。</span></div>
+                <div class="usage-copy"><strong id="usageTitle4">结果交付</strong><span id="usageDesc4">按顺序查看配音、数字人、素材、成片和打包文件。</span></div>
               </div>
             </div>
           </div>
@@ -1195,6 +1150,7 @@
                 <div class="topbar-status" id="progressStatus"><span class="spinner"></span> 正在处理</div>
               </div>
               <div class="progress-board" id="progressSteps"></div>
+              <div class="insight-grid" id="queueStatusPanel" style="margin: 16px 0 0;"></div>
               <div class="log-panel" id="logPanel"></div>
             </section>
 
@@ -1243,12 +1199,6 @@
 
         <aside class="rightbar">
           <div class="side-stack">
-            <section class="panel" id="adminPanel" style="display:none;">
-              <div class="section-kicker">Admin</div>
-              <h3 class="section-title" style="font-size:22px;">账号统计</h3>
-              <div class="helper" style="margin: 10px 0 14px;">管理员可以看到每个员工账号生成的数量，以及对应的历史任务。</div>
-              <div class="admin-stats" id="adminStats"></div>
-            </section>
             <section class="panel">
               <div class="section-kicker">History</div>
               <h3 class="section-title" style="font-size:22px;"><span id="historyTitle">历史任务</span></h3>
@@ -1279,11 +1229,11 @@
       eventSource: null,
       resultData: null,
       historyItems: [],
+      queuePollTimer: null,
       useWebSearch: false,
       currentUser: null,
       selectedComposeTransitionId: 'fade',
       selectedSubtitleTemplateId: 'classic',
-      adminStats: null,
       selectedInterfaceLanguage: "zh-CN",
       selectedDepartmentId: "real_estate",
       selectedTargetMarket: "cn",
@@ -1317,6 +1267,7 @@
       speedRange: document.getElementById('speedRange'),
       speedValue: document.getElementById('speedValue'),
       progressSteps: document.getElementById('progressSteps'),
+      queueStatusPanel: document.getElementById('queueStatusPanel'),
       logPanel: document.getElementById('logPanel'),
       progressStatus: document.getElementById('progressStatus'),
       resultTitle: document.getElementById('resultTitle'),
@@ -1344,8 +1295,7 @@
       loginError: document.getElementById('loginError'),
       logoutBtn: document.getElementById('logoutBtn'),
       sessionUser: document.getElementById('sessionUser'),
-      adminPanel: document.getElementById('adminPanel'),
-      adminStats: document.getElementById('adminStats'),
+      adminDashboardBtn: document.getElementById('adminDashboardBtn'),
     };
 
     function escapeHtml(value = '') {
@@ -1368,6 +1318,14 @@
       const date = new Date(time);
       if (Number.isNaN(date.getTime())) return '未知时间';
       return date.toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function formatEstimatedCost(value) {
+      return `¥${Number(value || 0).toFixed(3)}`;
+    }
+
+    async function loadCostSummary() {
+      return;
     }
 
     async function openHistoryTask(historyId) {
@@ -1397,7 +1355,7 @@
           <div class="history-main">
             <div class="history-title">${escapeHtml(item.title || item.topic || item.history_id)}</div>
             <div class="history-topic">${escapeHtml(item.topic || '未记录选题')}</div>
-            <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at))} · ${escapeHtml(String(item.segment_count || 0))} 段 · ${escapeHtml(String(item.total_duration || 0))} 秒${state.currentUser?.role === 'admin' ? ` · ${escapeHtml(item.owner_display_name || item.owner_username || '未归属')}` : ''}</div>
+            <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at))} · ${escapeHtml(String(item.segment_count || 0))} 段 · ${escapeHtml(String(item.total_duration || 0))} 秒 · ${escapeHtml(formatEstimatedCost(item.estimated_cost_total || 0))}${state.currentUser?.role === 'admin' ? ` · ${escapeHtml(item.owner_display_name || item.owner_username || '未归属')}` : ''}</div>
           </div>
           <div class="history-actions">
             <button class="btn btn-secondary history-open-btn" type="button" data-history-id="${item.history_id}">打开</button>
@@ -1459,16 +1417,12 @@
         setHeroStatus(copyText('composingVideo', '正在生成成片...'));
         const res = await fetch(`/api/history/${state.currentHistoryId}/compose`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            transition_id: state.selectedComposeTransitionId,
-            subtitle_template_id: state.selectedSubtitleTemplateId,
-          }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || copyText('composeVideoFailed', '生成成片失败'));
         renderResult(data.result);
         await loadHistory();
+        await loadCostSummary();
         setHeroStatus(copyText('composeVideoDone', '成片已生成'));
       } catch (error) {
         setHeroStatus(copyText('composeVideoFailed', '生成成片失败'), true);
@@ -1550,8 +1504,8 @@
 
     const UI_COPY = {
       "zh-CN": {
-        brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "内容生产流程", workflowIntro: "让运营从选题、脚本、配音到数字人和素材，都在同一页完成。",
-        usageTitle1: "输入选题", usageDesc1: "先生成整条视频脚本，不直接盲跑整条任务。", usageTitle2: "确认脚本", usageDesc2: "逐段修改文案、动作提示词和素材描述，再决定是否进入生产。", usageTitle3: "选择风格", usageDesc3: "配音方案和主播图片分开选择，按你的业务习惯自由组合。", usageTitle4: "结果复核", usageDesc4: "完成后按段落查看视频、音频、素材和输出文件，不满意就局部调整。",
+        brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "内容生产流程", workflowIntro: "",
+        usageTitle1: "输入选题", usageDesc1: "输入本次视频主题，系统先生成标题、封面标题和分镜脚本。", usageTitle2: "确认脚本", usageDesc2: "逐段检查并修改文案、动作提示词和素材描述。", usageTitle3: "开始生产", usageDesc3: "确认配音方案和主播图片后，一键生成整条视频素材。", usageTitle4: "结果交付", usageDesc4: "按顺序查看配音、数字人、素材、成片和打包文件。",
         workspaceKicker: "Workspace", workspaceTitle: "从一个选题开始创建内容任务", workspaceDesc: "这块是整条视频的主操作舞台。先定选题，再确认文案分镜，然后自由组合音色和主播，最后再让系统完成整段生产。",
         stepTitle1: "01 输入选题", stepDesc1: "先把内容命题说清楚，而不是直接跑整条流程。", stepTitle2: "02 确认脚本", stepDesc2: "先看标题、封面和分镜文案，再决定是否进入下一步制作。", stepTitle3: "03 选择风格", stepDesc3: "音色与主播分开选择，运营自由组合，不做多余系统限制。",
         stageTitle: "当前操作舞台", stageDesc: "把复杂流程拆成当前最应该做的那个动作，让这套系统更像产品而不是表单。",
@@ -1647,14 +1601,14 @@
       if (!state.currentUser) {
         els.sessionUser.style.display = 'none';
         els.logoutBtn.style.display = 'none';
-        els.adminPanel.style.display = 'none';
+        els.adminDashboardBtn.style.display = 'none';
         return;
       }
       const roleLabel = state.currentUser.role === 'admin' ? 'Admin' : 'User';
       els.sessionUser.textContent = `${state.currentUser.display_name} · ${state.currentUser.username} · ${roleLabel}`;
       els.sessionUser.style.display = 'inline-flex';
       els.logoutBtn.style.display = 'inline-flex';
-      els.adminPanel.style.display = state.currentUser.role === 'admin' ? 'block' : 'none';
+      els.adminDashboardBtn.style.display = state.currentUser.role === 'admin' ? 'inline-flex' : 'none';
     }
 
     function applyUserDefaults(user) {
@@ -1665,54 +1619,6 @@
       state.selectedTargetMarket = user.target_market || 'cn';
       state.selectedVoiceId = null;
       renderSessionUser();
-    }
-
-    function renderAdminStats(data) {
-      state.adminStats = data;
-      if (!state.currentUser || state.currentUser.role !== 'admin') {
-        els.adminPanel.style.display = 'none';
-        return;
-      }
-      els.adminPanel.style.display = 'block';
-      const users = Array.isArray(data?.users) ? data.users : [];
-      const unassigned = Array.isArray(data?.unassigned) ? data.unassigned : [];
-      const sections = users.map(item => `
-        <div class="admin-stat-card">
-          <div class="admin-stat-head">
-            <div class="admin-stat-name">${escapeHtml(item.display_name || item.username)}</div>
-            <div class="admin-stat-count">${escapeHtml(String(item.count || 0))} 条</div>
-          </div>
-          <div class="admin-history-list">
-            ${(item.histories || []).length ? item.histories.slice(0, 5).map(history => `<div class="admin-history-item">${escapeHtml(history.title || history.topic || history.history_id)}</div>`).join('') : `<div class="admin-history-item">暂无记录</div>`}
-          </div>
-        </div>
-      `).join('');
-      const unassignedBlock = unassigned.length ? `
-        <div class="admin-stat-card">
-          <div class="admin-stat-head">
-            <div class="admin-stat-name">未归属历史</div>
-            <div class="admin-stat-count">${escapeHtml(String(unassigned.length))} 条</div>
-          </div>
-          <div class="admin-history-list">${unassigned.slice(0, 5).map(item => `<div class="admin-history-item">${escapeHtml(item.title || item.topic || item.history_id)}</div>`).join('')}</div>
-        </div>
-      ` : '';
-      els.adminStats.innerHTML = sections + unassignedBlock;
-    }
-
-    async function loadAdminStats() {
-      if (!state.currentUser || state.currentUser.role !== 'admin') {
-        els.adminPanel.style.display = 'none';
-        return;
-      }
-      const res = await fetch('/api/admin/stats');
-      if (res.status === 401) {
-        state.currentUser = null;
-        renderSessionUser();
-        setAuthVisible(true);
-        return;
-      }
-      const data = await res.json();
-      if (res.ok) renderAdminStats(data);
     }
 
     async function loadCurrentUser() {
@@ -1735,7 +1641,6 @@
       if (!user) return;
       await loadOptions();
       await loadHistory();
-      await loadAdminStats();
     }
 
     async function handleLogin(event) {
@@ -1753,24 +1658,15 @@
       applyUserDefaults(data.user);
       await loadOptions();
       await loadHistory();
-      await loadAdminStats();
+      await loadCostSummary();
       setAuthVisible(false);
       els.loginPassword.value = '';
       setHeroStatus(currentCopy().heroReady || '工作台已就绪');
     }
 
-    async function handleLogout() {
-      await fetch('/api/logout', { method: 'POST' });
-      state.currentUser = null;
-      state.historyItems = [];
-      state.currentHistoryId = null;
-      state.currentTaskId = null;
-      state.resultData = null;
-      renderSessionUser();
-      renderHistory([]);
-      els.adminStats.innerHTML = '';
-      setAuthVisible(true);
-      els.loginUsername.focus();
+    function handleLogout() {
+      stopAdminLivePolling();
+      window.location.assign('/logout');
     }
 
     function localizedTargetMarketName(marketId, fallback = '') {
@@ -1910,7 +1806,11 @@
     function getVisibleVoicePresets() {
       const presets = state.options?.voice_presets || [];
       if (state.selectedTargetMarket === 'tw') {
-        return presets.filter(item => item.id === 'taiwan_female');
+        return presets.filter(item => item.id === 'taiwan_female' || item.id === 'mandarin_female' || item.id === 'taiwan_clone')
+          .sort((a, b) => {
+            const order = { mandarin_female: 0, taiwan_female: 1, taiwan_clone: 2 };
+            return (order[a.id] ?? 99) - (order[b.id] ?? 99);
+          });
       }
       if (state.selectedTargetMarket === 'jp') {
         return presets.filter(item => item.id === 'japanese_female');
@@ -1925,13 +1825,14 @@
     function renderVoicePresets() {
       const presets = getVisibleVoicePresets();
       const market = (state.options?.target_markets || []).find(item => item.id === state.selectedTargetMarket);
-      if (!presets.some(item => item.id === state.selectedVoiceId)) {
-        state.selectedVoiceId = presets[0]?.id || null;
+      const selectablePresets = presets.filter(item => item.enabled !== false);
+      if (!selectablePresets.some(item => item.id === state.selectedVoiceId)) {
+        state.selectedVoiceId = selectablePresets[0]?.id || null;
       }
       els.voicePresetGrid.innerHTML = presets.map(preset => {
         const localizedPreset = localizedVoicePreset(preset);
         return `
-        <article class="preset-card ${preset.id === state.selectedVoiceId ? 'selected' : ''}" data-voice-id="${preset.id}">
+        <article class="preset-card ${preset.id === state.selectedVoiceId ? 'selected' : ''} ${preset.enabled === false ? 'is-disabled' : ''}" data-voice-id="${preset.id}">
           <div class="preset-head">
             <div>
               <div class="preset-name">${escapeHtml(localizedPreset.name)}</div>
@@ -1941,14 +1842,15 @@
           </div>
           <div class="preset-body">${escapeHtml(localizedPreset.style)}</div>
           <div class="tags">${(localizedPreset.tags || []).map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>
-          <div class="helper">${market ? `${escapeHtml(copyText('marketDefaultPrefix', '当前目标市场默认'))}：${escapeHtml(localizedTargetMarketName(market.id, market.name))}` : copyText('voiceSampleFallback', '试听参考')} · ${preset.id === state.selectedVoiceId ? `<strong style="color:var(--brand-deep);">${escapeHtml((optionLabel('contentLanguages', market?.content_language, market?.content_language || localizedPreset.subtitle) || localizedPreset.subtitle) + " / " + copyText('voiceAutoSelected', '已自动选中'))}</strong> · ` : ""}${escapeHtml(localizedPreset.sample_text || '')}</div>
+          <div class="helper">${preset.enabled === false ? `<strong style="color:#9aa4b2;">${escapeHtml(preset.availability_note || '待填写 voice_id 后可用')}</strong> · ` : ''}${market ? `${escapeHtml(copyText('marketDefaultPrefix', '当前目标市场默认'))}：${escapeHtml(localizedTargetMarketName(market.id, market.name))}` : copyText('voiceSampleFallback', '试听参考')} · ${preset.id === state.selectedVoiceId ? `<strong style="color:var(--brand-deep);">${escapeHtml((optionLabel('contentLanguages', market?.content_language, market?.content_language || localizedPreset.subtitle) || localizedPreset.subtitle) + " / " + copyText('voiceAutoSelected', '已自动选中'))}</strong> · ` : ""}${escapeHtml(localizedPreset.sample_text || '')}</div>
         </article>
       `}).join('');
 
       document.querySelectorAll('.preset-card').forEach(card => {
         card.addEventListener('click', () => {
+          const selected = presets.find(item => item.id === card.dataset.voiceId);
+          if (selected?.enabled === false) return;
           state.selectedVoiceId = card.dataset.voiceId;
-          const selected = presets.find(item => item.id === state.selectedVoiceId);
           if (selected?.default_speed) {
             els.speedRange.value = Number(selected.default_speed).toFixed(2);
             els.speedValue.value = Number(selected.default_speed).toFixed(2);
@@ -2045,6 +1947,7 @@
         renderVoicePresets();
         renderAvatarOptions();
         renderScriptPreview(data.preview);
+        await loadCostSummary();
         setHeroStatus(currentCopy().aiEditDone || '该段文案已更新');
       } catch (error) {
         setHeroStatus(currentCopy().aiEditFailed || 'AI 修改失败', true);
@@ -2084,41 +1987,8 @@
 
     function renderComposeSettings(result) {
       if (!els.composeSettingsPanel) return;
-      if (!state.currentHistoryId) {
-        els.composeSettingsPanel.innerHTML = '';
-        els.composeSettingsPanel.style.display = 'none';
-        return;
-      }
-      const workflowConfig = result.workflow_config || {};
-      const transitions = state.options?.composition_transitions || [];
-      const templates = state.options?.subtitle_templates || [];
-      state.selectedComposeTransitionId = workflowConfig.compose_transition_id || state.selectedComposeTransitionId || transitions[0]?.id || 'fade';
-      state.selectedSubtitleTemplateId = workflowConfig.subtitle_template_id || state.selectedSubtitleTemplateId || templates[0]?.id || 'classic';
-      const transitionOptions = transitions.map(item => `<option value="${item.id}" ${item.id === state.selectedComposeTransitionId ? 'selected' : ''}>${escapeHtml(compositionOptionLabel('transition', item.id, item.name))}</option>`).join('');
-      const subtitleOptions = templates.map(item => `<option value="${item.id}" ${item.id === state.selectedSubtitleTemplateId ? 'selected' : ''}>${escapeHtml(compositionOptionLabel('subtitle', item.id, item.name))}</option>`).join('');
-      els.composeSettingsPanel.innerHTML = `
-        <div class="insight-card">
-          <div class="label">${escapeHtml(compositionUiCopy('settingsTitle', '成片设置'))}</div>
-          <div class="value" style="margin:8px 0 14px; color:var(--muted); font-size:14px;">${escapeHtml(compositionUiCopy('settingsDesc', '先选好素材转场和字幕模板，再生成完整成片。'))}</div>
-          <div style="display:grid; gap:14px; grid-template-columns: repeat(2, minmax(0,1fr));">
-            <label style="display:grid; gap:8px;">
-              <span class="label">${escapeHtml(compositionUiCopy('transitionLabel', '素材转场'))}</span>
-              <select id="composeTransitionSelect" style="min-height:52px; border-radius:18px; border:1px solid var(--line); padding:0 16px; font-size:16px; background:#fff; color:var(--ink);">${transitionOptions}</select>
-            </label>
-            <label style="display:grid; gap:8px;">
-              <span class="label">${escapeHtml(compositionUiCopy('subtitleTemplateLabel', '字幕模板'))}</span>
-              <select id="subtitleTemplateSelect" style="min-height:52px; border-radius:18px; border:1px solid var(--line); padding:0 16px; font-size:16px; background:#fff; color:var(--ink);">${subtitleOptions}</select>
-            </label>
-          </div>
-        </div>
-      `;
-      els.composeSettingsPanel.style.display = 'grid';
-      document.getElementById('composeTransitionSelect')?.addEventListener('change', (event) => {
-        state.selectedComposeTransitionId = event.target.value;
-      });
-      document.getElementById('subtitleTemplateSelect')?.addEventListener('change', (event) => {
-        state.selectedSubtitleTemplateId = event.target.value;
-      });
+      els.composeSettingsPanel.innerHTML = '';
+      els.composeSettingsPanel.style.display = 'none';
     }
 
     function renderScriptPreview(preview) {
@@ -2192,6 +2062,8 @@
           </div>
         </div>
       `).join('');
+      renderQueueStatus({});
+      startQueuePolling();
       els.logPanel.innerHTML = '';
       els.progressStatus.innerHTML = `<span class="spinner"></span> ${escapeHtml(copyText('progressRunning', '正在处理'))}`;
       activateStep('progress');
@@ -2216,12 +2088,90 @@
       els.logPanel.scrollTop = els.logPanel.scrollHeight;
     }
 
+
+    function queueCopy() {
+      if (state.selectedInterfaceLanguage === 'zh-TW') {
+        return {
+          title: '數位人佇列狀態',
+          status: '數位人佇列中',
+          waiting: '前方等待數量',
+          current: '目前執行帳號',
+          none: '目前無',
+          idle: '目前沒有排隊中的數位人任務',
+        };
+      }
+      if (state.selectedInterfaceLanguage === 'ja-JP') {
+        return {
+          title: 'デジタルヒューマン待機状況',
+          status: 'デジタルヒューマンキュー',
+          waiting: '前方の待機数',
+          current: '現在実行中のアカウント',
+          none: 'なし',
+          idle: '現在キュー中のデジタルヒューマンはありません',
+        };
+      }
+      return {
+        title: '数字人队列状态',
+        status: '数字人队列中',
+        waiting: '前方等待数量',
+        current: '当前执行账号',
+        none: '当前无',
+        idle: '当前没有排队中的数字人任务',
+      };
+    }
+
+    function renderQueueStatus(data = {}) {
+      if (!els.queueStatusPanel) return;
+      const copy = queueCopy();
+      const runningCount = Number(data.running_count || 0);
+      const waitingCount = Number(data.waiting_count || 0);
+      const currentOwner = data.current_owner_display_name || data.current_owner_username || copy.none;
+      const active = runningCount > 0 || waitingCount > 0;
+      els.queueStatusPanel.innerHTML = `
+        <div class="insight-card">
+          <div class="label">${escapeHtml(copy.title)}</div>
+          <div class="value">${escapeHtml(active ? copy.status : copy.idle)}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(copy.waiting)}</div>
+          <div class="value">${escapeHtml(String(waitingCount))}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(copy.current)}</div>
+          <div class="value">${escapeHtml(currentOwner)}</div>
+        </div>
+      `;
+    }
+
+    async function loadQueueStatus() {
+      try {
+        const res = await fetch('/api/omnihuman-queue');
+        if (!res.ok) return;
+        const data = await res.json();
+        renderQueueStatus(data || {});
+      } catch (_) {}
+    }
+
+    function startQueuePolling() {
+      stopQueuePolling();
+      loadQueueStatus();
+      state.queuePollTimer = setInterval(loadQueueStatus, 2000);
+    }
+
+    function stopQueuePolling() {
+      if (state.queuePollTimer) {
+        clearInterval(state.queuePollTimer);
+        state.queuePollTimer = null;
+      }
+    }
+
     function renderWorkflowSummary(result) {
       const voice = result.workflow_config?.voice_preset;
       const avatar = result.workflow_config?.avatar;
       const webSearchEnabled = !!result.workflow_config?.web_search_enabled;
       const targetMarket = (state.options?.target_markets || []).find(item => item.id === result.workflow_config?.target_market);
       const department = (state.options?.departments || []).find(item => item.id === result.workflow_config?.department_id);
+      const byType = result.cost_summary?.by_type || {};
       els.workflowSummary.innerHTML = `
         <div class="insight-card">
           <div class="label">${escapeHtml(currentCopy().workflowLabelVoice || '本次配音方案')}</div>
@@ -2239,6 +2189,10 @@
           <div class="label">${escapeHtml(currentCopy().workflowLabelWebSearch || '实时联网检索')}</div>
           <div class="value">${escapeHtml(webSearchEnabled ? (currentCopy().workflowWebSearchOn || '已开启，优先参考最新信息') : (currentCopy().workflowWebSearchOff || '未开启，按常规模型生成'))}</div>
         </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(costCopy().title)}</div>
+          <div class="value">${escapeHtml(`文案 ${formatEstimatedCost(byType.script_generate || 0)} · 配音 ${formatEstimatedCost(byType.tts_generate || 0)} · 数字人 ${formatEstimatedCost(byType.digital_human_generate || 0)} · 成片 ${formatEstimatedCost(byType.compose_video || 0)}`)}</div>
+        </div>
       `;
     }
 
@@ -2248,6 +2202,7 @@
       state.currentTaskId = result.live_task_id || state.currentTaskId;
       els.resultPanel.classList.add('active');
       els.progressPanel.classList.remove('active');
+      stopQueuePolling();
       activateStep('result');
       setHeroStatus(currentCopy().heroDone || '生产完成');
       els.progressStatus.textContent = copyText('progressDone', '已完成');
@@ -2257,6 +2212,7 @@
         <div class="result-kpi"><div class="label">${escapeHtml(copyText('resultKpiTitle', '视频标题'))}</div><div class="value">${escapeHtml(result.title || copyText('statusNotGenerated', '未生成'))}</div></div>
         <div class="result-kpi"><div class="label">${escapeHtml(copyText('resultKpiDuration', '总时长'))}</div><div class="value">${escapeHtml(String(result.total_duration || 0))} ${escapeHtml(copyText('unitSeconds', '秒'))}</div></div>
         <div class="result-kpi"><div class="label">${escapeHtml(copyText('resultKpiSegments', '完成段数'))}</div><div class="value">${escapeHtml(String(result.segment_count || 0))} ${escapeHtml(copyText('unitSegments', '段'))}</div></div>
+        <div class="result-kpi"><div class="label">${escapeHtml(costCopy().total)}</div><div class="value">${escapeHtml(formatEstimatedCost(result.cost_summary?.estimated_total || 0))}</div></div>
       `;
       renderWorkflowSummary(result);
       renderComposeSettings(result);
@@ -2460,6 +2416,7 @@
         renderVoicePresets();
         renderAvatarOptions();
         renderScriptPreview(data.preview);
+        await loadCostSummary();
         setHeroStatus(copyText('previewGenerated', '文案已生成，等待确认'));
       } catch (error) {
         setHeroStatus(copyText('previewFailed', '文案生成失败'), true);
@@ -2497,7 +2454,13 @@
       els.produceBtn.textContent = copyText('produceCreating', '正在创建生产任务...');
       try {
         const res = await fetch('/api/produce', { method: 'POST', body: formData });
-        const data = await res.json();
+        const raw = await res.text();
+        let data = {};
+        try {
+          data = raw ? JSON.parse(raw) : {};
+        } catch (_) {
+          data = { error: raw || copyText('produceFailed', '创建任务失败') };
+        }
         if (!res.ok) throw new Error(data.error || copyText('produceFailed', '创建任务失败'));
         state.currentTaskId = data.task_id;
         renderProgressShell();
@@ -2513,6 +2476,7 @@
 
     function subscribeProgress(taskId) {
       if (state.eventSource) state.eventSource.close();
+      startQueuePolling();
       state.eventSource = new EventSource(`/api/tasks/${taskId}/progress`);
       state.eventSource.addEventListener('progress', event => {
         const data = JSON.parse(event.data);
@@ -2521,6 +2485,7 @@
       state.eventSource.addEventListener('done', async event => {
         const data = JSON.parse(event.data);
         state.eventSource.close();
+        stopQueuePolling();
         if (data.status === 'done') {
           const res = await fetch(`/api/tasks/${taskId}/result`);
           const result = await res.json();
@@ -2536,6 +2501,7 @@
 
     function resetWorkspace() {
       if (state.eventSource) state.eventSource.close();
+      stopQueuePolling();
       state.scriptData = null;
       state.previewData = null;
       state.useWebSearch = false;

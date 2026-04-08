@@ -7,11 +7,29 @@ TTS配音模块
 import os
 import requests
 from dotenv import load_dotenv
+from opencc import OpenCC
 
 load_dotenv(override=False)
 
 MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY")
 MINIMAX_TTS_URL = "https://api.minimaxi.com/v1/t2a_v2"
+T2S_CONVERTER = OpenCC("t2s")
+
+
+def _should_normalize_to_simplified(text: str) -> bool:
+    if not text:
+        return False
+    # Japanese copy should bypass Chinese conversion.
+    if any("\u3040" <= ch <= "\u30ff" for ch in text):
+        return False
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+def _prepare_tts_text(text: str) -> str:
+    normalized = (text or "").strip()
+    if _should_normalize_to_simplified(normalized):
+        return T2S_CONVERTER.convert(normalized)
+    return normalized
 
 
 def generate_audio(
@@ -26,7 +44,8 @@ def generate_audio(
 
     voice: MiniMax voice_id，可在 MiniMax 平台获取
     """
-    print(f"🎙️ 正在生成配音：{text[:30]}...")
+    tts_text = _prepare_tts_text(text)
+    print(f"🎙️ 正在生成配音：{tts_text[:30]}...")
 
     headers = {
         "Content-Type": "application/json",
@@ -35,7 +54,7 @@ def generate_audio(
 
     payload = {
         "model": "speech-2.8-hd",
-        "text": text,
+        "text": tts_text,
         "stream": False,
         "voice_setting": {
             "voice_id": voice,

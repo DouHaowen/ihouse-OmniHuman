@@ -4,6 +4,7 @@ FastAPI + SSE 实时进度推送
 """
 
 import csv
+from collections import deque
 import json
 import os
 import threading
@@ -20,7 +21,7 @@ from xml.etree import ElementTree as ET
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 from starlette.middleware.sessions import SessionMiddleware
@@ -36,6 +37,11 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 tasks = {}
 ASSETS_DIR = BASE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
+
+AVATAR_DISPLAY_NAME_MAP = {
+    "avatar_test_0cd3d70a.png": "主播A",
+    "avatar_test_new_01.png": "主播B",
+}
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -80,6 +86,21 @@ VOICE_PRESETS = [
         "sample_text": "嗨，今天想用更贴近生活的方式，陪你快速看懂这个主题。",
     },
     {
+        "id": "taiwan_clone",
+        "name": "みん音色",
+        "subtitle": "中文台湾语",
+        "gender": "female",
+        "language": "zh-TW",
+        "style": "使用台湾同事真实声音克隆，当前待填写 voice_id 后可用",
+        "voice_id": os.getenv("VOICE_TAIWAN_CLONE", ""),
+        "default_speed": 1.1,
+        "default_volume": 1.0,
+        "tags": ["女声", "台湾", "克隆"],
+        "sample_text": "待填入 voice_id 后即可用于台湾市场配音。",
+        "enabled": bool(os.getenv("VOICE_TAIWAN_CLONE", "").strip()),
+        "availability_note": "待填写 voice_id 后可用",
+    },
+    {
         "id": "japanese_female",
         "name": "自然日语女声",
         "subtitle": "日语",
@@ -108,7 +129,7 @@ DEPARTMENTS = [
 
 TARGET_MARKETS = [
     {"id": "cn", "name": "中国市场", "content_language": "简体中文", "default_voice_preset_id": "mandarin_female"},
-    {"id": "tw", "name": "台湾市场", "content_language": "繁體中文", "default_voice_preset_id": "taiwan_female"},
+    {"id": "tw", "name": "台湾市场", "content_language": "繁體中文", "default_voice_preset_id": "mandarin_female"},
     {"id": "jp", "name": "日本市场", "content_language": "日语", "default_voice_preset_id": "japanese_female"},
 ]
 
@@ -156,6 +177,34 @@ USERS = {
         "department_id": "robotics",
         "target_market": "jp",
     },
+    "da": {
+        "password": "da123",
+        "role": "user",
+        "display_name": "da",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+}
+
+OMNIHUMAN_MAX_CONCURRENT = max(1, int(os.getenv("OMNIHUMAN_MAX_CONCURRENT", "1")))
+OMNIHUMAN_QUEUE_CONDITION = threading.Condition()
+OMNIHUMAN_WAITING_JOBS: list[dict] = []
+OMNIHUMAN_RUNNING_JOBS = 0
+OMNIHUMAN_RUNNING_ITEMS: list[dict] = []
+LIVE_EVENTS = deque(maxlen=120)
+COST_LEDGER_PATH = OUTPUT_DIR / "_cost_ledger.json"
+COST_LEDGER_LOCK = threading.Lock()
+COST_CURRENCY = "USD"
+FX_CNY_PER_USD = float(os.getenv("FX_CNY_PER_USD", "7.2"))
+COST_RULES = {
+    "script_generate": {"provider": "anthropic", "base": 0.006, "per_char": 0.000004, "web_search": 0.010, "input_token_rate": 0.000003, "output_token_rate": 0.000015, "cache_creation_token_rate": 0.00000375, "cache_read_token_rate": 0.0000003},
+    "script_revise": {"provider": "anthropic", "base": 0.003, "per_char": 0.000003, "web_search": 0.010, "input_token_rate": 0.000003, "output_token_rate": 0.000015, "cache_creation_token_rate": 0.00000375, "cache_read_token_rate": 0.0000003},
+    "tts_generate": {"provider": "minimax", "base": 0.0, "per_char": 0.0001, "per_second": 0.0},
+    "digital_human_generate": {"provider": "volc_omnihuman", "base": 0.0, "per_second": round(1.0 / FX_CNY_PER_USD, 6)},
+    "material_fetch": {"provider": "pexels", "base": 0.0, "per_segment": 0.0},
+    "tos_upload": {"provider": "volc_tos", "minimum": 0.0, "per_mb": 0.0},
+    "compose_video": {"provider": "ffmpeg", "base": 0.0, "per_second": 0.0},
 }
 
 AVATAR_STYLE_PROMPTS = [
@@ -174,6 +223,451 @@ class ProgressTracker:
         self.status = "running"
         self.result = None
 
+    def log(self, message: str, step: Optional[int] = None):
+        if step is not None:
+            self.step = step
+        self.messages.append(
+            {
+                "time": time.time(),
+                "message": message,
+                "step": self.step,
+                "total_steps": self.total_steps,
+            }
+        )
+
+    def finish(self, result: dict):
+        self.status = "done"
+        self.result = result
+        self.log("全部完成！", step=self.total_steps)
+
+    def fail(self, error: str):
+        self.status = "error"
+        self.log(f"出错了：{error}")
+
+
+def _omnihuman_queue_snapshot() -> dict:
+    with OMNIHUMAN_QUEUE_CONDITION:
+        running = [dict(item) for item in OMNIHUMAN_RUNNING_ITEMS]
+        waiting = [dict(item) for item in OMNIHUMAN_WAITING_JOBS]
+    return {
+        "max_concurrent": OMNIHUMAN_MAX_CONCURRENT,
+        "running_count": len(running),
+        "waiting_count": len(waiting),
+        "running": running,
+        "waiting": waiting,
+        "current_owner_username": running[0].get("owner_username") if running else "",
+        "current_owner_display_name": running[0].get("owner_display_name") if running else "",
+    }
+
+
+def _run_omnihuman_job(job_id: str, label: str, runner, tracker: Optional[ProgressTracker] = None):
+    global OMNIHUMAN_RUNNING_JOBS
+    task_key = str(job_id).split(':', 1)[0]
+    task = tasks.get(task_key, {}) if isinstance(tasks, dict) else {}
+    queue_item = {
+        "job_id": job_id,
+        "task_id": task_key,
+        "label": label,
+        "topic": task.get("topic", ""),
+        "mode": task.get("mode", "full"),
+        "owner_username": task.get("owner_username", ""),
+        "owner_display_name": task.get("owner_display_name") or task.get("owner_username") or "",
+        "created_at": task.get("created_at", time.time()),
+    }
+    waiting_logged = False
+    with OMNIHUMAN_QUEUE_CONDITION:
+        OMNIHUMAN_WAITING_JOBS.append(queue_item)
+        while True:
+            try:
+                ahead = next((idx for idx, item in enumerate(OMNIHUMAN_WAITING_JOBS) if item.get("job_id") == job_id), 0)
+            except ValueError:
+                ahead = 0
+            can_run = ahead == 0 and OMNIHUMAN_RUNNING_JOBS < OMNIHUMAN_MAX_CONCURRENT
+            if can_run:
+                OMNIHUMAN_WAITING_JOBS.pop(0)
+                OMNIHUMAN_RUNNING_JOBS += 1
+                OMNIHUMAN_RUNNING_ITEMS.append(queue_item)
+                break
+            if tracker and not waiting_logged:
+                tracker.log(f"{label}排队中，前方还有 {ahead} 个任务")
+                _push_live_event("omnihuman_waiting", f"{label}排队中，前方还有 {ahead} 个任务", task, {"label": label, "queue_ahead": ahead})
+                waiting_logged = True
+            OMNIHUMAN_QUEUE_CONDITION.wait(timeout=2)
+    try:
+        _push_live_event("omnihuman_running", f"{label}开始生成", task, {"label": label})
+        if tracker and waiting_logged:
+            tracker.log(f"{label}开始生成")
+        return runner()
+    finally:
+        _push_live_event("omnihuman_finished", f"{label}已结束处理", task, {"label": label})
+        with OMNIHUMAN_QUEUE_CONDITION:
+            OMNIHUMAN_RUNNING_JOBS = max(0, OMNIHUMAN_RUNNING_JOBS - 1)
+            OMNIHUMAN_RUNNING_ITEMS[:] = [item for item in OMNIHUMAN_RUNNING_ITEMS if item.get("job_id") != job_id]
+            OMNIHUMAN_QUEUE_CONDITION.notify_all()
+
+
+def _push_live_event(event_type: str, message: str, task: Optional[dict] = None, extra: Optional[dict] = None):
+    payload = {
+        "time": time.time(),
+        "type": event_type,
+        "message": message,
+        "owner_username": "",
+        "owner_display_name": "",
+        "topic": "",
+        "mode": "",
+    }
+    if task:
+        payload.update({
+            "owner_username": task.get("owner_username", ""),
+            "owner_display_name": task.get("owner_display_name") or task.get("owner_username") or "",
+            "topic": task.get("topic", ""),
+            "mode": task.get("mode", ""),
+        })
+    if extra:
+        payload.update(extra)
+    LIVE_EVENTS.appendleft(payload)
+
+
+def _recent_live_events(limit: int = 12) -> list[dict]:
+    return list(LIVE_EVENTS)[:limit]
+
+
+def _same_local_day(ts_a: float, ts_b: float) -> bool:
+    return time.strftime("%Y-%m-%d", time.localtime(float(ts_a or 0))) == time.strftime("%Y-%m-%d", time.localtime(float(ts_b or 0)))
+
+
+def _round_cost(value: float) -> float:
+    return round(float(value or 0.0), 4)
+
+
+def _empty_cost_summary() -> dict:
+    return {
+        "currency": COST_CURRENCY,
+        "estimated_total": 0.0,
+        "today_total": 0.0,
+        "month_total": 0.0,
+        "entry_count": 0,
+        "by_type": {},
+        "recent": [],
+    }
+
+
+def _load_cost_ledger() -> list[dict]:
+    if not COST_LEDGER_PATH.exists():
+        return []
+    try:
+        with open(COST_LEDGER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_cost_ledger(entries: list[dict]):
+    COST_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(COST_LEDGER_PATH, "w", encoding="utf-8") as f:
+        json.dump(entries, f, ensure_ascii=False, indent=2)
+
+
+def _append_cost_ledger_entry(entry: dict):
+    with COST_LEDGER_LOCK:
+        entries = _load_cost_ledger()
+        entries.append(entry)
+        _save_cost_ledger(entries)
+
+
+def _cost_label(event_type: str) -> str:
+    labels = {
+        "script_generate": "文案生成",
+        "script_revise": "AI改单段",
+        "tts_generate": "配音生成",
+        "digital_human_generate": "数字人生成",
+        "material_fetch": "素材匹配",
+        "tos_upload": "对象存储上传",
+        "compose_video": "自动成片",
+    }
+    return labels.get(event_type, event_type)
+
+
+def _estimate_script_cost(topic: str, script_data: Optional[dict] = None, web_search_enabled: bool = False, revise: bool = False, usage: Optional[dict] = None) -> float:
+    rule = COST_RULES["script_revise" if revise else "script_generate"]
+    usage = usage or {}
+    input_tokens = float(usage.get("input_tokens", 0) or 0)
+    output_tokens = float(usage.get("output_tokens", 0) or 0)
+    cache_creation_input_tokens = float(usage.get("cache_creation_input_tokens", 0) or 0)
+    cache_read_input_tokens = float(usage.get("cache_read_input_tokens", 0) or 0)
+    web_search_calls = float(usage.get("web_search_calls", 0) or 0)
+    if input_tokens or output_tokens or cache_creation_input_tokens or cache_read_input_tokens:
+        amount = (
+            input_tokens * rule.get("input_token_rate", 0)
+            + output_tokens * rule.get("output_token_rate", 0)
+            + cache_creation_input_tokens * rule.get("cache_creation_token_rate", 0)
+            + cache_read_input_tokens * rule.get("cache_read_token_rate", 0)
+        )
+        if web_search_enabled:
+            amount += max(1.0, web_search_calls) * rule.get("web_search", 0)
+        return _round_cost(amount)
+    chars = len(topic or "")
+    if script_data:
+        chars += len(json.dumps(script_data, ensure_ascii=False))
+    amount = rule["base"] + chars * rule["per_char"]
+    if web_search_enabled:
+        amount += rule["web_search"]
+    return _round_cost(amount)
+
+
+def _probe_media_duration(file_path: str) -> float:
+    if not file_path or not os.path.exists(file_path):
+        return 0.0
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            return max(0.0, float((result.stdout or "0").strip() or 0.0))
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _estimate_tts_cost(script_text: str, audio_path: str = "") -> float:
+    rule = COST_RULES["tts_generate"]
+    amount = rule.get("base", 0.0) + len(script_text or "") * rule.get("per_char", 0.0)
+    return _round_cost(amount)
+
+
+def _estimate_digital_human_cost(duration_seconds: float) -> float:
+    rule = COST_RULES["digital_human_generate"]
+    duration_seconds = max(1.0, float(duration_seconds or 0))
+    amount = rule["base"] + duration_seconds * rule["per_second"]
+    return _round_cost(amount)
+
+
+def _estimate_material_cost(material_segment_count: int) -> float:
+    return 0.0
+
+
+def _estimate_tos_upload_cost(file_path: str) -> float:
+    return 0.0
+
+
+def _estimate_compose_cost(total_duration: float) -> float:
+    return 0.0
+
+
+def _summarize_cost_entries(entries: list[dict]) -> dict:
+    summary = _empty_cost_summary()
+    if not entries:
+        return summary
+    now_ts = time.time()
+    today_key = time.strftime("%Y-%m-%d", time.localtime(now_ts))
+    month_key = time.strftime("%Y-%m", time.localtime(now_ts))
+    sorted_entries = sorted(entries, key=lambda row: float(row.get("time", 0) or 0), reverse=True)
+    summary["entry_count"] = len(sorted_entries)
+    summary["recent"] = sorted_entries[:8]
+    by_type = {}
+    total = 0.0
+    today_total = 0.0
+    month_total = 0.0
+    for entry in sorted_entries:
+        amount = _round_cost(entry.get("amount", 0.0))
+        total += amount
+        key = str(entry.get("event_type", ""))
+        by_type[key] = _round_cost(by_type.get(key, 0.0) + amount)
+        entry_ts = float(entry.get("time", 0) or 0)
+        if time.strftime("%Y-%m-%d", time.localtime(entry_ts)) == today_key:
+            today_total += amount
+        if time.strftime("%Y-%m", time.localtime(entry_ts)) == month_key:
+            month_total += amount
+    summary["estimated_total"] = _round_cost(total)
+    summary["today_total"] = _round_cost(today_total)
+    summary["month_total"] = _round_cost(month_total)
+    summary["by_type"] = by_type
+    return summary
+
+
+def _derived_cost_entry(*, event_type: str, amount: float, provider: str, owner_username: str, owner_display_name: str, owner_role: str, history_id: str, topic: str, entry_time: float, meta: Optional[dict] = None) -> dict:
+    return {
+        "time": float(entry_time or time.time()),
+        "event_type": event_type,
+        "label": _cost_label(event_type),
+        "provider": provider,
+        "currency": COST_CURRENCY,
+        "amount": _round_cost(amount),
+        "owner_username": owner_username or "admin",
+        "owner_display_name": owner_display_name or owner_username or "admin",
+        "owner_role": owner_role or "user",
+        "task_id": "",
+        "history_id": history_id,
+        "topic": topic or "",
+        "meta": meta or {},
+    }
+
+
+def _derive_cost_entries_for_result(output_dir: Optional[Path], result: dict) -> list[dict]:
+    existing = result.get("cost_entries") or []
+    if existing:
+        return existing
+
+    owner = _owner_summary(result)
+    owner_username = owner.get("owner_username") or "admin"
+    owner_display_name = owner.get("owner_display_name") or owner_username
+    owner_role = owner.get("owner_role") or "user"
+    history_id = output_dir.name if output_dir else ""
+    topic = result.get("topic", "")
+    workflow = result.get("workflow_config") or {}
+    segments = list(result.get("segments") or [])
+    base_time = float(result.get("created_at") or (output_dir.stat().st_mtime if output_dir and output_dir.exists() else time.time()))
+    entries = []
+    tick = 0.0
+
+    def add(event_type: str, amount: float, provider: str, meta: Optional[dict] = None):
+        nonlocal tick
+        if amount <= 0:
+            return
+        tick += 1.0
+        entries.append(
+            _derived_cost_entry(
+                event_type=event_type,
+                amount=amount,
+                provider=provider,
+                owner_username=owner_username,
+                owner_display_name=owner_display_name,
+                owner_role=owner_role,
+                history_id=history_id,
+                topic=topic,
+                entry_time=base_time + tick,
+                meta=meta,
+            )
+        )
+
+    add(
+        "script_generate",
+        _estimate_script_cost(topic, result, web_search_enabled=bool(workflow.get("web_search_enabled"))),
+        COST_RULES["script_generate"]["provider"],
+        {"scope": "history_backfill", "web_search_enabled": bool(workflow.get("web_search_enabled"))},
+    )
+
+    material_segments = [seg for seg in segments if seg.get("type") == "material"]
+    if material_segments:
+        add(
+            "material_fetch",
+            _estimate_material_cost(len(material_segments)),
+            COST_RULES["material_fetch"]["provider"],
+            {"scope": "history_backfill", "segment_count": len(material_segments)},
+        )
+
+    for index, seg in enumerate(segments, start=1):
+        script_text = seg.get("script", "")
+        audio_path = seg.get("audio_path", "")
+        if script_text or audio_path:
+            add(
+                "tts_generate",
+                _estimate_tts_cost(script_text, audio_path),
+                COST_RULES["tts_generate"]["provider"],
+                {"scope": "history_backfill", "segment_index": index, "audio_path": audio_path, "audio_duration": _probe_media_duration(audio_path)},
+            )
+        if seg.get("type") == "digital_human" and seg.get("video_path"):
+            video_duration = _probe_media_duration(seg.get("video_path", "")) or float(seg.get("duration", 0) or 0)
+            add(
+                "digital_human_generate",
+                _estimate_digital_human_cost(video_duration),
+                COST_RULES["digital_human_generate"]["provider"],
+                {"scope": "history_backfill", "segment_index": index, "video_path": seg.get("video_path", ""), "video_duration": video_duration},
+            )
+
+    if result.get("final_video_path"):
+        add(
+            "compose_video",
+            _estimate_compose_cost(result.get("total_duration", 0)),
+            COST_RULES["compose_video"]["provider"],
+            {"scope": "history_backfill", "final_video_path": result.get("final_video_path", "")},
+        )
+
+    return entries
+
+
+def _record_cost_entry(*, event_type: str, amount: float, provider: str, user: Optional[dict] = None, task: Optional[dict] = None, history_id: str = "", topic: str = "", meta: Optional[dict] = None) -> dict:
+    owner_username = ""
+    owner_display_name = ""
+    owner_role = "user"
+    task_id = ""
+    if task:
+        owner_username = task.get("owner_username", "")
+        owner_display_name = task.get("owner_display_name") or owner_username
+        owner_role = task.get("owner_role", "user")
+        task_id = task.get("id", "")
+        history_id = history_id or _history_id_from_output_dir(task.get("output_dir"))
+        topic = topic or task.get("topic", "")
+    elif user:
+        owner_username = user.get("username", "")
+        owner_display_name = user.get("display_name") or owner_username
+        owner_role = user.get("role", "user")
+    entry = {
+        "time": time.time(),
+        "event_type": event_type,
+        "label": _cost_label(event_type),
+        "provider": provider,
+        "currency": COST_CURRENCY,
+        "amount": _round_cost(amount),
+        "owner_username": owner_username,
+        "owner_display_name": owner_display_name,
+        "owner_role": owner_role,
+        "task_id": task_id,
+        "history_id": history_id,
+        "topic": topic,
+        "meta": meta or {},
+    }
+    _append_cost_ledger_entry(entry)
+    if task is not None:
+        task.setdefault("cost_entries", []).append(entry)
+        task["cost_summary"] = _summarize_cost_entries(task.get("cost_entries", []))
+        if task.get("result") is not None:
+            task["result"]["cost_entries"] = task.get("cost_entries", [])
+            task["result"]["cost_summary"] = task.get("cost_summary", _empty_cost_summary())
+    return entry
+
+
+def _record_history_cost(*, output_dir: Path, result: dict, user: Optional[dict], event_type: str, amount: float, provider: str, topic: str = "", meta: Optional[dict] = None) -> dict:
+    entry = _record_cost_entry(
+        event_type=event_type,
+        amount=amount,
+        provider=provider,
+        user=user,
+        history_id=output_dir.name,
+        topic=topic or result.get("topic", ""),
+        meta=meta,
+    )
+    result.setdefault("cost_entries", []).append(entry)
+    result["cost_summary"] = _summarize_cost_entries(result.get("cost_entries", []))
+    return entry
+
+
+def _list_cost_entries(current_user: Optional[dict], include_all: bool = False) -> list[dict]:
+    entries = _load_cost_ledger()
+    if include_all or (current_user and _is_admin(current_user)):
+        return sorted(entries, key=lambda row: float(row.get("time", 0) or 0), reverse=True)
+    if not current_user:
+        return []
+    username = current_user.get("username")
+    return sorted([entry for entry in entries if entry.get("owner_username") == username], key=lambda row: float(row.get("time", 0) or 0), reverse=True)
+
+
+def _build_cost_summary_payload(current_user: Optional[dict], include_all: bool = False) -> dict:
+    entries = _list_cost_entries(current_user, include_all=include_all)
+    summary = _summarize_cost_entries(entries)
+    summary["recent"] = summary.get("recent", [])[:10]
+    return summary
+
 
 def _public_user(username: str, profile: dict) -> dict:
     return {
@@ -184,6 +678,14 @@ def _public_user(username: str, profile: dict) -> dict:
         "department_id": profile.get("department_id", "real_estate"),
         "target_market": profile.get("target_market", "cn"),
     }
+
+
+def _parse_bool_form(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _get_current_user(request: Request) -> Optional[dict]:
@@ -218,10 +720,13 @@ def _user_can_access_task(user: Optional[dict], task: Optional[dict]) -> bool:
 
 
 def _owner_summary(result: dict) -> dict:
+    owner_username = result.get("owner_username") or "admin"
+    owner_display_name = result.get("owner_display_name") or ("管理员" if owner_username == "admin" else owner_username)
+    owner_role = result.get("owner_role") or ("admin" if owner_username == "admin" else "user")
     return {
-        "owner_username": result.get("owner_username"),
-        "owner_display_name": result.get("owner_display_name") or result.get("owner_username") or "",
-        "owner_role": result.get("owner_role", "user"),
+        "owner_username": owner_username,
+        "owner_display_name": owner_display_name,
+        "owner_role": owner_role,
     }
 
 
@@ -250,6 +755,148 @@ def _require_user(request: Request) -> tuple[Optional[dict], Optional[JSONRespon
     return user, None
 
 
+def _resolve_history_output_dir(history_id: str) -> Optional[Path]:
+    if not history_id:
+        return None
+    output_dir = OUTPUT_DIR / history_id
+    if output_dir.exists() and output_dir.is_dir():
+        return output_dir
+    return None
+
+
+def _load_result_from_output_dir(output_dir: Path) -> Optional[dict]:
+    result_path = Path(output_dir) / "result.json"
+    if not result_path.exists():
+        return None
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not result.get("cost_entries"):
+        result["cost_entries"] = _derive_cost_entries_for_result(output_dir, result)
+    if not result.get("cost_summary"):
+        result["cost_summary"] = _summarize_cost_entries(result.get("cost_entries", []))
+    return result
+
+
+def _find_live_task_id_for_output_dir(output_dir: str) -> str:
+    target = str(output_dir or "")
+    for task_id, task in tasks.items():
+        if str(task.get("output_dir") or "") == target:
+            return task_id
+    return ""
+
+
+def _persist_task_result(task: dict):
+    output_dir = task.get("output_dir")
+    result = task.get("result")
+    if not output_dir or not result:
+        return
+    path = Path(output_dir) / "result.json"
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+def _build_file_entries(output_dir: str) -> list[dict]:
+    base = Path(output_dir)
+    entries = []
+    if not base.exists():
+        return entries
+    for path in sorted(base.rglob('*')):
+        if path.is_file():
+            rel = path.relative_to(base).as_posix()
+            entries.append({
+                "path": rel,
+                "name": path.name,
+                "size": path.stat().st_size,
+            })
+    return entries
+
+
+def _serialize_segment(output_dir: str, topic: str, seg: dict, index: int) -> dict:
+    data = dict(seg)
+    data["index"] = index + 1
+    return data
+
+
+def _serialize_result_for_ui(output_dir: str, result: dict, topic: str) -> dict:
+    payload = dict(result)
+    payload["topic"] = topic or payload.get("topic", "")
+    payload["output_dir"] = output_dir
+    payload["files"] = _build_file_entries(output_dir) if output_dir else []
+    payload["cost_entries"] = payload.get("cost_entries") or _derive_cost_entries_for_result(Path(output_dir) if output_dir else None, payload)
+    payload["cost_summary"] = payload.get("cost_summary") or _summarize_cost_entries(payload.get("cost_entries", []))
+    return payload
+
+
+def _build_script_preview_payload(script_data: dict, topic: str, web_search_enabled: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> dict:
+    payload = dict(script_data or {})
+    payload["topic"] = topic or payload.get("topic", "")
+    payload["web_search_enabled"] = bool(web_search_enabled)
+    payload["target_market"] = target_market or payload.get("target_market", "cn")
+    payload["department_id"] = department_id or payload.get("department_id", "real_estate")
+
+    segments = []
+    total_duration = 0.0
+    for index, seg in enumerate(payload.get("segments", []) or []):
+        item = dict(seg or {})
+        item["index"] = index + 1
+        item["type"] = item.get("type", "material")
+        item["script"] = item.get("script", "")
+        item["action"] = item.get("action", "")
+        item["material_keyword"] = item.get("material_keyword", "")
+        item["material_desc"] = item.get("material_desc", "")
+        item["material_search_keyword"] = item.get("material_search_keyword", "")
+        item["reference_links"] = item.get("reference_links") or []
+
+        for field in ("start", "end", "duration"):
+            raw = item.get(field, 0)
+            try:
+                numeric = float(raw or 0)
+            except (TypeError, ValueError):
+                numeric = 0.0
+            item[field] = int(numeric) if numeric.is_integer() else round(numeric, 2)
+
+        total_duration = max(total_duration, float(item.get("end", 0) or 0))
+        segments.append(item)
+
+    payload["segments"] = segments
+    payload["segment_count"] = len(segments)
+    if not payload.get("total_duration"):
+        payload["total_duration"] = int(total_duration) if float(total_duration).is_integer() else round(total_duration, 2)
+    payload["social_post"] = payload.get("social_post", "")
+    payload["title"] = payload.get("title", "")
+    payload["cover_title"] = payload.get("cover_title", "")
+    return payload
+
+
+def _list_history_items(user: Optional[dict], include_all: bool = False) -> list[dict]:
+    items = []
+    if not OUTPUT_DIR.exists():
+        return items
+    for output_dir in sorted([p for p in OUTPUT_DIR.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
+        result = _load_result_from_output_dir(output_dir)
+        if not result:
+            continue
+        if not include_all and not _history_visible_to_user(result, user):
+            continue
+        cost_summary = result.get("cost_summary") or _summarize_cost_entries(result.get("cost_entries", []))
+        owner = _owner_summary(result)
+        items.append({
+            "id": output_dir.name,
+            "history_id": output_dir.name,
+            "topic": result.get("topic", ""),
+            "title": result.get("title", ""),
+            "cover_title": result.get("cover_title", ""),
+            "segment_count": int(result.get("segment_count", len(result.get("segments", [])) or 0) or 0),
+            "total_duration": int(float(result.get("total_duration", 0) or 0)),
+            "created_at": int(output_dir.stat().st_mtime),
+            "estimated_cost_total": _round_cost(cost_summary.get("estimated_total", 0.0)),
+            "cost_currency": cost_summary.get("currency", COST_CURRENCY),
+            **owner,
+        })
+    return items
+
+
 def _resolve_history_for_user(history_id: str, user: Optional[dict]) -> tuple[Optional[Path], Optional[dict], Optional[JSONResponse]]:
     output_dir = _resolve_history_output_dir(history_id)
     if not output_dir:
@@ -262,7 +909,118 @@ def _resolve_history_for_user(history_id: str, user: Optional[dict]) -> tuple[Op
     return output_dir, result, None
 
 
+def _list_avatar_options() -> list[dict]:
+    items = []
+    for path in sorted(ASSETS_DIR.iterdir() if ASSETS_DIR.exists() else []):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            continue
+        items.append({
+            "id": path.name,
+            "name": AVATAR_DISPLAY_NAME_MAP.get(path.name, path.stem),
+            "image_url": f"/public/assets/{path.name}",
+            "filename": path.name,
+        })
+    return items
+
+
+def _build_admin_live_status() -> dict:
+    queue = _omnihuman_queue_snapshot()
+    users = []
+    active_tasks = []
+    completed_today = 0
+    now_ts = time.time()
+    for item in _list_history_items(None, include_all=True):
+        created_at = float(item.get("created_at", 0) or 0)
+        if _same_local_day(created_at, now_ts):
+            completed_today += 1
+    for username, profile in USERS.items():
+        display_name = profile.get("display_name", username)
+        current_task = None
+        for task in tasks.values():
+            if task.get("owner_username") == username and task.get("tracker") and task["tracker"].status == "running":
+                current_task = task
+                break
+        status = "空闲"
+        detail = ""
+        current_topic = ""
+        if current_task:
+            current_topic = current_task.get("topic", "")
+            detail = current_task.get("tracker").messages[-1]["message"] if current_task.get("tracker").messages else "处理中"
+            status = "任务处理中"
+            waiting_hit = next((item for item in queue.get("waiting", []) if item.get("owner_username") == username), None)
+            running_hit = next((item for item in queue.get("running", []) if item.get("owner_username") == username), None)
+            if running_hit:
+                status = "数字人生成中"
+            elif waiting_hit:
+                status = "数字人排队中"
+        users.append({
+            "username": username,
+            "display_name": display_name,
+            "status": status,
+            "detail": detail,
+            "current_topic": current_topic,
+        })
+        if current_task:
+            tracker = current_task.get("tracker")
+            active_tasks.append({
+                "task_id": current_task.get("id", ""),
+                "topic": current_task.get("topic", ""),
+                "owner_username": username,
+                "owner_display_name": display_name,
+                "mode_label": "完整生产" if current_task.get("mode") == "full" else "测试",
+                "step": getattr(tracker, "step", 0),
+                "total_steps": getattr(tracker, "total_steps", 0),
+                "latest_message": tracker.messages[-1]["message"] if tracker and tracker.messages else "处理中",
+            })
+    return {
+        "summary": {
+            "running_task_count": len(active_tasks),
+            "waiting_queue_count": queue.get("waiting_count", 0),
+            "current_owner_username": queue.get("current_owner_username", ""),
+            "current_owner_display_name": queue.get("current_owner_display_name", ""),
+            "completed_today": completed_today,
+        },
+        "queue": queue,
+        "users": users,
+        "active_tasks": active_tasks,
+        "recent_events": _recent_live_events(),
+    }
+
+
 def _build_admin_stats() -> dict:
+    histories = []
+    derived_entries = []
+    for output_dir in sorted([p for p in OUTPUT_DIR.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True) if OUTPUT_DIR.exists() else []:
+        result = _load_result_from_output_dir(output_dir)
+        if not result:
+            continue
+        histories.append(result)
+        derived_entries.extend(result.get("cost_entries") or _derive_cost_entries_for_result(output_dir, result))
+
+    cost_entries = derived_entries or _list_cost_entries(None, include_all=True)
+    now_ts = time.time()
+    cost_by_user = {}
+    by_type_total = {}
+    by_type_today = {}
+    by_type_month = {}
+    for entry in cost_entries:
+        username = entry.get("owner_username") or "admin"
+        bucket = cost_by_user.setdefault(username, {"estimated_cost_total": 0.0, "today_total": 0.0, "month_total": 0.0, "by_type": {}})
+        amount = _round_cost(entry.get("amount", 0.0))
+        event_type = str(entry.get("event_type", "") or "unknown")
+        bucket["estimated_cost_total"] = _round_cost(bucket["estimated_cost_total"] + amount)
+        bucket["by_type"][event_type] = _round_cost(bucket["by_type"].get(event_type, 0.0) + amount)
+        by_type_total[event_type] = _round_cost(by_type_total.get(event_type, 0.0) + amount)
+        entry_ts = float(entry.get("time", 0) or 0)
+        if _same_local_day(entry_ts, now_ts):
+            bucket["today_total"] = _round_cost(bucket["today_total"] + amount)
+            by_type_today[event_type] = _round_cost(by_type_today.get(event_type, 0.0) + amount)
+        if time.strftime("%Y-%m", time.localtime(entry_ts)) == time.strftime("%Y-%m", time.localtime(now_ts)):
+            bucket["month_total"] = _round_cost(bucket["month_total"] + amount)
+            by_type_month[event_type] = _round_cost(by_type_month.get(event_type, 0.0) + amount)
+
     summaries = {
         username: {
             "username": username,
@@ -270,835 +1028,56 @@ def _build_admin_stats() -> dict:
             "role": profile.get("role", "user"),
             "count": 0,
             "histories": [],
+            "estimated_cost_total": _round_cost(cost_by_user.get(username, {}).get("estimated_cost_total", 0.0)),
+            "today_total": _round_cost(cost_by_user.get(username, {}).get("today_total", 0.0)),
+            "month_total": _round_cost(cost_by_user.get(username, {}).get("month_total", 0.0)),
+            "by_type": dict(sorted((cost_by_user.get(username, {}).get("by_type") or {}).items(), key=lambda kv: kv[1], reverse=True)),
         }
         for username, profile in USERS.items()
     }
-    unassigned = []
     for item in _list_history_items(None, include_all=True):
-        owner_username = item.get("owner_username")
-        if owner_username and owner_username in summaries:
-            summaries[owner_username]["count"] += 1
-            summaries[owner_username]["histories"].append(item)
-        else:
-            unassigned.append(item)
-    return {
-        "users": sorted(summaries.values(), key=lambda row: (-row.get("count", 0), row.get("username", ""))),
-        "unassigned": unassigned,
-        "total_count": sum(row.get("count", 0) for row in summaries.values()) + len(unassigned),
-    }
-
-    def log(self, message: str, step: Optional[int] = None):
-        if step is not None:
-            self.step = step
-        self.messages.append(
-            {
-                "time": time.time(),
-                "message": message,
-                "step": self.step,
-                "total_steps": self.total_steps,
+        owner_username = item.get("owner_username") or "admin"
+        if owner_username not in summaries:
+            summaries[owner_username] = {
+                "username": owner_username,
+                "display_name": item.get("owner_display_name") or owner_username,
+                "role": item.get("owner_role", "user"),
+                "count": 0,
+                "histories": [],
+                "estimated_cost_total": _round_cost(cost_by_user.get(owner_username, {}).get("estimated_cost_total", 0.0)),
+                "today_total": _round_cost(cost_by_user.get(owner_username, {}).get("today_total", 0.0)),
+                "month_total": _round_cost(cost_by_user.get(owner_username, {}).get("month_total", 0.0)),
+                "by_type": dict(sorted((cost_by_user.get(owner_username, {}).get("by_type") or {}).items(), key=lambda kv: kv[1], reverse=True)),
             }
-        )
-
-    def finish(self, result: dict):
-        self.status = "done"
-        self.result = result
-        self.log("全部完成！", step=self.total_steps)
-
-    def fail(self, error: str):
-        self.status = "error"
-        self.log(f"出错了：{error}")
-
-
-def _make_safe_name(value: str, fallback: str = "task") -> str:
-    safe = "".join(c for c in value[:20] if c.isalnum() or c in "，。_-")
-    return safe or fallback
-
-
-def _create_output_dir(prefix: str, label: str) -> str:
-    timestamp = int(time.time())
-    safe_label = _make_safe_name(label, fallback=prefix)
-    output_dir = str(OUTPUT_DIR / f"{timestamp}_{prefix}_{safe_label}")
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
-
-
-def _normalize_public_base_url(value: str) -> str:
-    return value.rstrip("/")
-
-
-def _get_public_base_url(request: Request) -> str:
-    env_url = os.getenv("PUBLIC_BASE_URL")
-    if env_url:
-        return _normalize_public_base_url(env_url)
-
-    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    forwarded_host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
-    return _normalize_public_base_url(f"{forwarded_proto}://{forwarded_host}")
-
-
-def _parse_bool_form(value: Optional[str]) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'on'}
-
-
-def _resolve_local_file(file_path: str) -> Optional[Path]:
-    if not file_path:
-        return None
-
-    path = Path(file_path)
-    if not path.is_absolute():
-        path = (BASE_DIR / path).resolve()
-    else:
-        path = path.resolve()
-    return path if path.exists() else None
-
-
-def _history_id_from_output_dir(output_dir: Optional[str]) -> str:
-    if not output_dir:
-        return ""
-    return Path(output_dir).resolve().name
-
-
-def _resolve_history_output_dir(history_id: str) -> Optional[Path]:
-    if not history_id:
-        return None
-    output_root = OUTPUT_DIR.resolve()
-    candidate = (output_root / history_id).resolve()
-    if not str(candidate).startswith(str(output_root)):
-        return None
-    if not candidate.exists() or not candidate.is_dir():
-        return None
-    return candidate
-
-
-def _find_live_task_id_for_output_dir(output_dir: Optional[str]) -> Optional[str]:
-    history_id = _history_id_from_output_dir(output_dir)
-    if not history_id:
-        return None
-    for task_id, task in tasks.items():
-        if _history_id_from_output_dir(task.get("output_dir")) == history_id:
-            return task_id
-    return None
-
-
-def _load_result_from_output_dir(output_dir: Path) -> Optional[dict]:
-    result_path = output_dir / 'result.json'
-    if not result_path.exists():
-        return None
-    with open(result_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-
-def _build_media_item(output_dir: Optional[str], file_path: str) -> Optional[dict]:
-    resolved = _resolve_local_file(file_path)
-    if not resolved:
-        return None
-
-    output_root = Path(output_dir).resolve() if output_dir else None
-    if output_root and str(resolved).startswith(str(output_root)):
-        rel_path = resolved.relative_to(output_root).as_posix()
-        history_id = output_root.name
-        return {
-            "name": resolved.name,
-            "path": rel_path,
-            "url": f"/api/history/{history_id}/download/{rel_path}",
-        }
-
-    assets_root = ASSETS_DIR.resolve()
-    if str(resolved).startswith(str(assets_root)):
-        rel_path = resolved.relative_to(assets_root).as_posix()
-        return {
-            "name": resolved.name,
-            "path": rel_path,
-            "url": f"/public/assets/{rel_path}",
-        }
-
-    return None
-
-
-def _fetch_news_reference_links(query: str, max_items: int = 3) -> list[dict]:
-    if not query:
-        return []
-
-    feed_url = (
-        "https://news.google.com/rss/search?"
-        f"q={quote_plus(query[:180])}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
-    )
-
-    try:
-        response = requests.get(
-            feed_url,
-            timeout=10,
-            headers={"User-Agent": "Mozilla/5.0 iHouse Content Studio"},
-        )
-        response.raise_for_status()
-        root = ET.fromstring(response.content)
-    except Exception:
-        return []
-
-    items = []
-    for item in root.findall('.//item')[:max_items]:
-        title = (item.findtext('title') or '').strip()
-        url = (item.findtext('link') or '').strip()
-        pub_date = (item.findtext('pubDate') or '').strip()
-        source = ''
-        source_node = item.find('source')
-        if source_node is not None and source_node.text:
-            source = source_node.text.strip()
-        if not source and ' - ' in title:
-            parts = title.rsplit(' - ', 1)
-            if len(parts) == 2:
-                title, source = parts[0].strip(), parts[1].strip()
-        if not title or not url:
-            continue
-        items.append({
-            'title': title,
-            'url': url,
-            'source': source,
-            'published_at': pub_date,
+        summaries[owner_username]["count"] += 1
+        summaries[owner_username]["histories"].append(item)
+    cost_breakdown = []
+    for event_type, amount in sorted(by_type_total.items(), key=lambda kv: kv[1], reverse=True):
+        cost_breakdown.append({
+            "event_type": event_type,
+            "label": _cost_label(event_type),
+            "estimated_total": _round_cost(amount),
+            "today_total": _round_cost(by_type_today.get(event_type, 0.0)),
+            "month_total": _round_cost(by_type_month.get(event_type, 0.0)),
         })
-    return items
-
-
-def _build_material_reference_links(topic: str, seg: dict) -> list[dict]:
-    keyword = (seg.get("material_keyword") or "").strip()
-    desc = (seg.get("material_desc") or "").strip()
-    script = (seg.get("script") or "").strip()
-
-    query_parts = []
-    for value in (keyword, desc, script, topic.strip() if topic else ""):
-        if value and value not in query_parts:
-            query_parts.append(value)
-
-    query = " ".join(query_parts[:3]).strip()
-    if not query:
-        return []
-
-    return _fetch_news_reference_links(query)
-
-
-def _serialize_segment(output_dir: Optional[str], topic: str, seg: dict, index: int) -> dict:
     return {
-        "index": index + 1,
-        "type": seg.get("type", ""),
-        "start": seg.get("start", 0),
-        "end": seg.get("end", 0),
-        "duration": seg.get("duration", 0),
-        "script": seg.get("script", ""),
-        "action": seg.get("action", ""),
-        "material_keyword": seg.get("material_keyword", ""),
-        "material_search_keyword": seg.get("material_search_keyword", ""),
-        "material_desc": seg.get("material_desc", ""),
-        "reference_links": _build_material_reference_links(topic, seg) if seg.get("type") == "material" else [],
-        "audio": _build_media_item(output_dir, seg.get("audio_path")),
-        "video": _build_media_item(output_dir, seg.get("video_path")),
-        "materials": [
-            item for item in (_build_media_item(output_dir, path) for path in seg.get("material_paths", [])) if item
-        ],
+        "users": sorted(summaries.values(), key=lambda row: (-row.get("count", 0), -row.get("estimated_cost_total", 0.0), row.get("username", ""))),
+        "cost_breakdown": cost_breakdown,
+        "unassigned": [],
+        "currency": COST_CURRENCY,
+        "total_count": sum(row.get("count", 0) for row in summaries.values()),
+        "total_estimated_cost": _round_cost(sum(row.get("estimated_cost_total", 0.0) for row in summaries.values())),
     }
-
-
-def _serialize_result_for_ui(output_dir: Optional[str], result: dict, topic: str = "") -> dict:
-    payload = dict(result)
-    payload.update(_owner_summary(result))
-    history_id = _history_id_from_output_dir(output_dir)
-    payload["history_id"] = history_id
-    payload["live_task_id"] = _find_live_task_id_for_output_dir(output_dir)
-    payload["segments"] = [
-        _serialize_segment(output_dir, topic or payload.get("topic", ""), seg, index)
-        for index, seg in enumerate(result.get("segments", []))
-    ]
-    payload["audio"] = _build_media_item(output_dir, result.get("audio_path"))
-    payload["video"] = _build_media_item(output_dir, result.get("video_path"))
-    payload["image"] = _build_media_item(output_dir, result.get("image_path"))
-    payload["final_video"] = _build_media_item(output_dir, result.get("final_video_path"))
-    payload["cover_image"] = _build_media_item(output_dir, result.get("cover_image_path"))
-    payload["subtitle_file"] = _build_media_item(output_dir, result.get("subtitle_path"))
-    return payload
-
-
-def _get_avatar_image_path_for_task(task: dict) -> str:
-    workflow_config = task.get("workflow_config", {}) or {}
-    avatar_id = workflow_config.get("avatar_id")
-    avatar_option = _get_avatar_option(avatar_id)
-    if avatar_option and avatar_option.get("image_path"):
-        return avatar_option["image_path"]
-    return task.get("image_path", "")
-
-
-def _get_avatar_prompt_for_task(task: dict) -> str:
-    workflow_config = task.get("workflow_config", {}) or {}
-    avatar_id = workflow_config.get("avatar_id")
-    avatar_option = _get_avatar_option(avatar_id)
-    if avatar_option:
-        return avatar_option.get("style_prompt", "")
-    return ""
-
-
-def _persist_task_result(task: dict):
-    output_dir = task.get("output_dir")
-    result = task.get("result")
-    if not output_dir or not result:
-        return
-    _attach_owner_metadata(result, {
-        "username": task.get("owner_username"),
-        "display_name": task.get("owner_display_name"),
-        "role": task.get("owner_role", "user"),
-    } if task.get("owner_username") else None)
-    with open(os.path.join(output_dir, "result.json"), "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
-
-def _sync_live_task_result(output_dir: Optional[str], result: dict):
-    live_task_id = _find_live_task_id_for_output_dir(output_dir)
-    if live_task_id and live_task_id in tasks:
-        tasks[live_task_id]["result"] = result
-
-
-def _bundle_root_name(history_id: str, result: dict) -> str:
-    base = _make_safe_name(result.get("topic") or result.get("title") or history_id, fallback="content_bundle")
-    return f"{history_id}_{base}"
-
-
-def _build_timeline_rows(result: dict) -> list[dict]:
-    rows = []
-    for index, seg in enumerate(result.get("segments", []), start=1):
-        materials = []
-        for material_index, material_path in enumerate(seg.get("material_paths", []) or [], start=1):
-            ext = Path(material_path).suffix or ".jpg"
-            materials.append(f"{index:02d}_material_{material_index:02d}{ext}")
-        row = {
-            "index": index,
-            "type": seg.get("type", ""),
-            "start": seg.get("start", 0),
-            "end": seg.get("end", 0),
-            "duration": seg.get("duration", 0),
-            "script": seg.get("script", ""),
-            "action": seg.get("action", ""),
-            "material_keyword": seg.get("material_keyword", ""),
-            "material_desc": seg.get("material_desc", ""),
-            "audio_file": f"{index:02d}_{seg.get('type', 'segment')}.mp3" if seg.get("audio_path") else "",
-            "video_file": f"{index:02d}_digital_human.mp4" if seg.get("video_path") else "",
-            "material_files": "|".join(materials),
-        }
-        rows.append(row)
-    return rows
-
-
-def _build_readme_text(result: dict, history_id: str) -> str:
-    lines = [
-        "iHouse 剪辑交付包",
-        "=" * 40,
-        f"任务ID：{history_id}",
-        f"选题：{result.get('topic', '')}",
-        f"标题：{result.get('title', '')}",
-        f"封面标题：{result.get('cover_title', '')}",
-        f"总时长：{result.get('total_duration', 0)}秒",
-        f"段落数量：{len(result.get('segments', []))}",
-        "",
-        "文件夹说明",
-        "- 01_脚本：脚本与时间轴说明",
-        "- 02_配音：按段落顺序命名的配音文件",
-        "- 03_数字人视频：按段落顺序命名的数字人视频",
-        "- 04_素材：按段落顺序命名的素材图片",
-        "- 05_SNS：SNS 文案",
-        "- 06_剪辑时间轴数据：timeline.csv，可直接对应剪辑软件时间轴",
-        "",
-        "段落顺序说明",
-    ]
-    for row in _build_timeline_rows(result):
-        lines.append(f"第{row['index']}段 | {row['type']} | {row['start']}s-{row['end']}s | {row['duration']}s")
-        if row['audio_file']:
-            lines.append(f"  配音：{row['audio_file']}")
-        if row['video_file']:
-            lines.append(f"  数字人视频：{row['video_file']}")
-        if row['material_files']:
-            lines.append(f"  素材：{row['material_files']}")
-        if row['action']:
-            lines.append(f"  动作提示：{row['action']}")
-        if row['material_keyword'] or row['material_desc']:
-            lines.append(f"  素材说明：{row['material_keyword']} {row['material_desc']}")
-        lines.append(f"  文案：{row['script']}")
-        lines.append("")
-    return "\n".join(lines).strip() + "\n"
-
-
-def _build_timeline_csv_bytes(result: dict) -> bytes:
-    import io
-    buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=[
-        "index", "type", "start", "end", "duration", "script", "action",
-        "material_keyword", "material_desc", "audio_file", "video_file", "material_files"
-    ])
-    writer.writeheader()
-    for row in _build_timeline_rows(result):
-        writer.writerow(row)
-    return buffer.getvalue().encode("utf-8-sig")
-
-
-def _build_history_bundle_zip(output_dir: Path, result: dict) -> Path:
-    history_id = output_dir.name
-    bundle_path = Path('/tmp') / f"{history_id}_bundle.zip"
-    root = _bundle_root_name(history_id, result)
-    with zipfile.ZipFile(bundle_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{root}/00_项目说明/README.txt", _build_readme_text(result, history_id))
-        zf.writestr(f"{root}/06_剪辑时间轴数据/timeline.csv", _build_timeline_csv_bytes(result))
-
-        script_json = output_dir / 'script.json'
-        if script_json.exists():
-            zf.write(script_json, f"{root}/01_脚本/script.json")
-        script_readable = output_dir / 'script_readable.txt'
-        if script_readable.exists():
-            zf.write(script_readable, f"{root}/01_脚本/script_readable.txt")
-
-        social_posts = output_dir / 'social_posts.txt'
-        if social_posts.exists():
-            zf.write(social_posts, f"{root}/05_SNS/social_posts.txt")
-
-        final_video = _resolve_local_file(result.get("final_video_path"))
-        if final_video and final_video.exists():
-            zf.write(final_video, f"{root}/07_成片/final_video{final_video.suffix or '.mp4'}")
-        cover_image = _resolve_local_file(result.get("cover_image_path"))
-        if cover_image and cover_image.exists():
-            zf.write(cover_image, f"{root}/07_成片/cover{cover_image.suffix or '.jpg'}")
-        subtitle_file = _resolve_local_file(result.get("subtitle_path"))
-        if subtitle_file and subtitle_file.exists():
-            zf.write(subtitle_file, f"{root}/07_成片/timeline_subtitles{subtitle_file.suffix or '.srt'}")
-
-        for index, seg in enumerate(result.get("segments", []), start=1):
-            audio_path = _resolve_local_file(seg.get("audio_path"))
-            if audio_path and audio_path.exists():
-                zf.write(audio_path, f"{root}/02_配音/{index:02d}_{seg.get('type', 'segment')}.mp3")
-
-            video_path = _resolve_local_file(seg.get("video_path"))
-            if video_path and video_path.exists():
-                zf.write(video_path, f"{root}/03_数字人视频/{index:02d}_digital_human{video_path.suffix or '.mp4'}")
-
-            for material_index, material_path in enumerate(seg.get("material_paths", []) or [], start=1):
-                resolved = _resolve_local_file(material_path)
-                if not resolved or not resolved.exists():
-                    continue
-                zf.write(resolved, f"{root}/04_素材/{index:02d}_material_{material_index:02d}{resolved.suffix or '.jpg'}")
-    return bundle_path
-
-
-def _build_file_entries(output_dir: str) -> list[dict]:
-    history_id = _history_id_from_output_dir(output_dir)
-    files = []
-    for root, _, filenames in os.walk(output_dir):
-        for fname in filenames:
-            full_path = os.path.join(root, fname)
-            rel_path = os.path.relpath(full_path, output_dir)
-            files.append({
-                "name": fname,
-                "path": rel_path,
-                "size": os.path.getsize(full_path),
-                "url": f"/api/history/{history_id}/download/{Path(rel_path).as_posix()}",
-            })
-    files.sort(key=lambda item: item["path"])
-    return files
-
-
-def _build_history_item_from_output_dir(output_dir: Path, current_user: Optional[dict] = None) -> Optional[dict]:
-    result = _load_result_from_output_dir(output_dir)
-    if not result:
-        return None
-    if not _history_visible_to_user(result, current_user) and current_user is not None:
-        return None
-    history_id = output_dir.name
-    created_at = output_dir.stat().st_mtime
-    try:
-        created_at = float(history_id.split('_', 1)[0])
-    except (ValueError, IndexError):
-        pass
-    return {
-        "id": history_id,
-        "history_id": history_id,
-        "topic": result.get("topic", ""),
-        "title": result.get("title", ""),
-        "cover_title": result.get("cover_title", ""),
-        "segment_count": len(result.get("segments", [])),
-        "total_duration": result.get("total_duration", 0),
-        "mode": result.get("mode", "full"),
-        "created_at": created_at,
-        "live_task_id": _find_live_task_id_for_output_dir(str(output_dir)),
-        **_owner_summary(result),
-    }
-
-
-def _list_history_items(current_user: Optional[dict], include_all: bool = False) -> list[dict]:
-    items = []
-    if OUTPUT_DIR.exists():
-        for child in OUTPUT_DIR.iterdir():
-            if not child.is_dir():
-                continue
-            item = _build_history_item_from_output_dir(child, None if include_all else current_user)
-            if item:
-                items.append(item)
-    items.sort(key=lambda item: item.get("created_at", 0), reverse=True)
-    return items
-
-
-def _guess_avatar_layout(total_images: int, index: int) -> dict:
-    prompt = AVATAR_STYLE_PROMPTS[min(index, len(AVATAR_STYLE_PROMPTS) - 1)]
-    return {
-        "id": f"avatar_{index + 1}",
-        "style_prompt": prompt,
-    }
-
-
-def _list_avatar_options() -> list[dict]:
-    image_paths = sorted(
-        path for path in ASSETS_DIR.iterdir()
-        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-    )
-    options = []
-    total = len(image_paths)
-    for index, image_path in enumerate(image_paths):
-        meta = _guess_avatar_layout(total, index)
-        options.append(
-            {
-                "id": meta["id"],
-                "image_url": f"/public/assets/{image_path.name}",
-                "image_path": str(image_path),
-                "style_prompt": meta["style_prompt"],
-            }
-        )
-    return options
-
-
-def _get_target_market(target_market_id: Optional[str]) -> dict:
-    if target_market_id:
-        for market in TARGET_MARKETS:
-            if market["id"] == target_market_id:
-                return dict(market)
-    return dict(TARGET_MARKETS[0])
-
-
-def _get_department(department_id: Optional[str]) -> dict:
-    if department_id:
-        for department in DEPARTMENTS:
-            if department["id"] == department_id:
-                return dict(department)
-    return dict(DEPARTMENTS[0])
-
-
-def _get_voice_preset(voice_preset_id: Optional[str], target_market_id: Optional[str] = None) -> dict:
-    if voice_preset_id:
-        for preset in VOICE_PRESETS:
-            if preset["id"] == voice_preset_id:
-                return dict(preset)
-    target_market = _get_target_market(target_market_id)
-    default_id = target_market.get("default_voice_preset_id")
-    if default_id:
-        for preset in VOICE_PRESETS:
-            if preset["id"] == default_id:
-                return dict(preset)
-    return dict(VOICE_PRESETS[0])
-
-
-def _get_avatar_option(avatar_id: Optional[str]) -> Optional[dict]:
-    avatars = _list_avatar_options()
-    if not avatars:
-        return None
-    if avatar_id:
-        for avatar in avatars:
-            if avatar["id"] == avatar_id:
-                return avatar
-    return avatars[0]
-
-
-def _build_script_preview_payload(script_data: dict, topic: str = "", web_search_enabled: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> dict:
-    segments = []
-    for index, seg in enumerate(script_data.get("segments", []), start=1):
-        segments.append(
-            {
-                "index": index,
-                "type": seg.get("type", ""),
-                "start": seg.get("start", 0),
-                "end": seg.get("end", 0),
-                "duration": seg.get("duration", 0),
-                "script": seg.get("script", ""),
-                "action": seg.get("action", ""),
-                "material_keyword": seg.get("material_keyword", ""),
-                "material_search_keyword": seg.get("material_search_keyword", ""),
-                "material_desc": seg.get("material_desc", ""),
-                "reference_links": _build_material_reference_links(topic, seg) if seg.get("type") == "material" else [],
-            }
-        )
-    return {
-        "title": script_data.get("title", ""),
-        "cover_title": script_data.get("cover_title", ""),
-        "total_duration": script_data.get("total_duration", 0),
-        "segment_count": len(segments),
-        "segments": segments,
-        "social_post": _get_social_post(script_data, target_market),
-        "web_search_enabled": web_search_enabled,
-        "target_market": target_market,
-        "department_id": department_id,
-    }
-
-
-def _get_social_post(script_data: dict, target_market: str = "cn") -> str:
-    social_post = script_data.get("social_post", "")
-    if social_post:
-        return social_post
-    if target_market == "tw":
-        return script_data.get("facebook_post", "") or script_data.get("xiaohongshu_post", "")
-    if target_market == "jp":
-        return script_data.get("social_post", "") or script_data.get("facebook_post", "") or script_data.get("xiaohongshu_post", "")
-    return script_data.get("xiaohongshu_post", "") or script_data.get("facebook_post", "")
-
-
-def _combine_prompt(avatar_prompt: str, segment_action: str) -> str:
-    parts = [part.strip() for part in [avatar_prompt, segment_action] if part and part.strip()]
-    return "。".join(parts)
-
-
-def _save_readable_script(script_data: dict, output_path: str):
-    lines = []
-    lines.append(f"标题：{script_data.get('title', '')}")
-    lines.append(f"封面：{script_data.get('cover_title', '')}")
-    lines.append(f"总时长：{script_data.get('total_duration', 0)}秒")
-    lines.append("\n" + "=" * 50)
-    lines.append("【播报稿+时间轴】")
-    lines.append("=" * 50)
-    for seg in script_data.get("segments", []):
-        seg_type = "数字人" if seg.get("type") == "digital_human" else "素材"
-        lines.append(f"\n【{seg_type} | {seg.get('start', 0)}s~{seg.get('end', 0)}s】")
-        lines.append(seg.get("script", ""))
-        if seg.get("type") == "digital_human":
-            lines.append(f"动作描述：{seg.get('action', '')}")
-        else:
-            lines.append(f"素材关键词：{seg.get('material_keyword', '')}")
-            lines.append(f"素材说明：{seg.get('material_desc', '')}")
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-
-def _save_social_posts(script_data: dict, output_path: str, target_market: str = "cn"):
-    lines = []
-    lines.append("=" * 50)
-    lines.append("【SNS发布文案】")
-    lines.append("=" * 50)
-    lines.append(_get_social_post(script_data, target_market))
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-
-def run_pipeline_with_progress(
-    task_id: str,
-    topic: str,
-    image_path: str,
-    public_base_url: str,
-    script_data: Optional[dict] = None,
-    voice_preset: Optional[dict] = None,
-    avatar_option: Optional[dict] = None,
-):
-    tracker = tasks[task_id]["tracker"]
-
-    try:
-        from fetch_materials import fetch_all_materials
-        from generate_audio import generate_audio
-        from generate_digital_human import generate_digital_human_video
-        from generate_script import generate_script
-        from tos_uploader import upload_file_and_get_url
-
-        workflow_config = tasks[task_id].get("workflow_config", {}) or {}
-        target_market = workflow_config.get("target_market", "cn")
-        department_id = workflow_config.get("department_id", "real_estate")
-        target_market_obj = _get_target_market(target_market)
-        voice_preset = dict(voice_preset or _get_voice_preset(None, target_market))
-        avatar_option = avatar_option or _get_avatar_option(None)
-        tts_voice = voice_preset.get("voice_id")
-        tts_speed = float(voice_preset.get("selected_speed", voice_preset.get("default_speed", 1.1)))
-        tts_volume = float(voice_preset.get("selected_volume", voice_preset.get("default_volume", 1.0)))
-        avatar_prompt = avatar_option.get("style_prompt", "") if avatar_option else ""
-
-        output_dir = _create_output_dir("full", topic)
-        tasks[task_id]["output_dir"] = output_dir
-
-        image_url = None
-        if image_path and os.path.exists(image_path):
-            image_url = upload_file_and_get_url(image_path, key_prefix="full/image")
-            tracker.log("数字人主播素材已上传到 TOS")
-
-        if script_data is None:
-            tracker.log("正在生成视频文案...", step=1)
-            script_data = generate_script(topic, enable_web_search=workflow_config.get("web_search_enabled", False), target_market=target_market, department_id=department_id)
-        else:
-            tracker.log("已加载确认后的文案脚本", step=1)
-
-        with open(os.path.join(output_dir, "script.json"), "w", encoding="utf-8") as f:
-            json.dump(script_data, f, ensure_ascii=False, indent=2)
-        _save_readable_script(script_data, os.path.join(output_dir, "script_readable.txt"))
-        _save_social_posts(script_data, os.path.join(output_dir, "social_posts.txt"), target_market=target_market)
-        tracker.log(
-            f"文案准备完成，共 {len(script_data.get('segments', []))} 段，总时长 {script_data.get('total_duration', 0)} 秒"
-        )
-
-        tracker.log("正在生成全部配音...", step=2)
-        audio_segments = []
-        total_segments = len(script_data.get("segments", []))
-        for index, seg in enumerate(script_data.get("segments", []), start=1):
-            script_text = seg.get("script", "").strip()
-            if not script_text:
-                continue
-            tracker.log(f"配音生成中（{index}/{total_segments}）：{script_text[:28]}...")
-            seg_type = seg.get("type", "")
-            filename = f"segment_{index - 1:02d}_{seg_type}.mp3"
-            audio_path = os.path.join(output_dir, "audio", filename)
-            generate_audio(script_text, audio_path, tts_voice, speed=tts_speed, volume=tts_volume)
-            seg_with_audio = seg.copy()
-            seg_with_audio["audio_path"] = audio_path
-            seg_with_audio["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
-            seg_with_audio["target_market"] = target_market
-            audio_segments.append(seg_with_audio)
-        tracker.log(f"全部配音完成，共 {len(audio_segments)} 段")
-
-        tracker.log("正在生成数字人视频...", step=3)
-        if not image_url:
-            tracker.log("未选择数字人主播图，跳过数字人视频生成")
-            segments_with_dh = audio_segments
-        else:
-            results = []
-            dh_segments = [seg for seg in audio_segments if seg.get("type") == "digital_human"]
-            completed = 0
-            for i, seg in enumerate(audio_segments):
-                if seg.get("type") != "digital_human":
-                    results.append(seg)
-                    continue
-                completed += 1
-                tracker.log(f"数字人生成中（{completed}/{len(dh_segments)}）")
-                video_output = os.path.join(output_dir, "digital_human", f"dh_{i:02d}.mp4")
-                video_path = generate_digital_human_video(
-                    image_url=image_url,
-                    audio_url=seg.get("audio_url"),
-                    output_path=video_output,
-                    prompt=_combine_prompt(avatar_prompt, seg.get("action", "")),
-                )
-                seg_copy = seg.copy()
-                seg_copy["video_path"] = video_path
-                results.append(seg_copy)
-            segments_with_dh = results
-            tracker.log("数字人视频生成完成")
-
-        tracker.log("正在匹配素材内容...", step=4)
-        try:
-            final_segments = fetch_all_materials(segments=segments_with_dh, output_dir=output_dir)
-            tracker.log(
-                f"素材匹配完成，共 {sum(1 for seg in final_segments if seg.get('material_paths'))} 组素材"
-            )
-        except Exception as exc:
-            tracker.log(f"素材匹配失败：{exc}，已跳过该步骤")
-            final_segments = segments_with_dh
-
-        result_data = {
-            "topic": topic,
-            "owner_username": tasks[task_id].get("owner_username"),
-            "owner_display_name": tasks[task_id].get("owner_display_name"),
-            "owner_role": tasks[task_id].get("owner_role", "user"),
-            "title": script_data.get("title", ""),
-            "cover_title": script_data.get("cover_title", ""),
-            "total_duration": script_data.get("total_duration", 0),
-            "segment_count": len(final_segments),
-            "script": script_data,
-            "segments": final_segments,
-            "social_post": _get_social_post(script_data, target_market),
-            "workflow_config": {
-                "voice_preset": {
-                    "id": voice_preset.get("id"),
-                    "name": voice_preset.get("name"),
-                    "subtitle": voice_preset.get("subtitle"),
-                    "selected_speed": tts_speed,
-                    "selected_volume": tts_volume,
-                    "language": target_market_obj.get("content_language", ""),
-                },
-                "web_search_enabled": tasks[task_id].get("workflow_config", {}).get("web_search_enabled", False),
-                "target_market": tasks[task_id].get("workflow_config", {}).get("target_market", "cn"),
-                "department_id": tasks[task_id].get("workflow_config", {}).get("department_id", "real_estate"),
-                "avatar": {
-                    "id": avatar_option.get("id") if avatar_option else None,
-                    "image_url": avatar_option.get("image_url") if avatar_option else "",
-                },
-            },
-        }
-        tasks[task_id]["result"] = result_data
-        _persist_task_result(tasks[task_id])
-        tracker.finish(result_data)
-    except Exception as exc:
-        tracker.fail(str(exc))
-        import traceback
-        traceback.print_exc()
-
-
-def run_avatar_test_with_progress(task_id: str, image_path: str, audio_path: str, public_base_url: str):
-    tracker = tasks[task_id]["tracker"]
-    try:
-        from generate_digital_human import generate_digital_human_video
-        from tos_uploader import upload_file_and_get_url
-
-        output_dir = tasks[task_id]["output_dir"]
-        tracker.log("正在上传图片和音频到 TOS...", step=1)
-        image_url = upload_file_and_get_url(image_path, key_prefix="avatar-test/image")
-        audio_url = upload_file_and_get_url(audio_path, key_prefix="avatar-test/audio")
-        tracker.log("TOS 上传完成")
-
-        tracker.log("正在合成数字人视频...", step=2)
-        video_dir = os.path.join(output_dir, "digital_human")
-        os.makedirs(video_dir, exist_ok=True)
-        video_path = os.path.join(video_dir, "avatar_test.mp4")
-        generate_digital_human_video(
-            image_url=image_url,
-            audio_url=audio_url,
-            output_path=video_path,
-            prompt="",
-            output_resolution=720,
-            pe_fast_mode=True,
-        )
-        tracker.log("数字人视频生成完成")
-
-        result_data = {
-            "mode": "avatar_test",
-            "owner_username": tasks[task_id].get("owner_username"),
-            "owner_display_name": tasks[task_id].get("owner_display_name"),
-            "owner_role": tasks[task_id].get("owner_role", "user"),
-            "title": "数字人单段测试完成",
-            "cover_title": "数字人生成测试",
-            "total_duration": 0,
-            "segment_count": 1,
-            "image_path": image_path,
-            "audio_path": audio_path,
-            "image_url": image_url,
-            "audio_url": audio_url,
-            "video_path": video_path,
-            "social_post": "",
-            "segments": [
-                {
-                    "type": "digital_human",
-                    "start": 0,
-                    "end": 0,
-                    "duration": 0,
-                    "script": "单段数字人测试",
-                    "action": "",
-                    "audio_path": audio_path,
-                    "video_path": video_path,
-                    "material_paths": [],
-                }
-            ],
-        }
-        tasks[task_id]["result"] = result_data
-        _persist_task_result(tasks[task_id])
-        tracker.finish(result_data)
-    except Exception as exc:
-        tracker.fail(str(exc))
-        import traceback
-        traceback.print_exc()
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(request, "index.html")
+
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+async def admin_dashboard_page(request: Request):
+    return templates.TemplateResponse(request, "admin.html")
 
 
 @app.post("/api/login")
@@ -1116,12 +1095,26 @@ async def logout(request: Request):
     return {"ok": True}
 
 
+@app.get("/logout")
+async def logout_redirect(request: Request):
+    request.session.clear()
+    return RedirectResponse(url=f"/?logged_out={int(time.time())}", status_code=302)
+
+
 @app.get("/api/me")
 async def me(request: Request):
     user = _get_current_user(request)
     if not user:
         return _auth_error()
     return {"user": user}
+
+
+@app.get("/api/costs/summary")
+async def costs_summary(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    return _build_cost_summary_payload(user, include_all=_is_admin(user))
 
 
 @app.get("/api/admin/stats")
@@ -1132,6 +1125,16 @@ async def admin_stats(request: Request):
     if not _is_admin(user):
         return _forbidden_error()
     return _build_admin_stats()
+
+
+@app.get("/api/admin/live-status")
+async def admin_live_status(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    return _build_admin_live_status()
 
 
 @app.api_route("/public/assets/{file_path:path}", methods=["GET", "HEAD"])
@@ -1175,8 +1178,17 @@ async def script_preview(request: Request, topic: str = Form(...), use_web_searc
     web_search_enabled = _parse_bool_form(use_web_search)
     try:
         script_data = generate_script(topic, enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id)
+        script_usage = (script_data.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
         return JSONResponse({"error": f"文案生成失败：{exc}"}, status_code=500)
+    _record_cost_entry(
+        event_type="script_generate",
+        amount=_estimate_script_cost(topic, script_data, web_search_enabled=web_search_enabled, usage=script_usage),
+        provider=COST_RULES["script_generate"]["provider"],
+        user=user,
+        topic=topic,
+        meta={"scope": "preview", "web_search_enabled": web_search_enabled, "target_market": target_market, "department_id": department_id, "usage": script_usage},
+    )
     return {
         "topic": topic,
         "script": script_data,
@@ -1238,6 +1250,8 @@ async def produce_video(
             "compose_transition_id": "fade",
             "subtitle_template_id": "classic",
         },
+        "cost_entries": [],
+        "cost_summary": _empty_cost_summary(),
     }
     tracker.log("任务已创建，准备开始...")
     thread = threading.Thread(
@@ -1278,8 +1292,11 @@ async def start_generation(request: Request, topic: str = Form(...), image: Opti
         "result": None,
         "public_base_url": _get_public_base_url(request),
         "created_at": time.time(),
+        "cost_entries": [],
+        "cost_summary": _empty_cost_summary(),
     }
     tracker.log("任务已创建，准备开始...")
+    _push_live_event("task_created", "创建了完整生产任务", tasks[task_id])
     thread = threading.Thread(
         target=run_pipeline_with_progress,
         args=(task_id, topic, image_path, tasks[task_id]["public_base_url"]),
@@ -1328,6 +1345,7 @@ async def start_avatar_test(request: Request, image: UploadFile = File(...), aud
         "created_at": time.time(),
     }
     tracker.log("测试任务已创建，准备开始...")
+    _push_live_event("task_created", "创建了数字人单段测试", tasks[task_id])
     thread = threading.Thread(
         target=run_avatar_test_with_progress,
         args=(task_id, image_path, audio_path, tasks[task_id]["public_base_url"]),
@@ -1335,6 +1353,14 @@ async def start_avatar_test(request: Request, image: UploadFile = File(...), aud
     )
     thread.start()
     return {"task_id": task_id}
+
+
+@app.get("/api/omnihuman-queue")
+async def omnihuman_queue_status(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    return _omnihuman_queue_snapshot()
 
 
 @app.get("/api/tasks/{task_id}/progress")
@@ -1458,13 +1484,24 @@ async def regenerate_digital_human_segment(task_id: str, segment_index: int, req
         "digital_human",
         f"dh_{segment_index - 1:02d}_regen_{int(time.time())}.mp4",
     )
-    video_path = generate_digital_human_video(
-        image_url=image_url,
-        audio_url=audio_url,
-        output_path=video_output,
-        prompt=_combine_prompt(_get_avatar_prompt_for_task(task), segment.get("action", "")),
+    video_path = _run_omnihuman_job(
+        job_id=f"{task_id}:regen:{segment_index}",
+        label=f"数字人重生成（第{segment_index}段）",
+        runner=lambda: generate_digital_human_video(
+            image_url=image_url,
+            audio_url=audio_url,
+            output_path=video_output,
+            prompt=_combine_prompt(_get_avatar_prompt_for_task(task), segment.get("action", "")),
+        ),
     )
     segment["video_path"] = video_path
+    _record_cost_entry(
+        event_type="digital_human_generate",
+        amount=_estimate_digital_human_cost(segment.get("duration", 0)),
+        provider=COST_RULES["digital_human_generate"]["provider"],
+        task=task,
+        meta={"scope": "regenerate_segment", "segment_index": segment_index, "duration": segment.get("duration", 0), "video_path": video_path, "video_duration": _probe_media_duration(video_path)},
+    )
     task["result"] = result
     _persist_task_result(task)
     return {
@@ -1506,8 +1543,17 @@ async def revise_script_preview_segment(
     web_search_enabled = _parse_bool_form(use_web_search)
     try:
         revised_segment = revise_script_segment(topic, script_data, segment_index - 1, instruction.strip(), enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id)
+        revise_usage = (revised_segment.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
         return JSONResponse({"error": f"AI 修改失败：{exc}"}, status_code=500)
+    _record_cost_entry(
+        event_type="script_revise",
+        amount=_estimate_script_cost(instruction.strip(), {"segment": revised_segment}, web_search_enabled=web_search_enabled, revise=True, usage=revise_usage),
+        provider=COST_RULES["script_revise"]["provider"],
+        user=user,
+        topic=topic,
+        meta={"segment_index": segment_index, "web_search_enabled": web_search_enabled, "target_market": target_market, "department_id": department_id, "usage": revise_usage},
+    )
     script_data["segments"][segment_index - 1] = revised_segment
     return {
         "script": script_data,
@@ -1686,18 +1732,8 @@ async def compose_history_video_endpoint(history_id: str, request: Request):
     if access_error:
         return access_error
 
-    payload = {}
-    if "application/json" in (request.headers.get("content-type") or ""):
-        try:
-            payload = await request.json()
-        except Exception:
-            payload = {}
-    transition_id = str(payload.get("transition_id") or ((result.get("workflow_config") or {}).get("compose_transition_id") or "fade")).strip()
-    subtitle_template_id = str(payload.get("subtitle_template_id") or ((result.get("workflow_config") or {}).get("subtitle_template_id") or "classic")).strip()
-    if transition_id not in {item["id"] for item in COMPOSITION_TRANSITIONS}:
-        transition_id = "fade"
-    if subtitle_template_id not in {item["id"] for item in SUBTITLE_TEMPLATES}:
-        subtitle_template_id = "classic"
+    transition_id = "fade"
+    subtitle_template_id = "classic"
 
     try:
         from video_composer import compose_history_video
@@ -1715,6 +1751,16 @@ async def compose_history_video_endpoint(history_id: str, request: Request):
     workflow_config["subtitle_template_id"] = subtitle_template_id
     result["workflow_config"] = workflow_config
     result.update(compose_result)
+    _record_history_cost(
+        output_dir=output_dir,
+        result=result,
+        user=user,
+        event_type="compose_video",
+        amount=_estimate_compose_cost(result.get("total_duration", 0)),
+        provider=COST_RULES["compose_video"]["provider"],
+        topic=result.get("topic", ""),
+        meta={"transition_id": transition_id, "subtitle_template_id": subtitle_template_id},
+    )
     with open(output_dir / "result.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     _sync_live_task_result(str(output_dir), result)
