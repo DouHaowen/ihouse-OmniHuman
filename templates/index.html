@@ -1,0 +1,2657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iHouse Content Studio</title>
+  <style>
+    :root {
+      --bg: #efe8dd;
+      --paper: #fbf7f1;
+      --card: rgba(255,255,255,0.82);
+      --card-strong: rgba(255,255,255,0.94);
+      --ink: #182132;
+      --muted: #6c7687;
+      --line: rgba(24, 33, 50, 0.10);
+      --line-strong: rgba(24, 33, 50, 0.18);
+      --brand: #0d6b63;
+      --brand-deep: #0a4a46;
+      --brand-soft: rgba(13, 107, 99, 0.10);
+      --accent: #bb8441;
+      --danger: #cd4d4d;
+      --success: #129265;
+      --shadow-xl: 0 34px 90px rgba(18, 28, 43, 0.10);
+      --shadow-lg: 0 18px 48px rgba(18, 28, 43, 0.07);
+      --shadow-md: 0 10px 24px rgba(18, 28, 43, 0.05);
+      --radius-xl: 34px;
+      --radius-lg: 26px;
+      --radius-md: 18px;
+      --radius-sm: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
+      background:
+        radial-gradient(circle at 0% 0%, rgba(13,107,99,0.10), transparent 24%),
+        radial-gradient(circle at 100% 0%, rgba(187,132,65,0.08), transparent 22%),
+        linear-gradient(180deg, #f3eee6 0%, #e8edf2 100%);
+    }
+
+    .auth-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 12000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(10, 22, 35, 0.38);
+      backdrop-filter: blur(16px);
+    }
+
+    .auth-card {
+      width: min(440px, 100%);
+      padding: 32px;
+      border-radius: 32px;
+      background: rgba(255,255,255,0.92);
+      border: 1px solid rgba(255,255,255,0.74);
+      box-shadow: var(--shadow-xl);
+      display: grid;
+      gap: 18px;
+    }
+
+    .auth-card h2 {
+      font-size: 28px;
+      letter-spacing: -0.04em;
+    }
+
+    .auth-card p {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.8;
+    }
+
+    .auth-error {
+      min-height: 22px;
+      color: var(--danger);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .session-stack {
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+
+    .user-chip {
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      min-height:42px;
+      padding:10px 14px;
+      border-radius:999px;
+      background: rgba(255,255,255,0.86);
+      border:1px solid var(--line);
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .admin-stats {
+      display:grid;
+      gap:12px;
+    }
+
+    .admin-stat-card {
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.82);
+      padding: 14px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .admin-stat-head {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:12px;
+    }
+
+    .admin-stat-name {
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--ink);
+    }
+
+    .admin-stat-count {
+      color: var(--brand-deep);
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .admin-history-list {
+      display:grid;
+      gap:6px;
+    }
+
+    .admin-history-item {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+    .page {
+      max-width: 1640px;
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    .shell {
+      background: linear-gradient(180deg, rgba(255,255,255,0.44), rgba(255,255,255,0.24));
+      border: 1px solid rgba(255,255,255,0.70);
+      border-radius: 36px;
+      backdrop-filter: blur(18px);
+      box-shadow: var(--shadow-xl);
+      overflow: hidden;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 22px;
+      border-bottom: 1px solid rgba(255,255,255,0.68);
+      background: rgba(255,255,255,0.34);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-mark {
+      width: 52px;
+      height: 52px;
+      border-radius: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      background: linear-gradient(135deg, #0f2137 0%, var(--brand) 100%);
+      box-shadow: 0 20px 36px rgba(13,107,99,0.20);
+    }
+
+    .brand-copy strong {
+      display: block;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+
+    .brand-copy span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .topbar-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 42px;
+      padding: 10px 16px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.84);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .topbar-status.error {
+      color: var(--danger);
+      border-color: rgba(205,77,77,0.22);
+    }
+
+    .stage {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr) 290px;
+      min-height: 1000px;
+      gap: 0;
+    }
+
+    .intro {
+      padding: 24px 18px 24px 24px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.42), rgba(255,255,255,0.18));
+      border-right: 1px solid var(--line);
+    }
+
+    .intro-inner {
+      position: sticky;
+      top: 18px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: rgba(13,107,99,0.08);
+      color: var(--brand-deep);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      width: fit-content;
+    }
+
+    .intro h1 {
+      font-size: 30px;
+      line-height: 1.08;
+      letter-spacing: -0.04em;
+      margin-bottom: 4px;
+      color: var(--ink);
+    }
+
+    .intro p {
+      color: var(--muted);
+      line-height: 1.9;
+      font-size: 14px;
+      margin-bottom: 0;
+    }
+
+    .usage-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .usage-item {
+      display: grid;
+      grid-template-columns: 36px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 14px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.78);
+      box-shadow: var(--shadow-md);
+    }
+
+    .usage-num {
+      width: 36px;
+      height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: rgba(13,107,99,0.10);
+      color: var(--brand-deep);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .usage-copy strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+      color: var(--ink);
+    }
+
+    .usage-copy span {
+      display: block;
+      color: var(--muted);
+      line-height: 1.72;
+      font-size: 13px;
+    }
+
+    .workspace {
+      padding: 22px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.16), rgba(255,255,255,0.06));
+    }
+
+    .main-stack,
+    .side-stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .panel {
+      border-radius: 30px;
+      background: var(--card);
+      border: 1px solid rgba(255,255,255,0.80);
+      backdrop-filter: blur(20px);
+      box-shadow: var(--shadow-lg);
+      padding: 22px;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .section-kicker {
+      font-size: 12px;
+      color: var(--brand);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 800;
+      margin-bottom: 10px;
+    }
+
+    .section-title {
+      font-size: 30px;
+      font-weight: 800;
+      letter-spacing: -0.05em;
+      line-height: 1.06;
+      margin-bottom: 8px;
+    }
+
+    .section-desc {
+      color: var(--muted);
+      line-height: 1.88;
+      font-size: 14px;
+      max-width: 820px;
+    }
+
+    .stage-steps {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .stage-step {
+      position: relative;
+      padding: 16px 16px 16px 18px;
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.78);
+      min-height: 94px;
+      overflow: hidden;
+    }
+
+    .stage-step::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 4px;
+      background: rgba(13,107,99,0.10);
+    }
+
+    .stage-step.active {
+      background: linear-gradient(180deg, rgba(241,251,249,0.95), rgba(255,255,255,0.94));
+      border-color: rgba(13,107,99,0.22);
+    }
+
+    .stage-step.active::before {
+      background: linear-gradient(180deg, var(--brand), var(--accent));
+    }
+
+    .stage-step strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+
+    .stage-step span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.72;
+    }
+
+    .workspace-stage {
+      border-radius: 26px;
+      border: 1px solid var(--line);
+      background:
+        radial-gradient(circle at top right, rgba(13,107,99,0.04), transparent 22%),
+        linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.98));
+      padding: 20px;
+    }
+
+    .stage-caption {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 18px;
+      margin-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .stage-caption strong {
+      font-size: 19px;
+      letter-spacing: -0.03em;
+    }
+
+    .stage-caption span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .field { margin-bottom: 18px; }
+
+    .field-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+
+    .field label {
+      display: block;
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    textarea,
+    .range-value,
+    .select-input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255,255,255,0.98);
+      color: var(--ink);
+      font: inherit;
+      outline: none;
+      transition: .18s ease;
+    }
+
+    textarea {
+      min-height: 156px;
+      resize: vertical;
+      padding: 18px 20px;
+      font-size: 15px;
+      line-height: 1.92;
+    }
+
+    textarea:focus,
+    .range-value:focus,
+    .select-input:focus {
+      border-color: rgba(13,107,99,0.35);
+      box-shadow: 0 0 0 5px rgba(13,107,99,0.08);
+    }
+
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .btn {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      padding: 13px 20px;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      transition: transform .16s ease, box-shadow .16s ease, background .16s ease;
+    }
+
+    .btn:hover { transform: translateY(-1px); }
+    .btn:disabled { opacity: .56; cursor: not-allowed; transform: none; }
+
+    .btn-primary {
+      color: #fff;
+      background: linear-gradient(135deg, var(--brand), var(--brand-deep));
+      box-shadow: 0 18px 36px rgba(13,107,99,0.22);
+    }
+
+    .btn-secondary {
+      color: var(--ink);
+      background: rgba(255,255,255,0.96);
+      border: 1px solid var(--line);
+    }
+
+    .btn-ghost {
+      color: var(--muted);
+      background: rgba(24,33,50,0.05);
+    }
+
+    .summary-grid,
+    .result-kpis,
+    .segment-meta,
+    .media-grid,
+    .preset-grid,
+    .avatar-grid,
+    .script-board,
+    .result-board,
+    .file-board,
+    .progress-board,
+    .insight-grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .summary-grid,
+    .result-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .avatar-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .segment-meta,
+    .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+    .summary-card,
+    .meta-box,
+    .media-box,
+    .insight-card,
+    .side-card,
+    .result-kpi,
+    .progress-item,
+    .file-item {
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: var(--card-strong);
+      box-shadow: var(--shadow-md);
+      padding: 16px;
+    }
+
+    .summary-card .label,
+    .meta-box .label,
+    .media-box .label,
+    .insight-card .label,
+    .side-card .label,
+    .result-kpi .label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+
+    .summary-card .value {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 1.26;
+    }
+
+    .meta-box .value,
+    .insight-card .value,
+    .side-card .value,
+    .result-kpi .value {
+      font-size: 14px;
+      line-height: 1.82;
+    }
+
+    .tabbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 18px 0 10px;
+    }
+
+    .tab {
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.96);
+      color: var(--muted);
+      padding: 9px 14px;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .tab.active {
+      color: var(--brand-deep);
+      border-color: rgba(13,107,99,0.28);
+      background: var(--brand-soft);
+    }
+
+    .segment-card {
+      border-radius: 28px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,252,0.96));
+      box-shadow: var(--shadow-md);
+      padding: 22px;
+    }
+
+    .segment-top {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+
+    .segment-index {
+      width: 40px;
+      height: 40px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #e7f2f0;
+      color: var(--brand-deep);
+      font-weight: 800;
+    }
+
+    .segment-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-self: start;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .segment-badge.digital_human { background: rgba(13,107,99,0.10); color: var(--brand-deep); }
+    .segment-badge.material { background: rgba(187,132,65,0.12); color: #85530c; }
+
+    .segment-time {
+      justify-self: end;
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .segment-script {
+      font-size: 15px;
+      line-height: 1.94;
+      white-space: pre-wrap;
+      margin-bottom: 14px;
+    }
+
+    .preset-card,
+    .avatar-card {
+      border-radius: 28px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(247,249,252,0.96));
+      box-shadow: var(--shadow-md);
+      transition: .16s ease;
+    }
+
+    .preset-card {
+      padding: 18px;
+      cursor: pointer;
+    }
+
+    .avatar-card {
+      padding: 12px;
+      cursor: pointer;
+    }
+
+    .preset-card:hover,
+    .avatar-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 18px 38px rgba(18, 28, 43, 0.08);
+    }
+
+    .preset-card.selected,
+    .avatar-card.selected {
+      border-color: rgba(13,107,99,0.32);
+      box-shadow: 0 0 0 5px rgba(13,107,99,0.08), 0 18px 38px rgba(18, 28, 43, 0.08);
+      background: linear-gradient(180deg, #fff, #f4fbfa);
+    }
+
+    .preset-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .preset-name {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin-bottom: 6px;
+    }
+
+    .preset-subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .preset-body {
+      color: var(--muted);
+      line-height: 1.82;
+      font-size: 14px;
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .tag {
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: #f4f7fa;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .avatar-thumb {
+      width: 100%;
+      aspect-ratio: 4 / 5;
+      object-fit: cover;
+      border-radius: 20px;
+      display: block;
+      background: #e6ebef;
+    }
+
+    .avatar-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+    }
+
+    .avatar-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(13,107,99,0.16);
+    }
+
+    .avatar-card.selected .avatar-dot { background: var(--brand); }
+
+    .range-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .range-row input[type="range"] {
+      flex: 1;
+      accent-color: var(--brand);
+    }
+
+    .range-value {
+      max-width: 92px;
+      min-height: auto;
+      padding: 12px 14px;
+      text-align: center;
+      font-size: 14px;
+    }
+
+    .select-input {
+      min-height: 56px;
+      padding: 0 16px;
+      font-size: 14px;
+      appearance: none;
+      background: rgba(255,255,255,0.98);
+    }
+
+    .rightbar {
+      padding: 22px 22px 22px 14px;
+      background: rgba(255,255,255,0.12);
+    }
+
+    .side-stack {
+      position: sticky;
+      top: 18px;
+      gap: 14px;
+    }
+
+    .result-shell,
+    .progress-shell { display: none; }
+    .result-shell.active,
+    .progress-shell.active { display: block; }
+
+    .progress-item {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .progress-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #d8dee7;
+      flex: none;
+    }
+
+    .progress-item.done .progress-dot { background: var(--success); }
+    .progress-item.active .progress-dot {
+      background: var(--brand);
+      box-shadow: 0 0 0 6px rgba(13,107,99,0.10);
+    }
+
+    .log-panel {
+      margin-top: 16px;
+      border-radius: 24px;
+      background: #152338;
+      color: #c5d2e8;
+      padding: 18px;
+      max-height: 360px;
+      overflow: auto;
+      font-family: "SF Mono", monospace;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .log-line + .log-line { margin-top: 6px; }
+    .log-time { color: rgba(255,255,255,0.34); margin-right: 8px; }
+
+    .media-box audio,
+    .media-box video,
+    .media-box img {
+      width: 100%;
+      border-radius: 16px;
+      background: #000;
+      display: block;
+    }
+
+    .social-card {
+      white-space: pre-wrap;
+      line-height: 1.88;
+      font-size: 14px;
+      min-height: 120px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .file-name { font-size: 14px; font-weight: 800; }
+    .file-path { color: var(--muted); font-size: 12px; margin-top: 4px; font-family: "SF Mono", monospace; }
+    .file-link { color: var(--brand-deep); text-decoration: none; font-weight: 800; }
+
+    .history-item {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 14px;
+      width: 100%;
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: var(--card-strong);
+      box-shadow: var(--shadow-md);
+      padding: 16px;
+      overflow: hidden;
+    }
+
+    .history-main {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .history-title {
+      width: 100%;
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.5;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
+    .history-topic {
+      width: 100%;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.72;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      font-family: inherit;
+    }
+
+    .history-meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    .history-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      width: 100%;
+    }
+
+    .history-actions .btn {
+      width: 100%;
+      min-width: 0;
+      justify-content: center;
+    }
+
+    .empty-box {
+      border-radius: 22px;
+      border: 1px dashed var(--line-strong);
+      background: rgba(255,255,255,0.72);
+      color: var(--muted);
+      padding: 16px;
+      text-align: center;
+      line-height: 1.8;
+      font-size: 14px;
+    }
+
+    .helper {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.76;
+      margin-top: 8px;
+    }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.24);
+      border-top-color: #fff;
+      animation: spin .8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (max-width: 1380px) {
+      .stage {
+        grid-template-columns: 1fr;
+      }
+      .intro { border-right: none; border-bottom: 1px solid var(--line); }
+      .rightbar {
+        grid-column: 1 / -1;
+        border-top: 1px solid var(--line);
+      }
+      .side-stack { position: static; }
+    }
+
+    @media (max-width: 1080px) {
+      .stage,
+      .summary-grid,
+      .result-kpis,
+      .stage-steps,
+      .preset-grid,
+      .avatar-grid,
+      .segment-meta,
+      .media-grid,
+      .field-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 820px) {
+      .page { padding: 10px; }
+      .shell { border-radius: 28px; }
+      .topbar,
+      .actions,
+      .panel-header,
+      .stage-caption,
+      .segment-top { flex-direction: column; align-items: stretch; }
+      .topbar,
+      .intro,
+      .workspace,
+      .rightbar,
+      .panel { padding: 18px; }
+      .btn { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="auth-overlay" id="authOverlay" style="display:none;">
+    <div class="auth-card">
+      <div class="brand" style="gap:12px;">
+        <div class="brand-mark">IH</div>
+        <div class="brand-copy">
+          <strong id="loginTitle">iHouse 登录</strong>
+          <span id="loginSubtitle">Sign in to continue</span>
+        </div>
+      </div>
+      <p id="loginDesc">请输入管理员或员工账号。登录后会自动带入对应的界面语言、业务部门和目标市场。</p>
+      <form id="loginForm" style="display:grid; gap:14px;">
+        <div class="field" style="margin:0;">
+          <label for="loginUsername">账号</label>
+          <input id="loginUsername" name="username" class="select-input" style="min-height:52px;" autocomplete="username">
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="loginPassword">密码</label>
+          <input id="loginPassword" name="password" type="password" class="select-input" style="min-height:52px;" autocomplete="current-password">
+        </div>
+        <div class="auth-error" id="loginError"></div>
+        <button class="btn btn-primary" type="submit" id="loginSubmitBtn">登录系统</button>
+      </form>
+    </div>
+  </div>
+  <div class="page">
+    <div class="shell">
+      <div class="topbar">
+        <div class="brand">
+          <div class="brand-mark">IH</div>
+          <div class="brand-copy">
+            <strong>iHouse Content Studio</strong>
+            <span id="brandSubtitle">Video Workflow Studio</span>
+          </div>
+        </div>
+        <div class="session-stack">
+          <div class="field" style="min-width:180px; margin:0;">
+            <label for="topInterfaceLanguageSelect" id="topInterfaceLanguageLabel" style="font-size:11px; letter-spacing:0.12em; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">界面语言</label>
+            <select id="topInterfaceLanguageSelect" class="select-input" style="min-height:42px; padding:10px 14px; background:rgba(255,255,255,0.86);"></select>
+          </div>
+          <div class="user-chip" id="sessionUser" style="display:none;"></div>
+          <button class="btn btn-ghost" type="button" id="logoutBtn" style="display:none; min-height:42px;">退出登录</button>
+          <div class="topbar-status" id="heroStatus">工作台已就绪</div>
+        </div>
+      </div>
+
+      <div class="stage">
+        <aside class="intro">
+          <div class="intro-inner">
+            <div class="eyebrow" id="workflowEyebrow">iHouse Workflow</div>
+            <h1 id="workflowTitle">内容生产流程</h1>
+            <p id="workflowIntro">AI 驱动的短视频全流程工作台 — 从选题到成片，一页搞定。</p>
+            <div class="usage-list">
+              <div class="usage-item">
+                <div class="usage-num">01</div>
+                <div class="usage-copy"><strong id="usageTitle1">输入选题</strong><span id="usageDesc1">一句话描述内容方向，AI 自动生成完整视频脚本与分镜结构。</span></div>
+              </div>
+              <div class="usage-item">
+                <div class="usage-num">02</div>
+                <div class="usage-copy"><strong id="usageTitle2">确认脚本</strong><span id="usageDesc2">逐段预览文案与素材描述，支持 AI 辅助改写，确认后再进入生产。</span></div>
+              </div>
+              <div class="usage-item">
+                <div class="usage-num">03</div>
+                <div class="usage-copy"><strong id="usageTitle3">选择风格</strong><span id="usageDesc3"><span id="voiceLabel">配音方案</span>与数字人主播自由搭配，适配不同市场与内容调性。</span></div>
+              </div>
+              <div class="usage-item">
+                <div class="usage-num">04</div>
+                <div class="usage-copy"><strong id="usageTitle4">成片输出</strong><span id="usageDesc4">自动完成配音、数字人、素材匹配与视频合成，支持逐段复核与一键成片。</span></div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <main class="workspace">
+          <div class="main-stack">
+            <section class="panel">
+              <div class="workspace-stage">                <section id="topicPanel">
+                  <div class="field-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+                    <div class="field">
+                      <label for="departmentSelect" id="departmentLabel">业务部门</label>
+                      <select id="departmentSelect" class="select-input"></select>
+                    </div>
+                    <div class="field">
+                      <label for="targetMarketSelect" id="targetMarketLabel">内容目标市场</label>
+                      <select id="targetMarketSelect" class="select-input"></select>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label for="topicInput" id="topicInputLabel">视频选题</label>
+                    <textarea id="topicInput" placeholder="例如：为什么越来越多台湾家庭开始关注日本置业？&#10;或者：日本买房后最容易忽略的三个持有成本"></textarea>
+                  </div>
+                  <div class="field" style="margin-top:14px;">
+                    <label class="toggle-card" for="webSearchToggle" style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:18px 20px; border-radius:22px; border:1px solid var(--line); background:rgba(255,255,255,0.66); cursor:pointer;">
+                      <div style="display:grid; gap:6px;">
+                        <span style="font-size:14px; font-weight:800; color:var(--ink);"><span id="webSearchTitle" style="font-size:14px; font-weight:800; color:var(--ink);">启用 Claude 实时联网检索</span></span>
+                        <span style="font-size:13px; line-height:1.7; color:var(--muted);"><span id="webSearchDesc" style="font-size:13px; line-height:1.7; color:var(--muted);">适合最新政策、新闻、机器人动态、法规调整等时效内容。关闭时更省成本，开启后会优先查新信息。</span></span>
+                      </div>
+                      <input id="webSearchToggle" type="checkbox" style="width:22px; height:22px; accent-color: var(--brand); margin-top:2px;">
+                    </label>
+                  </div>
+                  <div class="actions">
+                    <button class="btn btn-primary" id="previewBtn" type="button"><span id="previewBtnText">先生成文案</span></button>
+                    <button class="btn btn-secondary" id="regenBtn" type="button"><span id="regenBtnText">重新生成文案</span></button>
+                    <button class="btn btn-ghost" id="resetBtn" type="button"><span id="resetBtnText">清空当前工作台</span></button>
+                  </div>
+                </section>
+
+                <section id="scriptPanel" style="display:none; margin-top: 22px;">
+                  <div class="panel-header" style="margin-bottom:14px;">
+                    <div>
+                      <div class="section-kicker">Script Review</div>
+                      <h3 class="section-title" style="font-size:24px;"><span id="scriptPanelTitle">先确认脚本，再进入生产</span></h3>
+                      <p class="section-desc"><span id="scriptPanelDesc">数字人段只看动作提示词，素材段只看素材关键词与描述，信息保持清楚，让运营可以快速判断内容节奏。</span></p>
+                    </div>
+                  </div>
+                  <div class="summary-grid" id="scriptSummary"></div>
+                  <div class="tabbar">
+                    <button class="tab active" type="button" data-script-tab="segments" id="scriptTabSegments">分镜脚本</button>
+                    <button class="tab" type="button" data-script-tab="social" id="scriptTabSocial">SNS文案</button>
+                  </div>
+                  <div id="scriptSegmentsWrap">
+                    <div class="script-board" id="scriptSegments"></div>
+                  </div>
+                  <div id="scriptSocialWrap" style="display:none; margin-top: 8px;">
+                    <div class="insight-grid">
+                      <div class="insight-card">
+                        <div class="label" id="previewSocialLabel">SNS文案</div>
+                        <div class="social-card" id="previewSocial"></div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section id="configPanel" style="display:none; margin-top: 22px;">
+                  <div class="panel-header" style="margin-bottom:14px;">
+                    <div>
+                      <div class="section-kicker">Style Setup</div>
+                      <h3 class="section-title" style="font-size:24px;"><span id="configPanelTitle">音色与主播自由组合</span></h3>
+                      <p class="section-desc"><span id="configPanelDesc">配音方案保留业务上的语言和性别差异，主播选择只展示图片本身，不对内容做额外分组判断。</span></p>
+                    </div>
+                  </div>
+
+                  <div class="field">
+                    <label>配音方案</label>
+                    <div class="preset-grid" id="voicePresetGrid"></div>
+                  </div>
+
+                  <div class="field">
+                    <label for="speedRange"><span id="speedLabel">语速微调</span></label>
+                    <div class="range-row">
+                      <input id="speedRange" type="range" min="0.85" max="1.35" step="0.05" value="1.1">
+                      <input id="speedValue" class="range-value" type="text" value="1.10" readonly>
+                    </div>
+                    <div class="helper"><span id="speedHelper">当前语速会应用到整条视频的所有配音段落。普通话可以略快，日语和台湾语建议更平稳。</span></div>
+                  </div>
+
+                  <div class="field">
+                    <label><span id="avatarLabel">选择主播图片</span></label>
+                    <div class="avatar-grid" id="avatarGrid"></div>
+                    <div class="helper" id="avatarHint">这里展示当前数据库中的全部数字人主播素材，运营可以自由组合音色与主播。</div>
+                  </div>
+
+                  <div class="actions">
+                    <button class="btn btn-primary" id="produceBtn" type="button"><span id="produceBtnText">开始一站式生产</span></button>
+                    <button class="btn btn-ghost" id="backToScriptBtn" type="button"><span id="backToScriptBtnText">返回查看文案</span></button>
+                  </div>
+                </section>
+              </div>
+            </section>
+
+            <section class="panel progress-shell" id="progressPanel">
+              <div class="panel-header">
+                <div>
+                  <div class="section-kicker">Production</div>
+                  <h2 class="section-title" id="progressTitle">内容生产进行中</h2>
+                  <p class="section-desc" id="progressDesc">这里会把当前流程拆成阶段，让运营知道系统现在处理到哪一步，而不是只看到一串技术日志。</p>
+                </div>
+                <div class="topbar-status" id="progressStatus"><span class="spinner"></span> 正在处理</div>
+              </div>
+              <div class="progress-board" id="progressSteps"></div>
+              <div class="log-panel" id="logPanel"></div>
+            </section>
+
+            <section class="panel result-shell" id="resultPanel">
+              <div class="panel-header">
+                <div>
+                  <div class="section-kicker">Result</div>
+                  <h2 class="section-title" id="resultTitle">生产完成</h2>
+                  <p class="section-desc" id="resultSubtitle">下面是本次任务的完整结果，会按段落把文案、动作词、配音、数字人视频与素材拆开预览。</p>
+                </div>
+                <div class="actions" style="justify-content:flex-end;">
+                  <button class="btn btn-primary" type="button" id="composeVideoBtn" style="display:none;">一键生成成片</button>
+                  <a class="btn btn-secondary" id="bundleDownloadBtn" href="#" style="display:none; text-decoration:none;" download>一键打包下载</a>
+                  <button class="btn btn-secondary" type="button" id="newTaskBtn">继续创建下一条</button>
+                </div>
+              </div>
+
+              <div class="result-kpis" id="resultSummary"></div>
+              <div class="insight-grid" id="workflowSummary" style="margin-bottom: 16px;"></div>
+              <div class="insight-grid" id="composeSettingsPanel" style="display:none; margin-bottom:16px;"></div>
+              <div class="media-grid" id="finalOutputPanel" style="display:none; margin-bottom:16px;"></div>
+
+              <div class="tabbar">
+                <button class="tab active" type="button" data-result-tab="segments" id="resultTabSegments">段落预览</button>
+                <button class="tab" type="button" data-result-tab="social" id="resultTabSocial">SNS文案</button>
+                <button class="tab" type="button" data-result-tab="files" id="resultTabFiles">输出文件</button>
+              </div>
+
+              <div id="resultSegmentsWrap">
+                <div class="result-board" id="resultSegments"></div>
+              </div>
+              <div id="resultSocialWrap" style="display:none;">
+                <div class="insight-grid">
+                  <div class="insight-card">
+                    <div class="label" id="resultSocialLabel">SNS文案</div>
+                    <div class="social-card" id="resultSocial"></div>
+                  </div>
+                </div>
+              </div>
+              <div id="resultFilesWrap" style="display:none;">
+                <div class="file-board" id="fileList"></div>
+              </div>
+            </section>
+          </div>
+        </main>
+
+        <aside class="rightbar">
+          <div class="side-stack">
+            <section class="panel" id="adminPanel" style="display:none;">
+              <div class="section-kicker">Admin</div>
+              <h3 class="section-title" style="font-size:22px;">账号统计</h3>
+              <div class="helper" style="margin: 10px 0 14px;">管理员可以看到每个员工账号生成的数量，以及对应的历史任务。</div>
+              <div class="admin-stats" id="adminStats"></div>
+            </section>
+            <section class="panel">
+              <div class="section-kicker">History</div>
+              <h3 class="section-title" style="font-size:22px;"><span id="historyTitle">历史任务</span></h3>
+              <div class="helper" style="margin: 10px 0 14px;"><span id="historyDesc">这里会保留已经落盘的历史结果。服务重启后，旧任务也可以继续打开与下载。</span></div>
+              <div class="file-board" id="historyList"></div>
+            </section>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+  <div id="mediaLightbox" style="display:none; position:fixed; inset:0; background:rgba(8,12,20,0.82); z-index:9999; padding:40px; align-items:center; justify-content:center;" aria-hidden="true">
+    <div style="position:relative; max-width:min(92vw, 1400px); max-height:90vh; width:100%; display:flex; align-items:center; justify-content:center;">
+      <button id="lightboxClose" type="button" class="btn btn-secondary" style="position:absolute; top:-14px; right:0; z-index:2;">关闭</button>
+      <img id="lightboxImage" src="" alt="放大预览" style="max-width:100%; max-height:90vh; border-radius:24px; box-shadow:0 30px 80px rgba(0,0,0,0.36); background:#fff;">
+    </div>
+  </div>
+
+<script>
+    const state = {
+      options: null,
+      scriptData: null,
+      previewData: null,
+      selectedVoiceId: null,
+      selectedAvatarId: null,
+      currentTaskId: null,
+      currentHistoryId: null,
+      eventSource: null,
+      resultData: null,
+      historyItems: [],
+      useWebSearch: false,
+      currentUser: null,
+      selectedComposeTransitionId: 'fade',
+      selectedSubtitleTemplateId: 'classic',
+      adminStats: null,
+      selectedInterfaceLanguage: "zh-CN",
+      selectedDepartmentId: "real_estate",
+      selectedTargetMarket: "cn",
+    };
+
+    const progressLabels = ["文案策划", "配音制作", "数字人视频", "素材匹配"];
+
+    const els = {
+      topicInput: document.getElementById('topicInput'),
+      topInterfaceLanguageSelect: document.getElementById('topInterfaceLanguageSelect'),
+      departmentSelect: document.getElementById('departmentSelect'),
+      targetMarketSelect: document.getElementById('targetMarketSelect'),
+      webSearchToggle: document.getElementById('webSearchToggle'),
+      previewBtn: document.getElementById('previewBtn'),
+      regenBtn: document.getElementById('regenBtn'),
+      resetBtn: document.getElementById('resetBtn'),
+      backToScriptBtn: document.getElementById('backToScriptBtn'),
+      produceBtn: document.getElementById('produceBtn'),
+      heroStatus: document.getElementById('heroStatus'),
+      scriptPanel: document.getElementById('scriptPanel'),
+      configPanel: document.getElementById('configPanel'),
+      progressPanel: document.getElementById('progressPanel'),
+      resultPanel: document.getElementById('resultPanel'),
+      scriptSummary: document.getElementById('scriptSummary'),
+      scriptSegments: document.getElementById('scriptSegments'),
+      previewSocial: document.getElementById('previewSocial'),
+      voicePresetGrid: document.getElementById('voicePresetGrid'),
+      avatarGrid: document.getElementById('avatarGrid'),
+      avatarHint: document.getElementById('avatarHint'),
+      marketVoiceHint: document.getElementById('marketVoiceHint'),
+      speedRange: document.getElementById('speedRange'),
+      speedValue: document.getElementById('speedValue'),
+      progressSteps: document.getElementById('progressSteps'),
+      logPanel: document.getElementById('logPanel'),
+      progressStatus: document.getElementById('progressStatus'),
+      resultTitle: document.getElementById('resultTitle'),
+      resultSubtitle: document.getElementById('resultSubtitle'),
+      resultSummary: document.getElementById('resultSummary'),
+      workflowSummary: document.getElementById('workflowSummary'),
+      composeSettingsPanel: document.getElementById('composeSettingsPanel'),
+      finalOutputPanel: document.getElementById('finalOutputPanel'),
+      resultSegments: document.getElementById('resultSegments'),
+      resultSocial: document.getElementById('resultSocial'),
+      fileList: document.getElementById('fileList'),
+      bundleDownloadBtn: document.getElementById('bundleDownloadBtn'),
+      composeVideoBtn: document.getElementById('composeVideoBtn'),
+      pillScript: document.getElementById('pillScript'),
+      pillConfig: document.getElementById('pillConfig'),
+      newTaskBtn: document.getElementById('newTaskBtn'),
+      historyList: document.getElementById('historyList'),
+      mediaLightbox: document.getElementById('mediaLightbox'),
+      lightboxImage: document.getElementById('lightboxImage'),
+      lightboxClose: document.getElementById('lightboxClose'),
+      authOverlay: document.getElementById('authOverlay'),
+      loginForm: document.getElementById('loginForm'),
+      loginUsername: document.getElementById('loginUsername'),
+      loginPassword: document.getElementById('loginPassword'),
+      loginError: document.getElementById('loginError'),
+      logoutBtn: document.getElementById('logoutBtn'),
+      sessionUser: document.getElementById('sessionUser'),
+      adminPanel: document.getElementById('adminPanel'),
+      adminStats: document.getElementById('adminStats'),
+    };
+
+    function escapeHtml(value = '') {
+      return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function setHeroStatus(text, error = false) {
+      els.heroStatus.textContent = text;
+      els.heroStatus.classList.toggle('error', error);
+    }
+
+    function formatHistoryTime(value) {
+      if (!value) return '未知时间';
+      const time = Number(value) * (Number(value) < 1e12 ? 1000 : 1);
+      const date = new Date(time);
+      if (Number.isNaN(date.getTime())) return '未知时间';
+      return date.toLocaleString('zh-CN', { hour12: false });
+    }
+
+    async function openHistoryTask(historyId) {
+      try {
+        const res = await fetch(`/api/history/${historyId}/result`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '历史任务加载失败');
+        state.currentHistoryId = data.history_id || historyId;
+        state.currentTaskId = data.live_task_id || null;
+        renderResult(data);
+        setHeroStatus('已载入历史任务');
+        window.scrollTo({ top: els.resultPanel.offsetTop - 20, behavior: 'smooth' });
+      } catch (error) {
+        setHeroStatus('历史任务加载失败', true);
+        alert(error.message || '历史任务加载失败');
+      }
+    }
+
+    function renderHistory(items = []) {
+      state.historyItems = items;
+      if (!items.length) {
+        els.historyList.innerHTML = `<div class="empty-box">${escapeHtml(currentCopy().noHistory || '暂时还没有历史任务。')}</div>`;
+        return;
+      }
+      els.historyList.innerHTML = items.map(item => `
+        <div class="history-item" style="${item.history_id === state.currentHistoryId ? 'border-color: rgba(13,107,99,0.30); box-shadow: 0 0 0 4px rgba(13,107,99,0.06);' : ''}">
+          <div class="history-main">
+            <div class="history-title">${escapeHtml(item.title || item.topic || item.history_id)}</div>
+            <div class="history-topic">${escapeHtml(item.topic || '未记录选题')}</div>
+            <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at))} · ${escapeHtml(String(item.segment_count || 0))} 段 · ${escapeHtml(String(item.total_duration || 0))} 秒${state.currentUser?.role === 'admin' ? ` · ${escapeHtml(item.owner_display_name || item.owner_username || '未归属')}` : ''}</div>
+          </div>
+          <div class="history-actions">
+            <button class="btn btn-secondary history-open-btn" type="button" data-history-id="${item.history_id}">打开</button>
+            <button class="btn btn-ghost history-delete-btn" type="button" data-history-id="${item.history_id}">${escapeHtml(copyText('historyDelete', '删除'))}</button>
+          </div>
+        </div>
+      `).join('');
+      document.querySelectorAll('.history-open-btn').forEach(btn => {
+        btn.addEventListener('click', () => openHistoryTask(btn.dataset.historyId));
+      });
+      document.querySelectorAll('.history-delete-btn').forEach(btn => {
+        btn.addEventListener('click', () => deleteHistoryTask(btn.dataset.historyId));
+      });
+    }
+
+    async function loadHistory() {
+      try {
+        const res = await fetch('/api/history');
+        if (res.status === 401) {
+          state.currentUser = null;
+          renderSessionUser();
+          setAuthVisible(true);
+          return;
+        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '历史任务加载失败');
+        renderHistory(Array.isArray(data) ? data : []);
+      } catch (error) {
+        els.historyList.innerHTML = `<div class="empty-box">${escapeHtml(currentCopy().historyLoadError || '历史任务加载失败。')}</div>`;
+      }
+    }
+
+    async function deleteHistoryTask(historyId) {
+      if (!historyId) return;
+      if (!window.confirm(copyText('historyDeleteConfirm', '确定要删除这条历史任务吗？删除后无法恢复。'))) {
+        return;
+      }
+      try {
+        const res = await fetch(`/api/history/${historyId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || copyText('historyDeleteFailed', '删除历史任务失败。'));
+        if (state.currentHistoryId === historyId) {
+          resetWorkspace();
+        }
+        await loadHistory();
+      } catch (error) {
+        alert(error.message || copyText('historyDeleteFailed', '删除历史任务失败。'));
+      }
+    }
+
+    async function composeFinalVideo() {
+      if (!state.currentHistoryId) return;
+      const originalText = els.composeVideoBtn?.textContent || copyText('composeVideo', '一键生成成片');
+      if (els.composeVideoBtn) {
+        els.composeVideoBtn.disabled = true;
+        els.composeVideoBtn.textContent = copyText('composingVideo', '正在生成成片...');
+      }
+      try {
+        setHeroStatus(copyText('composingVideo', '正在生成成片...'));
+        const res = await fetch(`/api/history/${state.currentHistoryId}/compose`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transition_id: state.selectedComposeTransitionId,
+            subtitle_template_id: state.selectedSubtitleTemplateId,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || copyText('composeVideoFailed', '生成成片失败'));
+        renderResult(data.result);
+        await loadHistory();
+        setHeroStatus(copyText('composeVideoDone', '成片已生成'));
+      } catch (error) {
+        setHeroStatus(copyText('composeVideoFailed', '生成成片失败'), true);
+        alert(error.message || copyText('composeVideoFailed', '生成成片失败'));
+      } finally {
+        if (els.composeVideoBtn) {
+          els.composeVideoBtn.disabled = false;
+          els.composeVideoBtn.textContent = originalText;
+        }
+      }
+    }
+
+    function renderReferenceLinks(links = []) {
+      if (!links.length) return '';
+      return `
+        <div class="meta-box">
+          <div class="label">${escapeHtml(copyText('newsRefTitle', '新闻来源参考'))}</div>
+          <div class="value">${escapeHtml(copyText('newsRefDesc', '系统已为这段素材文案匹配可直接打开的参考报道或官网链接'))}</div>
+          <div style="display:grid; gap:10px; margin-top:12px;">
+            ${links.map(link => `
+              <a href="${link.url}" target="_blank" rel="noopener noreferrer" style="display:grid; gap:4px; padding:12px 14px; border-radius:16px; border:1px solid var(--line); background:rgba(255,255,255,0.96); text-decoration:none; color:var(--ink);">
+                <strong style="font-size:14px; line-height:1.6;">${escapeHtml(link.title || copyText('newsRefOpen', '查看参考来源'))}</strong>
+                <span style="font-size:12px; color:var(--muted);">${escapeHtml(link.source || copyText('newsRefSource', '新闻来源'))} ${link.published_at ? `· ${escapeHtml(link.published_at)}` : ''}</span>
+              </a>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+
+    const OPTION_COPY = {
+      departments: {
+        'real_estate': { 'zh-CN': '房地产', 'zh-TW': '房地產', 'ja-JP': '不動産' },
+        'robotics': { 'zh-CN': '机器人', 'zh-TW': '機器人', 'ja-JP': 'ロボティクス' },
+      },
+      targetMarkets: {
+        'cn': { 'zh-CN': '中国市场', 'zh-TW': '中國市場', 'ja-JP': '中国市場' },
+        'tw': { 'zh-CN': '台湾市场', 'zh-TW': '台灣市場', 'ja-JP': '台湾市場' },
+        'jp': { 'zh-CN': '日本市场', 'zh-TW': '日本市場', 'ja-JP': '日本市場' },
+      },
+      contentLanguages: {
+        '简体中文': { 'zh-CN': '简体中文', 'zh-TW': '簡體中文', 'ja-JP': '簡体中国語' },
+        '繁體中文': { 'zh-CN': '繁体中文', 'zh-TW': '繁體中文', 'ja-JP': '繁体中国語' },
+        '日语': { 'zh-CN': '日语', 'zh-TW': '日語', 'ja-JP': '日本語' },
+      },
+      interfaceLanguages: {
+        'zh-CN': { 'zh-CN': '简体中文', 'zh-TW': '簡體中文', 'ja-JP': '簡体中文UI' },
+        'zh-TW': { 'zh-CN': '繁体中文', 'zh-TW': '繁體中文', 'ja-JP': '繁體中文UI' },
+        'ja-JP': { 'zh-CN': '日语', 'zh-TW': '日語', 'ja-JP': '日本語' },
+      }
+    };
+
+    function optionLabel(group, key, fallback = '') {
+      const lang = state.selectedInterfaceLanguage || 'zh-CN';
+      return OPTION_COPY[group]?.[key]?.[lang] || fallback || key;
+    }
+
+    const VOICE_PRESET_COPY = {
+      'zh-CN': {
+        mandarin_male: { name: '沉稳男声', subtitle: '中文普通话', style: '适合资讯解读、房产科普、专业解说', tags: ['男声', '普通话', '沉稳'], sample_text: '大家好，今天带你快速看懂这个选题最重要的关键信息。' },
+        mandarin_female: { name: '温润女声', subtitle: '中文普通话', style: '适合品牌表达、生活方式、轻讲解内容', tags: ['女声', '普通话', '温润'], sample_text: '大家好，欢迎你用更轻松的方式了解这次的话题重点。' },
+        taiwan_female: { name: '甜美女声', subtitle: '中文台湾语', style: '适合面向台湾用户的生活资讯、移居内容、服务介绍', tags: ['女声', '台湾', '亲切'], sample_text: '嗨，今天想用更贴近生活的方式，陪你快速看懂这个主题。' },
+        japanese_female: { name: '自然日语女声', subtitle: '日语', style: '适合日本生活、置业资讯、服务介绍等内容', tags: ['女声', '日语', '自然'], sample_text: 'こんにちは。今日はこのテーマを、わかりやすく短く整理してご紹介します。' }
+      },
+      'zh-TW': {
+        mandarin_male: { name: '沉穩男聲', subtitle: '中文普通話', style: '適合資訊解讀、房產科普與專業解說', tags: ['男聲', '普通話', '沉穩'], sample_text: '大家好，今天帶你快速看懂這個主題最重要的關鍵資訊。' },
+        mandarin_female: { name: '溫潤女聲', subtitle: '中文普通話', style: '適合品牌表達、生活方式與輕講解內容', tags: ['女聲', '普通話', '溫潤'], sample_text: '大家好，歡迎你用更輕鬆的方式了解這次話題的重點。' },
+        taiwan_female: { name: '甜美女聲', subtitle: '中文台灣語', style: '適合面向台灣用戶的生活資訊、移居內容與服務介紹', tags: ['女聲', '台灣', '親切'], sample_text: '嗨，今天想用更貼近生活的方式，陪你快速看懂這個主題。' },
+        japanese_female: { name: '自然日語女聲', subtitle: '日語', style: '適合日本生活、置業資訊與服務介紹等內容', tags: ['女聲', '日語', '自然'], sample_text: 'こんにちは。今日はこのテーマを、わかりやすく短く整理してご紹介します。' }
+      },
+      'ja-JP': {
+        mandarin_male: { name: '落ち着いた中国語男性音声', subtitle: '中国語（標準語）', style: 'ニュース解説、不動産知識、専門説明に適しています', tags: ['男性', '中国語', '落ち着き'], sample_text: 'こんにちは。このテーマの重要なポイントを短く分かりやすく整理してご紹介します。' },
+        mandarin_female: { name: 'やわらかな中国語女性音声', subtitle: '中国語（標準語）', style: 'ブランド紹介、ライフスタイル、やさしい解説向けです', tags: ['女性', '中国語', 'やわらかい'], sample_text: 'こんにちは。今回のテーマをもっと気軽に理解できるようにご紹介します。' },
+        taiwan_female: { name: '親しみやすい台湾女性音声', subtitle: '台湾中国語', style: '台湾向けの生活情報、移住、不動産紹介に適しています', tags: ['女性', '台湾', '親しみ'], sample_text: 'こんにちは。今日は暮らしに近い感覚で、このテーマをやさしく整理してお伝えします。' },
+        japanese_female: { name: '自然な日本語女性音声', subtitle: '日本語', style: '日本での暮らし、不動産情報、サービス紹介などに適しています', tags: ['女性', '日本語', '自然'], sample_text: 'こんにちは。今日はこのテーマを、わかりやすく短く整理してご紹介します。' }
+      }
+    };
+
+    const UI_COPY = {
+      "zh-CN": {
+        brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "内容生产流程", workflowIntro: "让运营从选题、脚本、配音到数字人和素材，都在同一页完成。",
+        usageTitle1: "输入选题", usageDesc1: "先生成整条视频脚本，不直接盲跑整条任务。", usageTitle2: "确认脚本", usageDesc2: "逐段修改文案、动作提示词和素材描述，再决定是否进入生产。", usageTitle3: "选择风格", usageDesc3: "配音方案和主播图片分开选择，按你的业务习惯自由组合。", usageTitle4: "结果复核", usageDesc4: "完成后按段落查看视频、音频、素材和输出文件，不满意就局部调整。",
+        workspaceKicker: "Workspace", workspaceTitle: "从一个选题开始创建内容任务", workspaceDesc: "这块是整条视频的主操作舞台。先定选题，再确认文案分镜，然后自由组合音色和主播，最后再让系统完成整段生产。",
+        stepTitle1: "01 输入选题", stepDesc1: "先把内容命题说清楚，而不是直接跑整条流程。", stepTitle2: "02 确认脚本", stepDesc2: "先看标题、封面和分镜文案，再决定是否进入下一步制作。", stepTitle3: "03 选择风格", stepDesc3: "音色与主播分开选择，运营自由组合，不做多余系统限制。",
+        stageTitle: "当前操作舞台", stageDesc: "把复杂流程拆成当前最应该做的那个动作，让这套系统更像产品而不是表单。",
+        topInterfaceLanguageLabel: "界面语言", departmentLabel: "业务部门", targetMarketLabel: "内容目标市场", topicInputLabel: "视频选题",
+        webSearchTitle: "启用 Claude 实时联网检索", webSearchDesc: "适合最新政策、新闻、机器人动态、法规调整等时效内容。关闭时更省成本，开启后会优先查新信息。",
+        previewBtnText: "先生成文案", regenBtnText: "重新生成文案", resetBtnText: "清空当前工作台", topicHelper: "建议运营先把选题写成一句完整命题。系统会先返回标题、封面标题和整条分镜脚本，方便先判断内容结构是否成立。",
+        scriptPanelTitle: "先确认脚本，再进入生产", scriptPanelDesc: "数字人段只看动作提示词，素材段只看素材关键词与描述，信息保持清楚，让运营可以快速判断内容节奏。",
+        configPanelTitle: "音色与主播自由组合", configPanelDesc: "配音方案保留业务上的语言和性别差异，主播选择只展示图片本身，不对内容做额外分组判断。", voiceLabel: "配音方案", speedLabel: "语速微调", speedHelper: "当前语速会应用到整条视频的所有配音段落。普通话可以略快，日语和台湾语建议更平稳。", avatarLabel: "选择主播图片", produceBtnText: "开始一站式生产", backToScriptBtnText: "返回查看文案", historyTitle: "历史任务", historyDesc: "这里会保留已经落盘的历史结果。服务重启后，旧任务也可以继续打开与下载。", marketVoiceHint: "当前将自动联动对应市场的默认文案语言与配音方案。", segmentTypeDigital: "数字人段", segmentTypeMaterial: "素材段", segmentLabelScript: "段落文案", segmentLabelAction: "数字人动作提示词", segmentLabelMaterialKeyword: "素材关键词", segmentLabelMaterialDesc: "素材描述", segmentLabelAiRewrite: "告诉 AI 怎么改这一段", segmentAiPlaceholder: "例如：这一段太生硬，改得更像主播口播一点；或者：这一段素材更想强调真实新闻案例。", segmentAiButton: "AI 修改这一段", aiEditing: "AI 修改中...", aiEditRunning: "正在 AI 修改指定文案段落", aiEditDone: "该段文案已更新", aiEditFailed: "AI 修改失败", aiEditNeedPrompt: "请先告诉 AI 这一段要怎么改", progressTitle: "内容生产进行中", progressDesc: "这里会把当前流程拆成阶段，让运营知道系统现在处理到哪一步，而不是只看到一串技术日志。", progressWaiting: "等待开始", heroReady: "工作台已就绪", heroRunning: "任务进行中", heroDone: "生产完成", topicPlaceholder: "例如：为什么越来越多台湾家庭开始关注日本置业？\n或者：日本买房后最容易忽略的三个持有成本", noHistory: "暂时还没有历史任务。", historyLoadError: "历史任务加载失败。", historyDelete: "删除", historyDeleteConfirm: "确定要删除这条历史任务吗？删除后无法恢复。", historyDeleteFailed: "删除历史任务失败。", noAvatar: "当前还没有可用的数字人主播素材，请先在服务器 assets 目录补充图片。", noAvatarHint: "当前没有可选主播。", avatarHint: "当前共 {count} 个主播素材，运营可以自由组合音色与主播。", marketDefaultPrefix: "当前目标市场默认", previewLabelTitle: "视频标题", previewLabelCover: "封面标题", previewLabelDuration: "预计总时长", previewLabelWebSearch: "实时联网检索", previewLabelMarket: "目标市场", previewLabelDepartment: "业务部门", workflowLabelVoice: "本次配音方案", workflowLabelAvatar: "本次主播图片", workflowLabelMarketDepartment: "目标市场 / 部门", workflowLabelWebSearch: "实时联网检索", workflowAvatarSelected: "已选择 1 张主播图片", workflowNotRecorded: "未记录", workflowWebSearchOn: "已开启，优先参考最新信息", workflowWebSearchOff: "未开启，按常规模型生成", statusOn: "已开启", statusOff: "未开启", statusUnset: "未设置", statusNotGenerated: "未生成", statusNone: "暂无", unitSeconds: "秒", unitSegments: "段", voiceSampleFallback: "试听参考", voiceAutoSelected: "已自动选中", avatarSelectedTag: "已选中", avatarSelectTag: "点击选择", progressRunning: "正在处理", progressDone: "已完成", resultReadyTitle: "视频内容已生成", resultSubtitlePrefix: "封面标题：", resultSubtitleSegments: "共 {count} 段", resultKpiTitle: "视频标题", resultKpiDuration: "总时长", resultKpiSegments: "完成段数", resultMaterialBlock: "素材关键词与描述", resultKeywordPrefix: "关键词：", resultSearchPrefix: "检索词：", resultDescPrefix: "描述：", resultAudioLabel: "对应配音", resultVisualLabel: "视觉结果", resultNoAudio: "暂无配音文件", resultNoVideo: "数字人视频暂未生成", resultNoMaterials: "暂无素材图", resultNoFiles: "暂无输出文件。", resultDownloadVideo: "下载数字人视频", resultRegenerateVideo: "重新生成数字人视频", resultDownloadMaterial: "下载素材", resultDeleteMaterial: "删除", resultUploadReplace: "上传替换素材", resultUploadMaterial: "上传素材", resultPickMaterialsFirst: "请先选择要上传的素材图片", resultUploading: "上传中...", resultUploadFailed: "上传素材失败", resultDeleteFailed: "删除素材失败", resultRegenerating: "重新生成中...", resultRegenerateRunning: "正在单独重生成数字人视频", resultRegenerateDone: "数字人视频已重新生成", resultRegenerateFailed: "数字人重生成失败", filesDownload: "下载", newsRefTitle: "新闻来源参考", newsRefDesc: "系统已为这段素材文案匹配可直接打开的参考报道或官网链接", newsRefOpen: "查看参考来源", newsRefSource: "新闻来源", scriptTabSegments: "分镜脚本", scriptTabSocial: "SNS文案", resultTabSegments: "段落预览", resultTabSocial: "SNS文案", resultTabFiles: "输出文件", composeVideo: "一键生成成片", finalVideoLabel: "完整成片", finalCoverLabel: "封面图", finalSubtitleLabel: "字幕文件", downloadFinalVideo: "下载成片", downloadCoverImage: "下载封面", downloadSubtitle: "下载字幕", composingVideo: "正在生成成片...", composeVideoDone: "成片已生成", composeVideoFailed: "生成成片失败", bundleDownload: "一键打包下载", newTaskBtn: "继续创建下一条", lightboxClose: "关闭", previewGenerating: "文案生成中...", previewGenerated: "文案已生成，等待确认", previewFailed: "文案生成失败", needTopic: "请先输入视频选题", needScript: "请先生成并确认文案", needVoice: "请先选择一个配音方案", needAvatar: "请先选择一张主播图片", produceCreating: "正在创建生产任务...", produceFailed: "创建任务失败", taskFailed: "任务失败", taskFailedDesc: "任务执行失败，请查看日志。", initFailed: "初始化失败"
+      },
+      "zh-TW": {
+        brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "內容生產流程", workflowIntro: "讓營運同事從選題、腳本、配音到數位人和素材，都在同一頁完成。",
+        usageTitle1: "輸入選題", usageDesc1: "先生成整條影片腳本，不直接盲跑整條任務。", usageTitle2: "確認腳本", usageDesc2: "逐段修改文案、動作提示詞和素材描述，再決定是否進入生產。", usageTitle3: "選擇風格", usageDesc3: "配音方案和主播圖片分開選擇，依你的工作習慣自由組合。", usageTitle4: "結果複核", usageDesc4: "完成後按段落查看影片、音訊、素材與輸出檔案，不滿意就局部調整。",
+        workspaceKicker: "Workspace", workspaceTitle: "從一個選題開始建立內容任務", workspaceDesc: "這裡是整條影片的主操作舞台。先定選題，再確認腳本文案，接著自由組合音色和主播，最後再讓系統完成整段生產。",
+        stepTitle1: "01 輸入選題", stepDesc1: "先把內容命題說清楚，而不是直接跑整條流程。", stepTitle2: "02 確認腳本", stepDesc2: "先看標題、封面和分鏡文案，再決定是否進入下一步製作。", stepTitle3: "03 選擇風格", stepDesc3: "音色與主播分開選擇，營運可自由組合。",
+        stageTitle: "目前操作舞台", stageDesc: "把複雜流程拆成當前最應該做的那個動作，讓這套系統更像產品而不是表單。",
+        topInterfaceLanguageLabel: "介面語言", departmentLabel: "業務部門", targetMarketLabel: "內容目標市場", topicInputLabel: "影片選題",
+        webSearchTitle: "啟用 Claude 即時聯網檢索", webSearchDesc: "適合最新政策、新聞、機器人動態與法規調整等時效內容。關閉時更省成本，開啟後會優先查新資訊。",
+        previewBtnText: "先生成文案", regenBtnText: "重新生成文案", resetBtnText: "清空目前工作台", topicHelper: "建議先把選題寫成一句完整命題。系統會先返回標題、封面標題和整條分鏡腳本，方便先判斷內容結構是否成立。",
+        scriptPanelTitle: "先確認腳本，再進入生產", scriptPanelDesc: "數位人段只看動作提示詞，素材段只看素材關鍵詞與描述，讓營運可以快速判斷內容節奏。",
+        configPanelTitle: "音色與主播自由組合", configPanelDesc: "配音方案保留業務上的語言和性別差異，主播選擇只展示圖片本身。", voiceLabel: "配音方案", speedLabel: "語速微調", speedHelper: "目前語速會套用到整條影片的所有配音段落。普通話可以略快，日語和台灣語建議更平穩。", avatarLabel: "選擇主播圖片", produceBtnText: "開始一站式生產", backToScriptBtnText: "返回查看文案", historyTitle: "歷史任務", historyDesc: "這裡會保留已經落盤的歷史結果。服務重啟後，舊任務也可以繼續打開與下載。", marketVoiceHint: "目前會自動連動對應市場的預設文案語言與配音方案。", segmentTypeDigital: "數位人段", segmentTypeMaterial: "素材段", segmentLabelScript: "段落文案", segmentLabelAction: "數位人動作提示詞", segmentLabelMaterialKeyword: "素材關鍵詞", segmentLabelMaterialDesc: "素材描述", segmentLabelAiRewrite: "告訴 AI 怎麼改這一段", segmentAiPlaceholder: "例如：這一段太生硬，改得更像主播口播一點；或者：這一段素材更想強調真實新聞案例。", segmentAiButton: "AI 修改這一段", aiEditing: "AI 修改中...", aiEditRunning: "正在 AI 修改指定文案段落", aiEditDone: "這段文案已更新", aiEditFailed: "AI 修改失敗", aiEditNeedPrompt: "請先告訴 AI 這一段要怎麼改", progressTitle: "內容生產進行中", progressDesc: "這裡會把目前流程拆成階段，讓營運知道系統現在處理到哪一步，而不是只看到一串技術日誌。", progressWaiting: "等待開始", heroReady: "工作台已就緒", heroRunning: "任務進行中", heroDone: "生產完成", topicPlaceholder: "例如：為什麼越來越多台灣家庭開始關注日本置業？\n或者：日本買房後最容易忽略的三個持有成本", noHistory: "暫時還沒有歷史任務。", historyLoadError: "歷史任務載入失敗。", historyDelete: "刪除", historyDeleteConfirm: "確定要刪除這筆歷史任務嗎？刪除後無法恢復。", historyDeleteFailed: "刪除歷史任務失敗。", noAvatar: "目前還沒有可用的數位人主播素材，請先在伺服器 assets 目錄補上圖片。", noAvatarHint: "目前沒有可選主播。", avatarHint: "目前共 {count} 個主播素材，營運可以自由組合音色與主播。", marketDefaultPrefix: "目前目標市場預設", previewLabelTitle: "影片標題", previewLabelCover: "封面標題", previewLabelDuration: "預計總時長", previewLabelWebSearch: "即時聯網檢索", previewLabelMarket: "目標市場", previewLabelDepartment: "業務部門", workflowLabelVoice: "本次配音方案", workflowLabelAvatar: "本次主播圖片", workflowLabelMarketDepartment: "目標市場 / 部門", workflowLabelWebSearch: "即時聯網檢索", workflowAvatarSelected: "已選擇 1 張主播圖片", workflowNotRecorded: "未記錄", workflowWebSearchOn: "已開啟，優先參考最新資訊", workflowWebSearchOff: "未開啟，按一般模型生成", statusOn: "已開啟", statusOff: "未開啟", statusUnset: "未設定", statusNotGenerated: "未生成", statusNone: "暫無", unitSeconds: "秒", unitSegments: "段", voiceSampleFallback: "試聽參考", voiceAutoSelected: "已自動選取", avatarSelectedTag: "已選中", avatarSelectTag: "點擊選擇", progressRunning: "處理中", progressDone: "已完成", resultReadyTitle: "影片內容已生成", resultSubtitlePrefix: "封面標題：", resultSubtitleSegments: "共 {count} 段", resultKpiTitle: "影片標題", resultKpiDuration: "總時長", resultKpiSegments: "完成段數", resultMaterialBlock: "素材關鍵詞與描述", resultKeywordPrefix: "關鍵詞：", resultSearchPrefix: "檢索詞：", resultDescPrefix: "描述：", resultAudioLabel: "對應配音", resultVisualLabel: "視覺結果", resultNoAudio: "暫無配音檔", resultNoVideo: "數位人影片尚未生成", resultNoMaterials: "暫無素材圖", resultNoFiles: "暫無輸出檔案。", resultDownloadVideo: "下載數位人影片", resultRegenerateVideo: "重新生成數位人影片", resultDownloadMaterial: "下載素材", resultDeleteMaterial: "刪除", resultUploadReplace: "上傳替換素材", resultUploadMaterial: "上傳素材", resultPickMaterialsFirst: "請先選擇要上傳的素材圖片", resultUploading: "上傳中...", resultUploadFailed: "上傳素材失敗", resultDeleteFailed: "刪除素材失敗", resultRegenerating: "重新生成中...", resultRegenerateRunning: "正在單獨重生成數位人影片", resultRegenerateDone: "數位人影片已重新生成", resultRegenerateFailed: "數位人重生成失敗", filesDownload: "下載", newsRefTitle: "新聞來源參考", newsRefDesc: "系統已為這段素材文案匹配可直接打開的參考報導或官網連結", newsRefOpen: "查看參考來源", newsRefSource: "新聞來源", scriptTabSegments: "分鏡腳本", scriptTabSocial: "SNS文案", resultTabSegments: "段落預覽", resultTabSocial: "SNS文案", resultTabFiles: "輸出檔案", composeVideo: "一鍵生成成片", finalVideoLabel: "完整成片", finalCoverLabel: "封面圖", finalSubtitleLabel: "字幕檔", downloadFinalVideo: "下載成片", downloadCoverImage: "下載封面", downloadSubtitle: "下載字幕", composingVideo: "正在生成成片...", composeVideoDone: "成片已生成", composeVideoFailed: "生成成片失敗", bundleDownload: "一鍵打包下載", newTaskBtn: "繼續建立下一條", lightboxClose: "關閉", previewGenerating: "文案生成中...", previewGenerated: "文案已生成，等待確認", previewFailed: "文案生成失敗", needTopic: "請先輸入影片選題", needScript: "請先生成並確認文案", needVoice: "請先選擇一個配音方案", needAvatar: "請先選擇一張主播圖片", produceCreating: "正在建立生產任務...", produceFailed: "建立任務失敗", taskFailed: "任務失敗", taskFailedDesc: "任務執行失敗，請查看日誌。", initFailed: "初始化失敗"
+      },
+      "ja-JP": {
+        brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "制作フロー", workflowIntro: "企画、台本、音声、デジタルヒューマン、素材確認までを1ページで進められます。",
+        usageTitle1: "テーマ入力", usageDesc1: "まず動画全体の台本を生成し、いきなり本番処理は行いません。", usageTitle2: "台本確認", usageDesc2: "各セグメントの文案、動き、素材説明を確認してから制作に進みます。", usageTitle3: "設定選択", usageDesc3: "音声プランとアバター画像を分けて選び、自由に組み合わせます。", usageTitle4: "結果確認", usageDesc4: "完成後は各段落ごとに動画・音声・素材・出力ファイルを確認し、必要なら部分修正します。",
+        workspaceKicker: "Workspace", workspaceTitle: "テーマから制作タスクを開始", workspaceDesc: "最初にテーマを決め、次に台本を確認し、その後で音声とアバターを組み合わせて動画全体を制作します。",
+        stepTitle1: "01 テーマ入力", stepDesc1: "最初に内容の軸を明確にします。", stepTitle2: "02 台本確認", stepDesc2: "タイトル、カバー文、各セグメントを確認してから次へ進みます。", stepTitle3: "03 スタイル選択", stepDesc3: "音声とアバターを分けて選択し、自由に組み合わせます。",
+        stageTitle: "現在の作業エリア", stageDesc: "複雑な工程を今やるべき作業に絞って表示します。",
+        topInterfaceLanguageLabel: "画面言語", departmentLabel: "部門", targetMarketLabel: "対象市場", topicInputLabel: "動画テーマ",
+        webSearchTitle: "Claude リアルタイム検索を有効化", webSearchDesc: "最新ニュース、政策、ロボット動向、法改正など時事性の高い内容に向いています。",
+        previewBtnText: "台本を生成", regenBtnText: "再生成", resetBtnText: "リセット", topicHelper: "まずはテーマを1文で入力してください。最初にタイトル、カバー文、全体台本を返します。",
+        scriptPanelTitle: "台本を確認してから制作へ", scriptPanelDesc: "デジタルヒューマン段は動作指示のみ、素材段はキーワードと説明のみを表示します。",
+        configPanelTitle: "音声とアバターを自由に組み合わせる", configPanelDesc: "音声プランとアバター画像を独立して選択できます。", voiceLabel: "音声プラン", speedLabel: "話速調整", speedHelper: "現在の話速は全セグメントの音声に適用されます。", avatarLabel: "アバター画像", produceBtnText: "一括制作を開始", backToScriptBtnText: "台本に戻る", historyTitle: "履歴タスク", historyDesc: "保存済みの過去結果をここから再度開いて確認できます。", marketVoiceHint: "対象市場に応じて既定の文案言語と音声プランが自動連動します。", segmentTypeDigital: "デジタルヒューマン", segmentTypeMaterial: "素材セグメント", segmentLabelScript: "セグメント文案", segmentLabelAction: "動作プロンプト", segmentLabelMaterialKeyword: "素材キーワード", segmentLabelMaterialDesc: "素材説明", segmentLabelAiRewrite: "この段落をどう直すか AI に伝える", segmentAiPlaceholder: "例：少し硬いので、もっと自然な口播きにしてほしい。あるいは、素材は実際のニュース事例を強調したい。", segmentAiButton: "この段落を AI 修正", aiEditing: "AI 修正中...", aiEditRunning: "AI がこの段落を修正しています", aiEditDone: "この段落を更新しました", aiEditFailed: "AI 修正に失敗しました", aiEditNeedPrompt: "先に AI への修正指示を入力してください", progressTitle: "制作進行中", progressDesc: "各工程を分けて表示し、いまどこまで進んでいるかを分かりやすくします。", progressWaiting: "待機中", heroReady: "ワークスペース準備完了", heroRunning: "タスク実行中", heroDone: "制作完了", topicPlaceholder: "例：なぜ今、台湾の家族が日本の不動産に注目しているのか？\nまたは：日本で家を買った後に見落としやすい保有コスト3つ", noHistory: "履歴タスクはまだありません。", historyLoadError: "履歴タスクの読み込みに失敗しました。", historyDelete: "削除", historyDeleteConfirm: "この履歴タスクを削除しますか？削除後は元に戻せません。", historyDeleteFailed: "履歴タスクの削除に失敗しました。", noAvatar: "利用可能なアバター画像がありません。サーバーの assets ディレクトリに画像を追加してください。", noAvatarHint: "現在選択できるアバターはありません。", avatarHint: "現在 {count} 件のアバター素材があります。音声とアバターは自由に組み合わせできます。", marketDefaultPrefix: "現在の対象市場の既定", previewLabelTitle: "動画タイトル", previewLabelCover: "カバータイトル", previewLabelDuration: "想定尺", previewLabelWebSearch: "リアルタイム検索", previewLabelMarket: "対象市場", previewLabelDepartment: "部門", workflowLabelVoice: "今回の音声プラン", workflowLabelAvatar: "今回のアバター画像", workflowLabelMarketDepartment: "対象市場 / 部門", workflowLabelWebSearch: "リアルタイム検索", workflowAvatarSelected: "アバター画像を1枚選択済み", workflowNotRecorded: "未記録", workflowWebSearchOn: "有効。最新情報を優先", workflowWebSearchOff: "無効。通常生成", statusOn: "有効", statusOff: "無効", statusUnset: "未設定", statusNotGenerated: "未生成", statusNone: "まだありません", unitSeconds: "秒", unitSegments: "本", voiceSampleFallback: "試聴サンプル", voiceAutoSelected: "自動選択中", avatarSelectedTag: "選択中", avatarSelectTag: "選択する", progressRunning: "処理中", progressDone: "完了", resultReadyTitle: "動画コンテンツを生成しました", resultSubtitlePrefix: "カバータイトル：", resultSubtitleSegments: "全 {count} 本", resultKpiTitle: "動画タイトル", resultKpiDuration: "総尺", resultKpiSegments: "完了セグメント数", resultMaterialBlock: "素材キーワードと説明", resultKeywordPrefix: "キーワード：", resultSearchPrefix: "検索語：", resultDescPrefix: "説明：", resultAudioLabel: "対応音声", resultVisualLabel: "ビジュアル結果", resultNoAudio: "音声ファイルはまだありません", resultNoVideo: "デジタルヒューマン動画はまだ生成されていません", resultNoMaterials: "素材画像はまだありません", resultNoFiles: "出力ファイルはまだありません。", resultDownloadVideo: "デジタルヒューマン動画をダウンロード", resultRegenerateVideo: "この動画を再生成", resultDownloadMaterial: "素材をダウンロード", resultDeleteMaterial: "削除", resultUploadReplace: "差し替え素材をアップロード", resultUploadMaterial: "素材をアップロード", resultPickMaterialsFirst: "先にアップロードする素材画像を選択してください", resultUploading: "アップロード中...", resultUploadFailed: "素材アップロードに失敗しました", resultDeleteFailed: "素材削除に失敗しました", resultRegenerating: "再生成中...", resultRegenerateRunning: "デジタルヒューマン動画を再生成しています", resultRegenerateDone: "デジタルヒューマン動画を再生成しました", resultRegenerateFailed: "動画の再生成に失敗しました", filesDownload: "ダウンロード", newsRefTitle: "ニュース参考リンク", newsRefDesc: "この素材文案に近い参考記事や公式ページを自動で表示しています", newsRefOpen: "参考リンクを開く", newsRefSource: "情報源", scriptTabSegments: "構成台本", scriptTabSocial: "SNS文案", resultTabSegments: "段落プレビュー", resultTabSocial: "SNS文案", resultTabFiles: "出力ファイル", composeVideo: "自動で完成動画を作成", finalVideoLabel: "完成動画", finalCoverLabel: "カバー画像", finalSubtitleLabel: "字幕ファイル", downloadFinalVideo: "完成動画をダウンロード", downloadCoverImage: "カバーをダウンロード", downloadSubtitle: "字幕をダウンロード", composingVideo: "完成動画を生成中...", composeVideoDone: "完成動画を生成しました", composeVideoFailed: "完成動画の生成に失敗しました", bundleDownload: "一括パッケージをダウンロード", newTaskBtn: "次のタスクを作成", lightboxClose: "閉じる", previewGenerating: "台本生成中...", previewGenerated: "台本を生成しました。確認待ちです", previewFailed: "台本生成に失敗しました", needTopic: "先に動画テーマを入力してください", needScript: "先に台本を生成して確認してください", needVoice: "先に音声プランを選択してください", needAvatar: "先にアバター画像を選択してください", produceCreating: "制作タスクを作成しています...", produceFailed: "タスク作成に失敗しました", taskFailed: "タスク失敗", taskFailedDesc: "タスク実行に失敗しました。ログを確認してください。", initFailed: "初期化に失敗しました"
+      }
+    };
+
+
+    const COMPOSITION_OPTION_COPY = {
+      "zh-CN": {
+        transitionLabel: "素材转场",
+        subtitleTemplateLabel: "字幕模板",
+        settingsTitle: "成片设置",
+        settingsDesc: "先选好素材转场和字幕模板，再生成完整成片。",
+        transitions: { none: "直接切换", fade: "柔和淡入" },
+        subtitleTemplates: { classic: "经典字幕", minimal: "极简字幕", bold: "强化字幕" }
+      },
+      "zh-TW": {
+        transitionLabel: "素材轉場",
+        subtitleTemplateLabel: "字幕模板",
+        settingsTitle: "成片設定",
+        settingsDesc: "先選好素材轉場和字幕模板，再生成完整成片。",
+        transitions: { none: "直接切換", fade: "柔和淡入" },
+        subtitleTemplates: { classic: "經典字幕", minimal: "極簡字幕", bold: "強化字幕" }
+      },
+      "ja-JP": {
+        transitionLabel: "素材トランジション",
+        subtitleTemplateLabel: "字幕テンプレート",
+        settingsTitle: "完成動画設定",
+        settingsDesc: "素材の切り替え方と字幕テンプレートを選んでから完成動画を生成します。",
+        transitions: { none: "カット", fade: "やわらかいフェード" },
+        subtitleTemplates: { classic: "標準字幕", minimal: "ミニマル字幕", bold: "強調字幕" }
+      }
+    };
+
+    function currentCopy() {
+      return UI_COPY[state.selectedInterfaceLanguage] || UI_COPY['zh-CN'];
+    }
+
+    function copyText(key, fallback = '') {
+      return currentCopy()[key] || fallback;
+    }
+
+    function currentUserDefaults() {
+      if (state.currentUser) {
+        return {
+          interfaceLanguage: state.currentUser.interface_language || 'zh-CN',
+          departmentId: state.currentUser.department_id || 'real_estate',
+          targetMarket: state.currentUser.target_market || 'cn',
+        };
+      }
+      const fallback = defaultsForInterfaceLanguage(state.selectedInterfaceLanguage || 'zh-CN');
+      return {
+        interfaceLanguage: state.selectedInterfaceLanguage || 'zh-CN',
+        departmentId: fallback.departmentId,
+        targetMarket: fallback.targetMarket,
+      };
+    }
+
+    function setAuthVisible(visible) {
+      els.authOverlay.style.display = visible ? 'flex' : 'none';
+    }
+
+    function renderSessionUser() {
+      if (!state.currentUser) {
+        els.sessionUser.style.display = 'none';
+        els.logoutBtn.style.display = 'none';
+        els.adminPanel.style.display = 'none';
+        return;
+      }
+      const roleLabel = state.currentUser.role === 'admin' ? 'Admin' : 'User';
+      els.sessionUser.textContent = `${state.currentUser.display_name} · ${state.currentUser.username} · ${roleLabel}`;
+      els.sessionUser.style.display = 'inline-flex';
+      els.logoutBtn.style.display = 'inline-flex';
+      els.adminPanel.style.display = state.currentUser.role === 'admin' ? 'block' : 'none';
+    }
+
+    function applyUserDefaults(user) {
+      if (!user) return;
+      state.currentUser = user;
+      state.selectedInterfaceLanguage = user.interface_language || 'zh-CN';
+      state.selectedDepartmentId = user.department_id || 'real_estate';
+      state.selectedTargetMarket = user.target_market || 'cn';
+      state.selectedVoiceId = null;
+      renderSessionUser();
+    }
+
+    function renderAdminStats(data) {
+      state.adminStats = data;
+      if (!state.currentUser || state.currentUser.role !== 'admin') {
+        els.adminPanel.style.display = 'none';
+        return;
+      }
+      els.adminPanel.style.display = 'block';
+      const users = Array.isArray(data?.users) ? data.users : [];
+      const unassigned = Array.isArray(data?.unassigned) ? data.unassigned : [];
+      const sections = users.map(item => `
+        <div class="admin-stat-card">
+          <div class="admin-stat-head">
+            <div class="admin-stat-name">${escapeHtml(item.display_name || item.username)}</div>
+            <div class="admin-stat-count">${escapeHtml(String(item.count || 0))} 条</div>
+          </div>
+          <div class="admin-history-list">
+            ${(item.histories || []).length ? item.histories.slice(0, 5).map(history => `<div class="admin-history-item">${escapeHtml(history.title || history.topic || history.history_id)}</div>`).join('') : `<div class="admin-history-item">暂无记录</div>`}
+          </div>
+        </div>
+      `).join('');
+      const unassignedBlock = unassigned.length ? `
+        <div class="admin-stat-card">
+          <div class="admin-stat-head">
+            <div class="admin-stat-name">未归属历史</div>
+            <div class="admin-stat-count">${escapeHtml(String(unassigned.length))} 条</div>
+          </div>
+          <div class="admin-history-list">${unassigned.slice(0, 5).map(item => `<div class="admin-history-item">${escapeHtml(item.title || item.topic || item.history_id)}</div>`).join('')}</div>
+        </div>
+      ` : '';
+      els.adminStats.innerHTML = sections + unassignedBlock;
+    }
+
+    async function loadAdminStats() {
+      if (!state.currentUser || state.currentUser.role !== 'admin') {
+        els.adminPanel.style.display = 'none';
+        return;
+      }
+      const res = await fetch('/api/admin/stats');
+      if (res.status === 401) {
+        state.currentUser = null;
+        renderSessionUser();
+        setAuthVisible(true);
+        return;
+      }
+      const data = await res.json();
+      if (res.ok) renderAdminStats(data);
+    }
+
+    async function loadCurrentUser() {
+      const res = await fetch('/api/me');
+      if (res.status === 401) {
+        state.currentUser = null;
+        renderSessionUser();
+        setAuthVisible(true);
+        return null;
+      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '用户状态加载失败');
+      applyUserDefaults(data.user);
+      setAuthVisible(false);
+      return data.user;
+    }
+
+    async function initializeWorkspace() {
+      const user = await loadCurrentUser();
+      if (!user) return;
+      await loadOptions();
+      await loadHistory();
+      await loadAdminStats();
+    }
+
+    async function handleLogin(event) {
+      event.preventDefault();
+      els.loginError.textContent = '';
+      const formData = new FormData();
+      formData.append('username', els.loginUsername.value.trim());
+      formData.append('password', els.loginPassword.value);
+      const res = await fetch('/api/login', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) {
+        els.loginError.textContent = data.error || '登录失败';
+        return;
+      }
+      applyUserDefaults(data.user);
+      await loadOptions();
+      await loadHistory();
+      await loadAdminStats();
+      setAuthVisible(false);
+      els.loginPassword.value = '';
+      setHeroStatus(currentCopy().heroReady || '工作台已就绪');
+    }
+
+    async function handleLogout() {
+      await fetch('/api/logout', { method: 'POST' });
+      state.currentUser = null;
+      state.historyItems = [];
+      state.currentHistoryId = null;
+      state.currentTaskId = null;
+      state.resultData = null;
+      renderSessionUser();
+      renderHistory([]);
+      els.adminStats.innerHTML = '';
+      setAuthVisible(true);
+      els.loginUsername.focus();
+    }
+
+    function localizedTargetMarketName(marketId, fallback = '') {
+      return optionLabel('targetMarkets', marketId, fallback || marketId || '');
+    }
+
+    function localizedDepartmentName(departmentId, fallback = '') {
+      return optionLabel('departments', departmentId, fallback || departmentId || '');
+    }
+
+    function localizedVoicePreset(preset) {
+      const localized = VOICE_PRESET_COPY[state.selectedInterfaceLanguage]?.[preset.id];
+      return {
+        ...preset,
+        name: localized?.name || preset.name,
+        subtitle: localized?.subtitle || preset.subtitle,
+        style: localized?.style || preset.style,
+        tags: localized?.tags || preset.tags || [],
+        sample_text: localized?.sample_text || preset.sample_text || ''
+      };
+    }
+
+    function interfaceLanguageForMarket(marketId) {
+      const market = (state.options?.target_markets || []).find(item => item.id === marketId);
+      if (!market) return 'zh-CN';
+      if (market.id === 'tw') return 'zh-TW';
+      if (market.id === 'jp') return 'ja-JP';
+      const contentLanguage = String(market.content_language || '').toLowerCase();
+      if (contentLanguage.includes('繁') || contentLanguage.includes('tw')) return 'zh-TW';
+      if (contentLanguage.includes('日') || contentLanguage.includes('ja')) return 'ja-JP';
+      return 'zh-CN';
+    }
+
+    function defaultsForInterfaceLanguage(lang) {
+      if (lang === 'zh-TW') {
+        return { departmentId: 'real_estate', targetMarket: 'tw' };
+      }
+      if (lang === 'ja-JP') {
+        return { departmentId: 'robotics', targetMarket: 'jp' };
+      }
+      return { departmentId: 'real_estate', targetMarket: 'cn' };
+    }
+
+    function applyInterfaceLanguage(lang) {
+      const dict = UI_COPY[lang] || UI_COPY['zh-CN'];
+      Object.entries(dict).forEach(([id, value]) => {
+        const node = document.getElementById(id);
+        if (node) node.textContent = value;
+      });
+      els.topicInput.placeholder = dict.topicPlaceholder || els.topicInput.placeholder;
+      document.documentElement.lang = lang === 'ja-JP' ? 'ja' : 'zh-CN';
+      const scriptTabSegments = document.getElementById('scriptTabSegments');
+      const scriptTabSocial = document.getElementById('scriptTabSocial');
+      const resultTabSegments = document.getElementById('resultTabSegments');
+      const resultTabSocial = document.getElementById('resultTabSocial');
+      const resultTabFiles = document.getElementById('resultTabFiles');
+      if (scriptTabSegments) scriptTabSegments.textContent = dict.scriptTabSegments || scriptTabSegments.textContent;
+      if (scriptTabSocial) scriptTabSocial.textContent = dict.scriptTabSocial || scriptTabSocial.textContent;
+      if (resultTabSegments) resultTabSegments.textContent = dict.resultTabSegments || resultTabSegments.textContent;
+      if (resultTabSocial) resultTabSocial.textContent = dict.resultTabSocial || resultTabSocial.textContent;
+      if (resultTabFiles) resultTabFiles.textContent = dict.resultTabFiles || resultTabFiles.textContent;
+    }
+
+    function renderInterfaceOptions() {
+      const langs = state.options?.interface_languages || [];
+      const departments = state.options?.departments || [];
+      const markets = state.options?.target_markets || [];
+      const langOptions = langs.map(item => `<option value="${item.id}" ${item.id === state.selectedInterfaceLanguage ? 'selected' : ''}>${escapeHtml(optionLabel('interfaceLanguages', item.id, item.name))}</option>`).join('');
+      els.topInterfaceLanguageSelect.innerHTML = langOptions;
+      els.departmentSelect.innerHTML = departments.map(item => `<option value="${item.id}" ${item.id === state.selectedDepartmentId ? 'selected' : ''}>${escapeHtml(optionLabel('departments', item.id, item.name))}</option>`).join('');
+      els.targetMarketSelect.innerHTML = markets.map(item => `<option value="${item.id}" ${item.id === state.selectedTargetMarket ? 'selected' : ''}>${escapeHtml(optionLabel('targetMarkets', item.id, item.name))}｜${escapeHtml(optionLabel('contentLanguages', item.content_language, item.content_language || ''))}</option>`).join('');
+      applyInterfaceLanguage(state.selectedInterfaceLanguage);
+      const market = markets.find(item => item.id === state.selectedTargetMarket);
+      const defaultVoice = (state.options?.voice_presets || []).find(item => item.id === market?.default_voice_preset_id);
+      if (els.marketVoiceHint) {
+        const prefix = currentCopy().marketVoiceHint || '当前将自动联动对应市场的默认文案语言与配音方案。';
+        if (market && defaultVoice) {
+          els.marketVoiceHint.textContent = `${prefix} ${optionLabel('targetMarkets', market.id, market.name)} / ${optionLabel('contentLanguages', market.content_language, market.content_language || '')} / ${defaultVoice.name}`;
+        } else {
+          els.marketVoiceHint.textContent = prefix;
+        }
+      }
+    }
+
+    function syncVoicePresetToMarket(force = false) {
+      const market = (state.options?.target_markets || []).find(item => item.id === state.selectedTargetMarket);
+      if (!market) return;
+      const defaultVoiceId = market.default_voice_preset_id;
+      if (!defaultVoiceId) return;
+      if (force || !state.selectedVoiceId) {
+        state.selectedVoiceId = defaultVoiceId;
+      } else {
+        state.selectedVoiceId = defaultVoiceId;
+      }
+      const selected = (state.options?.voice_presets || []).find(item => item.id === state.selectedVoiceId);
+      if (selected?.default_speed) {
+        els.speedRange.value = Number(selected.default_speed).toFixed(2);
+        els.speedValue.value = Number(selected.default_speed).toFixed(2);
+      }
+    }
+
+    function updateSelectionSummary() {
+      return;
+    }
+
+    function activateStep(name) {
+      if (els.pillScript) {
+        els.pillScript.classList.toggle('active', name === 'script' || name === 'config' || name === 'result');
+      }
+      if (els.pillConfig) {
+        els.pillConfig.classList.toggle('active', name === 'config' || name === 'progress' || name === 'result');
+      }
+    }
+
+    async function loadOptions() {
+      const res = await fetch('/api/workbench/options');
+      if (res.status === 401) {
+        state.currentUser = null;
+        renderSessionUser();
+        setAuthVisible(true);
+        return;
+      }
+      state.options = await res.json();
+      const defaults = currentUserDefaults();
+      state.selectedInterfaceLanguage = defaults.interfaceLanguage;
+      state.selectedDepartmentId = defaults.departmentId;
+      state.selectedTargetMarket = defaults.targetMarket;
+      renderInterfaceOptions();
+      syncVoicePresetToMarket(true);
+      state.selectedComposeTransitionId = state.options?.composition_transitions?.[0]?.id || 'fade';
+      state.selectedSubtitleTemplateId = state.options?.subtitle_templates?.[0]?.id || 'classic';
+      renderVoicePresets();
+      renderAvatarOptions();
+      updateSelectionSummary();
+    }
+
+    function getVisibleVoicePresets() {
+      const presets = state.options?.voice_presets || [];
+      if (state.selectedTargetMarket === 'tw') {
+        return presets.filter(item => item.id === 'taiwan_female');
+      }
+      if (state.selectedTargetMarket === 'jp') {
+        return presets.filter(item => item.id === 'japanese_female');
+      }
+      return presets.filter(item => item.id === 'mandarin_female' || item.id === 'mandarin_male')
+        .sort((a, b) => {
+          const order = { mandarin_female: 0, mandarin_male: 1 };
+          return (order[a.id] ?? 99) - (order[b.id] ?? 99);
+        });
+    }
+
+    function renderVoicePresets() {
+      const presets = getVisibleVoicePresets();
+      const market = (state.options?.target_markets || []).find(item => item.id === state.selectedTargetMarket);
+      if (!presets.some(item => item.id === state.selectedVoiceId)) {
+        state.selectedVoiceId = presets[0]?.id || null;
+      }
+      els.voicePresetGrid.innerHTML = presets.map(preset => {
+        const localizedPreset = localizedVoicePreset(preset);
+        return `
+        <article class="preset-card ${preset.id === state.selectedVoiceId ? 'selected' : ''}" data-voice-id="${preset.id}">
+          <div class="preset-head">
+            <div>
+              <div class="preset-name">${escapeHtml(localizedPreset.name)}</div>
+              <div class="preset-subtitle">${escapeHtml(localizedPreset.subtitle)}</div>
+            </div>
+            <div class="segment-index">${escapeHtml(String(preset.gender === 'male' ? copyText('genderMale', '男') : copyText('genderFemale', '女')))}</div>
+          </div>
+          <div class="preset-body">${escapeHtml(localizedPreset.style)}</div>
+          <div class="tags">${(localizedPreset.tags || []).map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>
+          <div class="helper">${market ? `${escapeHtml(copyText('marketDefaultPrefix', '当前目标市场默认'))}：${escapeHtml(localizedTargetMarketName(market.id, market.name))}` : copyText('voiceSampleFallback', '试听参考')} · ${preset.id === state.selectedVoiceId ? `<strong style="color:var(--brand-deep);">${escapeHtml((optionLabel('contentLanguages', market?.content_language, market?.content_language || localizedPreset.subtitle) || localizedPreset.subtitle) + " / " + copyText('voiceAutoSelected', '已自动选中'))}</strong> · ` : ""}${escapeHtml(localizedPreset.sample_text || '')}</div>
+        </article>
+      `}).join('');
+
+      document.querySelectorAll('.preset-card').forEach(card => {
+        card.addEventListener('click', () => {
+          state.selectedVoiceId = card.dataset.voiceId;
+          const selected = presets.find(item => item.id === state.selectedVoiceId);
+          if (selected?.default_speed) {
+            els.speedRange.value = Number(selected.default_speed).toFixed(2);
+            els.speedValue.value = Number(selected.default_speed).toFixed(2);
+          }
+          renderVoicePresets();
+          updateSelectionSummary();
+        });
+      });
+    }
+
+    function renderAvatarOptions() {
+      const avatars = state.options?.avatars || [];
+      if (!avatars.length) {
+        state.selectedAvatarId = null;
+        els.avatarGrid.innerHTML = `<div class="empty-box">${escapeHtml(currentCopy().noAvatar || '当前还没有可用的数字人主播素材，请先在服务器 assets 目录补充图片。')}</div>`;
+        els.avatarHint.textContent = currentCopy().noAvatarHint || '当前没有可选主播。';
+        updateSelectionSummary();
+        return;
+      }
+      if (!avatars.some(item => item.id === state.selectedAvatarId)) {
+        state.selectedAvatarId = avatars[0].id;
+      }
+      els.avatarHint.textContent = (currentCopy().avatarHint || '当前共 {count} 个主播素材，运营可以自由组合音色与主播。').replace('{count}', String(avatars.length));
+      els.avatarGrid.innerHTML = avatars.map(item => `
+        <article class="avatar-card ${item.id === state.selectedAvatarId ? 'selected' : ''}" data-avatar-id="${item.id}">
+          <img class="avatar-thumb" src="${item.image_url}" alt="数字人主播图片">
+          <div class="avatar-foot">
+            <span class="avatar-dot"></span>
+            ${item.id === state.selectedAvatarId ? `<span class="tag">${escapeHtml(copyText('avatarSelectedTag', '已选中'))}</span>` : `<span class="tag">${escapeHtml(copyText('avatarSelectTag', '点击选择'))}</span>`}
+          </div>
+        </article>
+      `).join('');
+      document.querySelectorAll('.avatar-card').forEach(card => {
+        card.addEventListener('click', () => {
+          state.selectedAvatarId = card.dataset.avatarId;
+          renderAvatarOptions();
+          updateSelectionSummary();
+        });
+      });
+      updateSelectionSummary();
+    }
+
+    function openLightbox(src) {
+      if (!src) return;
+      els.lightboxImage.src = src;
+      els.mediaLightbox.style.display = 'flex';
+      els.mediaLightbox.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeLightbox() {
+      els.mediaLightbox.style.display = 'none';
+      els.mediaLightbox.setAttribute('aria-hidden', 'true');
+      els.lightboxImage.src = '';
+    }
+
+    function updatePreviewSegmentField(segmentIndex, field, value) {
+      const idx = Number(segmentIndex) - 1;
+      if (!state.scriptData?.segments?.[idx]) return;
+      state.scriptData.segments[idx][field] = value;
+      if (state.previewData?.segments?.[idx]) {
+        state.previewData.segments[idx][field] = value;
+      }
+    }
+
+    async function reviseSegmentWithAI(segmentIndex, instruction, button) {
+      if (!instruction.trim()) {
+        alert(currentCopy().aiEditNeedPrompt || '请先告诉 AI 这一段要怎么改');
+        return;
+      }
+      const originalText = button.textContent;
+      button.disabled = true;
+      button.textContent = currentCopy().aiEditing || 'AI 修改中...';
+      try {
+        setHeroStatus(currentCopy().aiEditRunning || '正在 AI 修改指定文案段落');
+        const formData = new FormData();
+        formData.append('topic', els.topicInput.value.trim());
+        formData.append('script_json', JSON.stringify(state.scriptData));
+        formData.append('segment_index', String(segmentIndex));
+        formData.append('instruction', instruction.trim());
+        formData.append('target_market', state.selectedTargetMarket);
+        formData.append('department_id', state.selectedDepartmentId);
+        formData.append('use_web_search', els.webSearchToggle.checked ? 'true' : 'false');
+        const res = await fetch('/api/script-preview/revise', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'AI 修改失败');
+        state.scriptData = data.script;
+        state.previewData = data.preview;
+        state.useWebSearch = !!data.preview?.web_search_enabled;
+        state.selectedTargetMarket = data.preview?.target_market || state.selectedTargetMarket;
+        state.selectedDepartmentId = data.preview?.department_id || state.selectedDepartmentId;
+        state.selectedInterfaceLanguage = interfaceLanguageForMarket(state.selectedTargetMarket);
+        els.webSearchToggle.checked = state.useWebSearch;
+        renderInterfaceOptions();
+        renderVoicePresets();
+        renderAvatarOptions();
+        renderScriptPreview(data.preview);
+        setHeroStatus(currentCopy().aiEditDone || '该段文案已更新');
+      } catch (error) {
+        setHeroStatus(currentCopy().aiEditFailed || 'AI 修改失败', true);
+        alert(error.message || 'AI 修改失败');
+      } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    }
+
+    function bindPreviewEditors() {
+      document.querySelectorAll('.segment-edit-input').forEach(input => {
+        input.addEventListener('input', () => {
+          updatePreviewSegmentField(input.dataset.segmentIndex, input.dataset.field, input.value);
+        });
+      });
+      document.querySelectorAll('.ai-revise-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const segmentIndex = btn.dataset.segmentIndex;
+          const promptInput = document.querySelector(`.ai-revise-input[data-segment-index="${segmentIndex}"]`);
+          reviseSegmentWithAI(segmentIndex, promptInput?.value || '', btn);
+        });
+      });
+    }
+
+
+    function compositionOptionLabel(kind, id, fallback = '') {
+      const dict = COMPOSITION_OPTION_COPY[state.selectedInterfaceLanguage] || COMPOSITION_OPTION_COPY['zh-CN'];
+      const group = kind === 'transition' ? dict.transitions : dict.subtitleTemplates;
+      return group?.[id] || fallback || id || '';
+    }
+
+    function compositionUiCopy(key, fallback = '') {
+      const dict = COMPOSITION_OPTION_COPY[state.selectedInterfaceLanguage] || COMPOSITION_OPTION_COPY['zh-CN'];
+      return dict[key] || fallback;
+    }
+
+    function renderComposeSettings(result) {
+      if (!els.composeSettingsPanel) return;
+      if (!state.currentHistoryId) {
+        els.composeSettingsPanel.innerHTML = '';
+        els.composeSettingsPanel.style.display = 'none';
+        return;
+      }
+      const workflowConfig = result.workflow_config || {};
+      const transitions = state.options?.composition_transitions || [];
+      const templates = state.options?.subtitle_templates || [];
+      state.selectedComposeTransitionId = workflowConfig.compose_transition_id || state.selectedComposeTransitionId || transitions[0]?.id || 'fade';
+      state.selectedSubtitleTemplateId = workflowConfig.subtitle_template_id || state.selectedSubtitleTemplateId || templates[0]?.id || 'classic';
+      const transitionOptions = transitions.map(item => `<option value="${item.id}" ${item.id === state.selectedComposeTransitionId ? 'selected' : ''}>${escapeHtml(compositionOptionLabel('transition', item.id, item.name))}</option>`).join('');
+      const subtitleOptions = templates.map(item => `<option value="${item.id}" ${item.id === state.selectedSubtitleTemplateId ? 'selected' : ''}>${escapeHtml(compositionOptionLabel('subtitle', item.id, item.name))}</option>`).join('');
+      els.composeSettingsPanel.innerHTML = `
+        <div class="insight-card">
+          <div class="label">${escapeHtml(compositionUiCopy('settingsTitle', '成片设置'))}</div>
+          <div class="value" style="margin:8px 0 14px; color:var(--muted); font-size:14px;">${escapeHtml(compositionUiCopy('settingsDesc', '先选好素材转场和字幕模板，再生成完整成片。'))}</div>
+          <div style="display:grid; gap:14px; grid-template-columns: repeat(2, minmax(0,1fr));">
+            <label style="display:grid; gap:8px;">
+              <span class="label">${escapeHtml(compositionUiCopy('transitionLabel', '素材转场'))}</span>
+              <select id="composeTransitionSelect" style="min-height:52px; border-radius:18px; border:1px solid var(--line); padding:0 16px; font-size:16px; background:#fff; color:var(--ink);">${transitionOptions}</select>
+            </label>
+            <label style="display:grid; gap:8px;">
+              <span class="label">${escapeHtml(compositionUiCopy('subtitleTemplateLabel', '字幕模板'))}</span>
+              <select id="subtitleTemplateSelect" style="min-height:52px; border-radius:18px; border:1px solid var(--line); padding:0 16px; font-size:16px; background:#fff; color:var(--ink);">${subtitleOptions}</select>
+            </label>
+          </div>
+        </div>
+      `;
+      els.composeSettingsPanel.style.display = 'grid';
+      document.getElementById('composeTransitionSelect')?.addEventListener('change', (event) => {
+        state.selectedComposeTransitionId = event.target.value;
+      });
+      document.getElementById('subtitleTemplateSelect')?.addEventListener('change', (event) => {
+        state.selectedSubtitleTemplateId = event.target.value;
+      });
+    }
+
+    function renderScriptPreview(preview) {
+      els.scriptPanel.style.display = 'block';
+      els.configPanel.style.display = 'block';
+      activateStep('config');
+      els.scriptSummary.innerHTML = `
+        <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelTitle || '视频标题')}</div><div class="value">${escapeHtml(preview.title || copyText('statusNotGenerated', '未生成'))}</div></div>
+        <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelCover || '封面标题')}</div><div class="value">${escapeHtml(preview.cover_title || copyText('statusNotGenerated', '未生成'))}</div></div>
+        <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelDuration || '预计总时长')}</div><div class="value">${escapeHtml(String(preview.total_duration || 0))} ${escapeHtml(copyText('unitSeconds', '秒'))}</div></div>
+        <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelWebSearch || '实时联网检索')}</div><div class="value">${preview.web_search_enabled ? copyText('statusOn', '已开启') : copyText('statusOff', '未开启')}</div></div>
+        <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelMarket || '目标市场')}</div><div class="value">${escapeHtml(localizedTargetMarketName(preview.target_market, ((state.options?.target_markets || []).find(item => item.id === preview.target_market)?.name) || copyText('statusUnset', '未设置')))}</div></div>
+        <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelDepartment || '业务部门')}</div><div class="value">${escapeHtml(localizedDepartmentName(preview.department_id, ((state.options?.departments || []).find(item => item.id === preview.department_id)?.name) || copyText('statusUnset', '未设置')))}</div></div>
+      `;
+      els.scriptSegments.innerHTML = (preview.segments || []).map(segment => `
+        <article class="segment-card">
+          <div class="segment-top">
+            <div class="segment-index">${segment.index}</div>
+            <div class="segment-badge ${segment.type}">${segment.type === 'digital_human' ? (currentCopy().segmentTypeDigital || '数字人段') : (currentCopy().segmentTypeMaterial || '素材段') }</div>
+            <div class="segment-time">${segment.start}s - ${segment.end}s · ${segment.duration}s</div>
+          </div>
+          <div style="display:grid; gap:12px;">
+            <div>
+              <div class="label" style="margin-bottom:8px; color:var(--muted); font-size:12px; font-weight:800;">${escapeHtml(currentCopy().segmentLabelScript || '段落文案')}</div>
+              <textarea class="segment-edit-input" data-segment-index="${segment.index}" data-field="script" style="min-height:130px;">${escapeHtml(segment.script || '')}</textarea>
+            </div>
+            ${segment.type === 'digital_human' ? `
+              <div class="segment-meta">
+                <div class="meta-box">
+                  <div class="label">${escapeHtml(currentCopy().segmentLabelAction || '数字人动作提示词')}</div>
+                  <textarea class="segment-edit-input" data-segment-index="${segment.index}" data-field="action" style="min-height:120px;">${escapeHtml(segment.action || '')}</textarea>
+                </div>
+              </div>
+            ` : `
+              <div class="segment-meta">
+                <div class="meta-box">
+                  <div class="label">${escapeHtml(currentCopy().segmentLabelMaterialKeyword || '素材关键词')}</div>
+                  <input class="range-value segment-edit-input" data-segment-index="${segment.index}" data-field="material_keyword" type="text" value="${escapeHtml(segment.material_keyword || '')}" style="min-height:54px; padding:14px 16px;">
+                </div>
+                <div class="meta-box">
+                  <div class="label">${escapeHtml(currentCopy().segmentLabelMaterialDesc || '素材描述')}</div>
+                  <textarea class="segment-edit-input" data-segment-index="${segment.index}" data-field="material_desc" style="min-height:120px;">${escapeHtml(segment.material_desc || '')}</textarea>
+                </div>
+              </div>
+              ${renderReferenceLinks(segment.reference_links || [])}
+            `}
+            <div class="meta-box">
+              <div class="label">${escapeHtml(currentCopy().segmentLabelAiRewrite || '告诉 AI 怎么改这一段')}</div>
+              <textarea class="ai-revise-input" data-segment-index="${segment.index}" style="min-height:96px;" placeholder="${escapeHtml(currentCopy().segmentAiPlaceholder || '例如：这一段太生硬，改得更像主播口播一点；或者：这一段素材更想强调真实新闻案例。')}"></textarea>
+              <div class="actions" style="margin-top:12px;">
+                <button class="btn btn-secondary ai-revise-btn" type="button" data-segment-index="${segment.index}">${escapeHtml(currentCopy().segmentAiButton || 'AI 修改这一段')}</button>
+              </div>
+            </div>
+          </div>
+        </article>
+      `).join('');
+      els.previewSocial.textContent = preview.social_post || copyText('statusNone', '暂无');
+      bindPreviewEditors();
+      updateSelectionSummary();
+    }
+
+    function renderProgressShell() {
+      els.progressPanel.classList.add('active');
+      els.resultPanel.classList.remove('active');
+      els.progressSteps.innerHTML = progressLabels.map((label, index) => `
+        <div class="progress-item" id="progressStep${index + 1}">
+          <div class="progress-dot"></div>
+          <div>
+            <div style="font-weight:700; margin-bottom:4px;">${label}</div>
+            <div style="font-size:13px; color: var(--muted);">${escapeHtml(copyText('progressWaiting', '等待开始'))}</div>
+          </div>
+        </div>
+      `).join('');
+      els.logPanel.innerHTML = '';
+      els.progressStatus.innerHTML = `<span class="spinner"></span> ${escapeHtml(copyText('progressRunning', '正在处理'))}`;
+      activateStep('progress');
+      setHeroStatus(currentCopy().heroRunning || '任务进行中');
+    }
+
+    function updateProgress(step, message) {
+      progressLabels.forEach((label, index) => {
+        const node = document.getElementById(`progressStep${index + 1}`);
+        if (!node) return;
+        node.classList.toggle('done', index + 1 < step);
+        node.classList.toggle('active', index + 1 === step);
+        const desc = node.querySelector('div:last-child div:last-child');
+        if (index + 1 < step) desc.textContent = copyText('progressDone', '已完成');
+        if (index + 1 === step) desc.textContent = message;
+      });
+      const time = new Date().toLocaleTimeString(state.selectedInterfaceLanguage === 'ja-JP' ? 'ja-JP' : state.selectedInterfaceLanguage, { hour12: false });
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.innerHTML = `<span class="log-time">[${time}]</span>${escapeHtml(message)}`;
+      els.logPanel.appendChild(line);
+      els.logPanel.scrollTop = els.logPanel.scrollHeight;
+    }
+
+    function renderWorkflowSummary(result) {
+      const voice = result.workflow_config?.voice_preset;
+      const avatar = result.workflow_config?.avatar;
+      const webSearchEnabled = !!result.workflow_config?.web_search_enabled;
+      const targetMarket = (state.options?.target_markets || []).find(item => item.id === result.workflow_config?.target_market);
+      const department = (state.options?.departments || []).find(item => item.id === result.workflow_config?.department_id);
+      els.workflowSummary.innerHTML = `
+        <div class="insight-card">
+          <div class="label">${escapeHtml(currentCopy().workflowLabelVoice || '本次配音方案')}</div>
+          <div class="value">${escapeHtml(voice ? `${voice.name}｜${voice.subtitle}｜${copyText('speedLabel', '语速微调')} ${Number(voice.selected_speed || 1).toFixed(2)}` : copyText('workflowNotRecorded', '未记录'))}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(currentCopy().workflowLabelAvatar || '本次主播图片')}</div>
+          <div class="value">${escapeHtml(avatar ? (currentCopy().workflowAvatarSelected || '已选择 1 张主播图片') : (currentCopy().workflowNotRecorded || '未记录'))}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(currentCopy().workflowLabelMarketDepartment || '目标市场 / 部门')}</div>
+          <div class="value">${escapeHtml(`${localizedTargetMarketName(result.workflow_config?.target_market, targetMarket?.name || copyText('workflowNotRecorded', '未记录'))}｜${localizedDepartmentName(result.workflow_config?.department_id, department?.name || copyText('workflowNotRecorded', '未记录'))}`)}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(currentCopy().workflowLabelWebSearch || '实时联网检索')}</div>
+          <div class="value">${escapeHtml(webSearchEnabled ? (currentCopy().workflowWebSearchOn || '已开启，优先参考最新信息') : (currentCopy().workflowWebSearchOff || '未开启，按常规模型生成'))}</div>
+        </div>
+      `;
+    }
+
+    function renderResult(result) {
+      state.resultData = result;
+      state.currentHistoryId = result.history_id || state.currentHistoryId;
+      state.currentTaskId = result.live_task_id || state.currentTaskId;
+      els.resultPanel.classList.add('active');
+      els.progressPanel.classList.remove('active');
+      activateStep('result');
+      setHeroStatus(currentCopy().heroDone || '生产完成');
+      els.progressStatus.textContent = copyText('progressDone', '已完成');
+      els.resultTitle.textContent = result.title || copyText('resultReadyTitle', '视频内容已生成');
+      els.resultSubtitle.textContent = `${copyText('resultSubtitlePrefix', '封面标题：')}${result.cover_title || copyText('statusNotGenerated', '未生成')} · ${(copyText('resultSubtitleSegments', '共 {count} 段')).replace('{count}', String(result.segment_count || 0))}`;
+      els.resultSummary.innerHTML = `
+        <div class="result-kpi"><div class="label">${escapeHtml(copyText('resultKpiTitle', '视频标题'))}</div><div class="value">${escapeHtml(result.title || copyText('statusNotGenerated', '未生成'))}</div></div>
+        <div class="result-kpi"><div class="label">${escapeHtml(copyText('resultKpiDuration', '总时长'))}</div><div class="value">${escapeHtml(String(result.total_duration || 0))} ${escapeHtml(copyText('unitSeconds', '秒'))}</div></div>
+        <div class="result-kpi"><div class="label">${escapeHtml(copyText('resultKpiSegments', '完成段数'))}</div><div class="value">${escapeHtml(String(result.segment_count || 0))} ${escapeHtml(copyText('unitSegments', '段'))}</div></div>
+      `;
+      renderWorkflowSummary(result);
+      renderComposeSettings(result);
+      els.resultSocial.textContent = result.social_post || copyText('statusNone', '暂无');
+      const bundleHref = state.currentHistoryId ? `/api/history/${state.currentHistoryId}/bundle` : '';
+      if (els.bundleDownloadBtn) {
+        els.bundleDownloadBtn.textContent = copyText('bundleDownload', '一键打包下载');
+        if (bundleHref) {
+          els.bundleDownloadBtn.href = bundleHref;
+          els.bundleDownloadBtn.style.display = 'inline-flex';
+        } else {
+          els.bundleDownloadBtn.removeAttribute('href');
+          els.bundleDownloadBtn.style.display = 'none';
+        }
+      }
+      if (els.composeVideoBtn) {
+        els.composeVideoBtn.textContent = copyText('composeVideo', '一键生成成片');
+        els.composeVideoBtn.style.display = state.currentHistoryId ? 'inline-flex' : 'none';
+      }
+      if (els.finalOutputPanel) {
+        const finalBlocks = [];
+        if (result.final_video?.url) {
+          finalBlocks.push(`
+            <div class="media-box">
+              <div class="label">${escapeHtml(copyText('finalVideoLabel', '完整成片'))}</div>
+              <video controls playsinline src="${result.final_video.url}"></video>
+              <div class="actions" style="margin-top:10px;">
+                <a class="btn btn-secondary" href="${result.final_video.url}" download target="_blank" style="text-decoration:none;">${escapeHtml(copyText('downloadFinalVideo', '下载成片'))}</a>
+              </div>
+            </div>
+          `);
+        }
+        if (result.cover_image?.url || result.subtitle_file?.url) {
+          finalBlocks.push(`
+            <div class="media-box">
+              <div class="label">${escapeHtml(copyText('finalCoverLabel', '封面图'))}</div>
+              ${result.cover_image?.url ? `<img src="${result.cover_image.url}" alt="cover" class="zoomable-media" data-full-src="${result.cover_image.url}" style="cursor:zoom-in;">` : `<div class="empty-box">${escapeHtml(copyText('statusNone', '暂无'))}</div>`}
+              <div class="actions" style="margin-top:10px; flex-wrap:wrap;">
+                ${result.cover_image?.url ? `<a class="btn btn-secondary" href="${result.cover_image.url}" download target="_blank" style="text-decoration:none;">${escapeHtml(copyText('downloadCoverImage', '下载封面'))}</a>` : ''}
+                ${result.subtitle_file?.url ? `<a class="btn btn-secondary" href="${result.subtitle_file.url}" download target="_blank" style="text-decoration:none;">${escapeHtml(copyText('downloadSubtitle', '下载字幕'))}</a>` : ''}
+              </div>
+            </div>
+          `);
+        }
+        els.finalOutputPanel.innerHTML = finalBlocks.join('');
+        els.finalOutputPanel.style.display = finalBlocks.length ? 'grid' : 'none';
+      }
+      els.resultSegments.innerHTML = (result.segments || []).map(segment => `
+        <article class="segment-card">
+          <div class="segment-top">
+            <div class="segment-index">${segment.index}</div>
+            <div class="segment-badge ${segment.type}">${segment.type === 'digital_human' ? (currentCopy().segmentTypeDigital || '数字人段') : (currentCopy().segmentTypeMaterial || '素材段') }</div>
+            <div class="segment-time">${segment.start}s - ${segment.end}s · ${segment.duration}s</div>
+          </div>
+          <div class="segment-script">${escapeHtml(segment.script || '')}</div>
+          ${segment.type === 'digital_human' ? `
+          <div class="segment-meta">
+            <div class="meta-box">
+              <div class="label">${escapeHtml(currentCopy().segmentLabelAction || '数字人动作提示词')}</div>
+              <div class="value">${escapeHtml(segment.action || '—')}</div>
+            </div>
+          </div>` : `
+          <div class="segment-meta">
+            <div class="meta-box">
+              <div class="label">${escapeHtml(copyText('resultMaterialBlock', '素材关键词与描述'))}</div>
+              <div class="value">${escapeHtml(copyText('resultKeywordPrefix', '关键词：'))}${escapeHtml(segment.material_keyword || '—')}<br>${segment.material_search_keyword ? `${escapeHtml(copyText('resultSearchPrefix', '检索词：'))}${escapeHtml(segment.material_search_keyword)}<br>` : ""}${escapeHtml(copyText('resultDescPrefix', '描述：'))}${escapeHtml(segment.material_desc || '—')}</div>
+            </div>
+            ${renderReferenceLinks(segment.reference_links || [])}
+          </div>`}
+          <div class="media-grid">
+            <div class="media-box">
+              <div class="label">${escapeHtml(copyText('resultAudioLabel', '对应配音'))}</div>
+              ${segment.audio?.url ? `<audio controls src="${segment.audio.url}"></audio>` : `<div class="empty-box">${escapeHtml(copyText('resultNoAudio', '暂无配音文件'))}</div>`}
+            </div>
+            <div class="media-box">
+              <div class="label">${escapeHtml(copyText('resultVisualLabel', '视觉结果'))}</div>
+              ${segment.type === 'digital_human'
+                ? `<div style="display:grid; gap:10px;">${segment.video?.url ? `<video controls playsinline src="${segment.video.url}"></video><div class="actions"><a class="btn btn-secondary" href="${segment.video.url}" target="_blank" download="video_${segment.index}.mp4">${escapeHtml(copyText('resultDownloadVideo', '下载数字人视频'))}</a>${state.currentTaskId ? `<button type="button" class="btn btn-secondary regenerate-dh-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultRegenerateVideo', '重新生成数字人视频'))}</button>` : ''}</div>` : `<div class="empty-box">${escapeHtml(copyText('resultNoVideo', '数字人视频暂未生成'))}</div>`}</div>`
+                : ((segment.materials || []).length ? `<div style="display:grid; gap:12px; grid-template-columns: repeat(2, minmax(0,1fr));">${segment.materials.map((item, materialIndex) => `<div style="display:grid; gap:8px;"><img src="${item.url}" alt="素材图" class="zoomable-media" data-full-src="${item.url}" style="cursor:zoom-in;"><div class="actions" style="gap:8px;"><a href="${item.url}" download="${item.name || 'material'}" target="_blank" class="btn btn-secondary" style="padding:10px 14px; min-height:40px; text-decoration:none;">${escapeHtml(copyText('resultDownloadMaterial', '下载素材'))}</a>${state.currentHistoryId ? `<button type="button" class="btn btn-ghost delete-material-btn" data-segment-index="${segment.index}" data-material-index="${materialIndex}">${escapeHtml(copyText('resultDeleteMaterial', '删除'))}</button>` : ''}</div></div>`).join('')}</div><div style="margin-top:12px; display:grid; gap:10px;"><input type="file" class="material-upload-input" data-segment-index="${segment.index}" accept="image/*" multiple>${state.currentHistoryId ? `<button type="button" class="btn btn-secondary upload-material-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultUploadReplace', '上传替换素材'))}</button>` : ''}</div>` : `${state.currentHistoryId ? `<div style="display:grid; gap:10px;"><div class="empty-box">${escapeHtml(copyText('resultNoMaterials', '暂无素材图'))}</div><input type="file" class="material-upload-input" data-segment-index="${segment.index}" accept="image/*" multiple><button type="button" class="btn btn-secondary upload-material-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultUploadMaterial', '上传素材'))}</button></div>` : `<div class="empty-box">${escapeHtml(copyText('resultNoMaterials', '暂无素材图'))}</div>`}`)}
+            </div>
+          </div>
+        </article>
+      `).join('');
+
+      if (state.currentHistoryId) {
+        fetch(`/api/history/${state.currentHistoryId}/files`).then(res => res.json()).then(data => {
+          const files = data.files || [];
+          els.fileList.innerHTML = files.length ? files.map(file => `
+            <div class="file-item">
+              <div>
+                <div class="file-name">${escapeHtml(file.name)}</div>
+                <div class="file-path">${escapeHtml(file.path)}</div>
+              </div>
+              <a class="file-link" href="${file.url || '#'}" target="_blank">${escapeHtml(copyText('filesDownload', '下载'))}</a>
+            </div>
+          `).join('') : `<div class="empty-box">${escapeHtml(copyText('resultNoFiles', '暂无输出文件。'))}</div>`;
+        });
+      } else {
+        els.fileList.innerHTML = `<div class="empty-box">${escapeHtml(copyText('resultNoFiles', '暂无输出文件。'))}</div>`;
+      }
+
+      document.querySelectorAll('.zoomable-media').forEach(img => {
+        img.addEventListener('click', () => openLightbox(img.dataset.fullSrc || img.src));
+      });
+
+      document.querySelectorAll('.delete-material-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!state.currentHistoryId) return;
+          try {
+            const res = await fetch(`/api/history/${state.currentHistoryId}/segments/${btn.dataset.segmentIndex}/materials/${btn.dataset.materialIndex}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || copyText('resultDeleteFailed', '删除素材失败'));
+            renderResult(data.result);
+            loadHistory();
+          } catch (error) {
+            alert(error.message || copyText('resultDeleteFailed', '删除素材失败'));
+          }
+        });
+      });
+
+      document.querySelectorAll('.upload-material-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!state.currentHistoryId) return;
+          const segmentIndex = btn.dataset.segmentIndex;
+          const input = document.querySelector(`.material-upload-input[data-segment-index="${segmentIndex}"]`);
+          const files = input?.files ? Array.from(input.files) : [];
+          if (!files.length) {
+            alert(copyText('resultPickMaterialsFirst', '请先选择要上传的素材图片'));
+            return;
+          }
+          const originalText = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = copyText('resultUploading', '上传中...');
+          try {
+            const formData = new FormData();
+            files.forEach(file => formData.append('images', file));
+            const res = await fetch(`/api/history/${state.currentHistoryId}/segments/${segmentIndex}/materials/upload`, { method: 'POST', body: formData });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || copyText('resultUploadFailed', '上传素材失败'));
+            renderResult(data.result);
+            loadHistory();
+          } catch (error) {
+            alert(error.message || copyText('resultUploadFailed', '上传素材失败'));
+          } finally {
+            btn.disabled = false;
+            btn.textContent = originalText;
+          }
+        });
+      });
+
+      document.querySelectorAll('.regenerate-dh-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const segmentIndex = btn.dataset.segmentIndex;
+          const originalText = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = copyText('resultRegenerating', '重新生成中...');
+          try {
+            setHeroStatus(copyText('resultRegenerateRunning', '正在单独重生成数字人视频'));
+            const res = await fetch(`/api/tasks/${state.currentTaskId}/segments/${segmentIndex}/regenerate-digital-human`, { method: 'POST' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || copyText('resultRegenerateFailed', '重新生成失败'));
+            renderResult(data.result);
+            loadHistory();
+            setHeroStatus(copyText('resultRegenerateDone', '数字人视频已重新生成'));
+          } catch (error) {
+            btn.disabled = false;
+            btn.textContent = originalText;
+            setHeroStatus(copyText('resultRegenerateFailed', '数字人重生成失败'), true);
+            alert(error.message || copyText('resultRegenerateFailed', '重新生成失败'));
+          }
+        });
+      });
+    }
+
+    async function createScriptPreview() {
+      const topic = els.topicInput.value.trim();
+      if (!topic) {
+        alert(copyText('needTopic', '请先输入视频选题'));
+        return;
+      }
+      setHeroStatus(copyText('previewGenerating', '文案生成中...'));
+      els.previewBtn.disabled = true;
+      els.previewBtn.textContent = copyText('previewGenerating', '文案生成中...');
+      try {
+        const formData = new FormData();
+        formData.append('topic', topic);
+        formData.append('use_web_search', els.webSearchToggle.checked ? 'true' : 'false');
+        formData.append('target_market', state.selectedTargetMarket);
+        formData.append('department_id', state.selectedDepartmentId);
+        const res = await fetch('/api/script-preview', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || copyText('previewFailed', '文案生成失败'));
+        state.scriptData = data.script;
+        state.previewData = data.preview;
+        state.useWebSearch = !!data.preview?.web_search_enabled;
+        state.selectedTargetMarket = data.preview?.target_market || state.selectedTargetMarket;
+        state.selectedDepartmentId = data.preview?.department_id || state.selectedDepartmentId;
+        state.selectedInterfaceLanguage = interfaceLanguageForMarket(state.selectedTargetMarket);
+        els.webSearchToggle.checked = state.useWebSearch;
+        renderInterfaceOptions();
+        renderVoicePresets();
+        renderAvatarOptions();
+        renderScriptPreview(data.preview);
+        setHeroStatus(copyText('previewGenerated', '文案已生成，等待确认'));
+      } catch (error) {
+        setHeroStatus(copyText('previewFailed', '文案生成失败'), true);
+        alert(error.message || copyText('previewFailed', '文案生成失败'));
+      } finally {
+        els.previewBtn.disabled = false;
+        els.previewBtn.textContent = currentCopy().previewBtnText || '先生成文案';
+      }
+    }
+
+    async function startProduction() {
+      if (!state.scriptData) {
+        alert(copyText('needScript', '请先生成并确认文案'));
+        return;
+      }
+      if (!state.selectedVoiceId) {
+        alert(copyText('needVoice', '请先选择一个配音方案'));
+        return;
+      }
+      if (!state.selectedAvatarId) {
+        alert(copyText('needAvatar', '请先选择一张主播图片'));
+        return;
+      }
+      const topic = els.topicInput.value.trim();
+      const formData = new FormData();
+      formData.append('topic', topic);
+      formData.append('script_json', JSON.stringify(state.scriptData));
+      formData.append('use_web_search', els.webSearchToggle.checked ? 'true' : 'false');
+      formData.append('target_market', state.selectedTargetMarket);
+      formData.append('department_id', state.selectedDepartmentId);
+      formData.append('voice_preset_id', state.selectedVoiceId);
+      formData.append('avatar_id', state.selectedAvatarId);
+      formData.append('speed', els.speedRange.value);
+      els.produceBtn.disabled = true;
+      els.produceBtn.textContent = copyText('produceCreating', '正在创建生产任务...');
+      try {
+        const res = await fetch('/api/produce', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || copyText('produceFailed', '创建任务失败'));
+        state.currentTaskId = data.task_id;
+        renderProgressShell();
+        subscribeProgress(data.task_id);
+      } catch (error) {
+        setHeroStatus(copyText('produceFailed', '创建任务失败'), true);
+        alert(error.message || copyText('produceFailed', '创建任务失败'));
+      } finally {
+        els.produceBtn.disabled = false;
+        els.produceBtn.textContent = currentCopy().produceBtnText || '开始一站式生产';
+      }
+    }
+
+    function subscribeProgress(taskId) {
+      if (state.eventSource) state.eventSource.close();
+      state.eventSource = new EventSource(`/api/tasks/${taskId}/progress`);
+      state.eventSource.addEventListener('progress', event => {
+        const data = JSON.parse(event.data);
+        updateProgress(data.step, data.message);
+      });
+      state.eventSource.addEventListener('done', async event => {
+        const data = JSON.parse(event.data);
+        state.eventSource.close();
+        if (data.status === 'done') {
+          const res = await fetch(`/api/tasks/${taskId}/result`);
+          const result = await res.json();
+          renderResult(result);
+          loadHistory();
+        } else {
+          els.progressStatus.textContent = copyText('taskFailed', '任务失败');
+          setHeroStatus(copyText('taskFailed', '任务失败'), true);
+          alert(copyText('taskFailedDesc', '任务执行失败，请查看日志。'));
+        }
+      });
+    }
+
+    function resetWorkspace() {
+      if (state.eventSource) state.eventSource.close();
+      state.scriptData = null;
+      state.previewData = null;
+      state.useWebSearch = false;
+      const defaults = currentUserDefaults();
+      state.selectedInterfaceLanguage = defaults.interfaceLanguage;
+      state.selectedDepartmentId = defaults.departmentId;
+      state.selectedTargetMarket = defaults.targetMarket;
+      state.currentTaskId = null;
+      state.currentHistoryId = null;
+      state.resultData = null;
+      els.topicInput.value = '';
+      els.webSearchToggle.checked = false;
+      renderInterfaceOptions();
+      syncVoicePresetToMarket(true);
+      renderVoicePresets();
+      els.scriptPanel.style.display = 'none';
+      els.configPanel.style.display = 'none';
+      els.progressPanel.classList.remove('active');
+      els.resultPanel.classList.remove('active');
+      if (els.bundleDownloadBtn) {
+        els.bundleDownloadBtn.removeAttribute('href');
+        els.bundleDownloadBtn.style.display = 'none';
+      }
+      if (els.composeVideoBtn) {
+        els.composeVideoBtn.disabled = false;
+        els.composeVideoBtn.style.display = 'none';
+      }
+      if (els.composeSettingsPanel) {
+        els.composeSettingsPanel.innerHTML = '';
+        els.composeSettingsPanel.style.display = 'none';
+      }
+      if (els.finalOutputPanel) {
+        els.finalOutputPanel.innerHTML = '';
+        els.finalOutputPanel.style.display = 'none';
+      }
+      document.getElementById('scriptSegmentsWrap').style.display = 'block';
+      document.getElementById('scriptSocialWrap').style.display = 'none';
+      document.getElementById('resultSegmentsWrap').style.display = 'block';
+      document.getElementById('resultSocialWrap').style.display = 'none';
+      document.getElementById('resultFilesWrap').style.display = 'none';
+      document.querySelectorAll('[data-script-tab]').forEach((btn, index) => btn.classList.toggle('active', index === 0));
+      document.querySelectorAll('[data-result-tab]').forEach((btn, index) => btn.classList.toggle('active', index === 0));
+      activateStep('topic');
+      setHeroStatus(currentCopy().heroReady || '工作台已就绪');
+      updateSelectionSummary();
+    }
+
+    document.querySelectorAll('[data-script-tab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('[data-script-tab]').forEach(node => node.classList.remove('active'));
+        btn.classList.add('active');
+        const showSocial = btn.dataset.scriptTab === 'social';
+        document.getElementById('scriptSegmentsWrap').style.display = showSocial ? 'block' === false : 'block';
+        document.getElementById('scriptSegmentsWrap').style.display = showSocial ? 'none' : 'block';
+        document.getElementById('scriptSocialWrap').style.display = showSocial ? 'block' : 'none';
+      });
+    });
+
+    document.querySelectorAll('[data-result-tab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('[data-result-tab]').forEach(node => node.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('resultSegmentsWrap').style.display = btn.dataset.resultTab === 'segments' ? 'block' : 'none';
+        document.getElementById('resultSocialWrap').style.display = btn.dataset.resultTab === 'social' ? 'block' : 'none';
+        document.getElementById('resultFilesWrap').style.display = btn.dataset.resultTab === 'files' ? 'block' : 'none';
+      });
+    });
+
+    els.topInterfaceLanguageSelect.addEventListener('change', () => {
+      state.selectedInterfaceLanguage = els.topInterfaceLanguageSelect.value;
+      const defaults = defaultsForInterfaceLanguage(state.selectedInterfaceLanguage);
+      state.selectedDepartmentId = defaults.departmentId;
+      state.selectedTargetMarket = defaults.targetMarket;
+      syncVoicePresetToMarket(true);
+      renderInterfaceOptions();
+      renderVoicePresets();
+      renderAvatarOptions();
+      if (state.previewData) renderScriptPreview(state.previewData);
+      if (state.resultData) renderResult(state.resultData);
+      renderHistory(state.historyItems || []);
+    });
+    els.departmentSelect.addEventListener('change', () => { state.selectedDepartmentId = els.departmentSelect.value; });
+    els.targetMarketSelect.addEventListener('change', () => {
+      state.selectedTargetMarket = els.targetMarketSelect.value;
+      state.selectedInterfaceLanguage = interfaceLanguageForMarket(state.selectedTargetMarket);
+      syncVoicePresetToMarket(true);
+      renderInterfaceOptions();
+      renderVoicePresets();
+      renderAvatarOptions();
+      if (state.previewData) renderScriptPreview(state.previewData);
+      if (state.resultData) renderResult(state.resultData);
+      renderHistory(state.historyItems || []);
+    });
+    els.webSearchToggle.addEventListener('change', () => { state.useWebSearch = els.webSearchToggle.checked; updateSelectionSummary(); });
+    els.previewBtn.addEventListener('click', createScriptPreview);
+    els.regenBtn.addEventListener('click', createScriptPreview);
+    els.resetBtn.addEventListener('click', resetWorkspace);
+    els.backToScriptBtn.addEventListener('click', () => window.scrollTo({ top: els.scriptPanel.offsetTop - 20, behavior: 'smooth' }));
+    els.produceBtn.addEventListener('click', startProduction);
+    els.newTaskBtn.addEventListener('click', resetWorkspace);
+    if (els.composeVideoBtn) els.composeVideoBtn.addEventListener('click', composeFinalVideo);
+    els.loginForm.addEventListener('submit', handleLogin);
+    els.logoutBtn.addEventListener('click', handleLogout);
+    els.speedRange.addEventListener('input', () => {
+      els.speedValue.value = Number(els.speedRange.value).toFixed(2);
+      updateSelectionSummary();
+    });
+    els.lightboxClose.addEventListener('click', closeLightbox);
+    els.mediaLightbox.addEventListener('click', event => {
+      if (event.target === els.mediaLightbox) closeLightbox();
+    });
+
+    initializeWorkspace().catch(error => {
+      setHeroStatus(copyText('initFailed', '初始化失败'), true);
+      alert(error.message || copyText('initFailed', '初始化失败'));
+    });
+  </script>
+</body>
+</html>

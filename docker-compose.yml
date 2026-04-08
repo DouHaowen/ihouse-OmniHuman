@@ -1,0 +1,22 @@
+services:
+  omnihuman:
+    build: .
+    container_name: OmniHuman
+    restart: unless-stopped
+    ports:
+      - "3010:3010"
+    env_file:
+      - .env
+    volumes:
+      - ./output:/app/output
+      - ./assets:/app/assets
+    networks:
+      default:
+      onepanel:
+        ipv4_address: 172.18.0.5
+
+networks:
+  default:
+  onepanel:
+    external: true
+    name: 1panel-network
