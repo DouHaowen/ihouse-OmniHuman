@@ -86,13 +86,20 @@ def submit_video_task(
 
 def _is_retryable_submit_error(exc: Exception) -> bool:
     message = str(exc)
-    return "504 Gateway Time-out" in message or "TLB" in message
+    return (
+        "504 Gateway Time-out" in message
+        or "TLB" in message
+        or "50430" in message
+        or "Concurrent Limit" in message
+        or "Request Has Reached API Concurrent Limit" in message
+    )
 
 
-def poll_task_result(task_id: str, max_wait: int = 600) -> str:
-    """轮询任务状态，等待完成并返回视频 URL"""
+def poll_task_result(task_id: str, max_wait: int = 600, empty_done_retry_limit: int = 8) -> str:
+    """轮询任务状态，等待完成并返回视频 URL。"""
     start_time = time.time()
     visual_service = _get_visual_service()
+    empty_done_retries = 0
 
     while time.time() - start_time < max_wait:
         result = visual_service.cv_get_result(
@@ -112,10 +119,23 @@ def poll_task_result(task_id: str, max_wait: int = 600) -> str:
         status = data.get("status")
 
         if status == "done":
-            video_url = data.get("video_url")
+            video_url = (data.get("video_url") or "").strip()
             if video_url:
                 return video_url
-            raise Exception(f"任务完成但未找到视频 URL: {result}")
+
+            empty_done_retries += 1
+            if empty_done_retries > empty_done_retry_limit:
+                raise Exception(
+                    f"任务完成但未找到视频 URL（已重查 {empty_done_retry_limit} 次）: request_id={result.get('request_id')}, response={result}"
+                )
+
+            print(
+                f"⏳ 任务已完成但视频地址尚未回填，等待重查... ({empty_done_retries}/{empty_done_retry_limit})"
+            )
+            time.sleep(5)
+            continue
+
+        empty_done_retries = 0
 
         if status in ("expired", "not_found"):
             raise Exception(f"任务状态异常: status={status}, response={result}")

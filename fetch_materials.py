@@ -7,7 +7,7 @@ import os
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 PEXELS_API_URL = "https://api.pexels.com/v1/search"
