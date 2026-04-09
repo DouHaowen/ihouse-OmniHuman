@@ -113,6 +113,12 @@ CN_MARKETING_RISK_TERMS = [
     "抓紧", "限时", "资产配置首选",
 ]
 
+CN_MARKETING_RISK_PATTERNS = [
+    ("置业引导", r"(如果你|假如你|对于.*的你|正在考虑|打算).{0,12}(置业|买房|购房|入手)"),
+    ("交易导向", r"(是否值得买|现在还能买吗|适合买房吗|值不值得入手|值得关注的基本指标)"),
+    ("评论区导流", r"(欢迎在评论区|评论区告诉我|留言告诉我|欢迎留言)"),
+]
+
 
 def _build_context_guidance(target_market: str, department_id: str) -> str:
     market = TARGET_MARKET_RULES.get(target_market, TARGET_MARKET_RULES["cn"])
@@ -142,11 +148,16 @@ def _iter_text_values(value: Any):
 
 
 def _find_cn_marketing_hits(data: dict) -> list[str]:
-    haystack = "\n".join(text for text in _iter_text_values(data) if isinstance(text, str)).lower()
+    raw_texts = [text for text in _iter_text_values(data) if isinstance(text, str)]
+    haystack = "\n".join(raw_texts).lower()
+    raw_haystack = "\n".join(raw_texts)
     hits = []
     for term in CN_MARKETING_RISK_TERMS:
         if term.lower() in haystack:
             hits.append(term)
+    for label, pattern in CN_MARKETING_RISK_PATTERNS:
+        if re.search(pattern, raw_haystack, flags=re.IGNORECASE):
+            hits.append(f"[pattern]{label}")
     return hits
 
 
@@ -170,6 +181,8 @@ def _rewrite_script_for_cn_safety(topic: str, data: dict, enable_web_search: boo
 5. 标题和封面标题更像问题句、误区拆解、制度科普或新闻解读。
 6. social_post 结尾只允许轻互动，不允许转化导流。
 7. 只返回合法 JSON，本次不要输出任何解释。
+8. 避免第二人称交易导向表达，例如“如果你在考虑日本置业”“如果你正打算买房”。
+9. 避免“欢迎在评论区告诉我”这类偏运营导向收口，改成更克制、更中立的问题句。
 """
     rewritten, usage = _request_json_from_claude(prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     return rewritten, usage
@@ -193,6 +206,8 @@ def _rewrite_segment_for_cn_safety(topic: str, script_data: dict, segment_index:
 4. 严禁品牌名、公司名、顾问身份、咨询导流、私信微信、强交易词和收益承诺。
 5. 表达要更像知识科普、误区拆解、制度解释，而不是营销文案。
 6. 只返回合法 JSON，不要输出解释。
+7. 避免第二人称交易导向表达，例如“如果你在考虑日本置业”“如果你正打算买房”。
+8. 避免“欢迎在评论区告诉我”这类偏运营导向收口，改成更克制、更中立的问题句。
 """
     rewritten, usage = _request_json_from_claude(prompt, max_tokens=1800, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     return rewritten, usage
