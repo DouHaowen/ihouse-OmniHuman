@@ -7,6 +7,7 @@ import csv
 from collections import deque
 import json
 import os
+import re
 import subprocess
 import threading
 import requests
@@ -1422,6 +1423,8 @@ def _list_avatar_options() -> list[dict]:
             continue
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
             continue
+        if re.fullmatch(r"avatar_test_[0-9a-f]{8}", path.stem) and path.name not in AVATAR_DISPLAY_NAME_MAP:
+            continue
         items.append({
             "id": path.name,
             "name": AVATAR_DISPLAY_NAME_MAP.get(path.name, path.stem),
@@ -1824,12 +1827,14 @@ async def start_avatar_test(request: Request, image: UploadFile = File(...), aud
 
     task_id = str(uuid.uuid4())[:8]
     output_dir = _create_output_dir("avatar_test", "avatar")
+    upload_dir = Path(output_dir) / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
     image_ext = Path(image.filename).suffix or ".jpg"
-    image_path = str(ASSETS_DIR / f"avatar_test_{task_id}{image_ext}")
+    image_path = str(upload_dir / f"avatar_test_{task_id}{image_ext}")
     with open(image_path, "wb") as f:
         f.write(await image.read())
     audio_ext = Path(audio.filename).suffix or ".mp3"
-    audio_path = str(ASSETS_DIR / f"avatar_test_{task_id}{audio_ext}")
+    audio_path = str(upload_dir / f"avatar_test_{task_id}{audio_ext}")
     with open(audio_path, "wb") as f:
         f.write(await audio.read())
 
