@@ -247,6 +247,408 @@ class ProgressTracker:
         self.log(f"出错了：{error}")
 
 
+def _make_safe_name(value: str, fallback: str = "task") -> str:
+    safe = "".join(c for c in (value or "")[:20] if c.isalnum() or c in "，。_-")
+    return safe or fallback
+
+
+def _create_output_dir(prefix: str, label: str) -> str:
+    output_dir = OUTPUT_DIR / f"{int(time.time())}_{prefix}_{_make_safe_name(label, fallback=prefix)}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return str(output_dir)
+
+
+def _normalize_public_base_url(value: str) -> str:
+    return (value or "").rstrip("/")
+
+
+def _get_public_base_url(request: Request) -> str:
+    env_url = os.getenv("PUBLIC_BASE_URL")
+    if env_url:
+        return _normalize_public_base_url(env_url)
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    forwarded_host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    return _normalize_public_base_url(f"{forwarded_proto}://{forwarded_host}")
+
+
+def _resolve_local_file(file_path: str) -> Optional[Path]:
+    if not file_path:
+        return None
+    path = Path(file_path)
+    if not path.is_absolute():
+        path = (BASE_DIR / path).resolve()
+    else:
+        path = path.resolve()
+    return path if path.exists() else None
+
+
+def _history_id_from_output_dir(output_dir: Optional[str]) -> str:
+    if not output_dir:
+        return ""
+    return Path(output_dir).resolve().name
+
+
+def _get_target_market(target_market_id: Optional[str]) -> dict:
+    for market in TARGET_MARKETS:
+        if market["id"] == target_market_id:
+            return dict(market)
+    return dict(TARGET_MARKETS[0])
+
+
+def _get_department(department_id: Optional[str]) -> dict:
+    for department in DEPARTMENTS:
+        if department["id"] == department_id:
+            return dict(department)
+    return dict(DEPARTMENTS[0])
+
+
+def _get_voice_preset(voice_preset_id: Optional[str], target_market_id: Optional[str] = None) -> dict:
+    for preset in VOICE_PRESETS:
+        if preset["id"] == voice_preset_id:
+            return dict(preset)
+    target_market = _get_target_market(target_market_id)
+    default_id = target_market.get("default_voice_preset_id")
+    for preset in VOICE_PRESETS:
+        if preset["id"] == default_id:
+            return dict(preset)
+    return dict(VOICE_PRESETS[0])
+
+
+def _get_avatar_option(avatar_id: Optional[str]) -> Optional[dict]:
+    avatars = _list_avatar_options()
+    if not avatars:
+        return None
+    for index, avatar in enumerate(avatars):
+        if avatar["id"] == avatar_id or avatar_id is None:
+            enriched = dict(avatar)
+            enriched["image_path"] = str(ASSETS_DIR / avatar["filename"])
+            enriched["style_prompt"] = AVATAR_STYLE_PROMPTS[min(index, len(AVATAR_STYLE_PROMPTS) - 1)]
+            return enriched
+    avatar = dict(avatars[0])
+    avatar["image_path"] = str(ASSETS_DIR / avatar["filename"])
+    avatar["style_prompt"] = AVATAR_STYLE_PROMPTS[0]
+    return avatar
+
+
+def _get_social_post(script_data: dict, target_market: str = "cn") -> str:
+    social_post = (script_data or {}).get("social_post", "")
+    if social_post:
+        return social_post
+    if target_market == "tw":
+        return script_data.get("facebook_post", "") or script_data.get("xiaohongshu_post", "")
+    if target_market == "jp":
+        return script_data.get("social_post", "") or script_data.get("facebook_post", "") or script_data.get("xiaohongshu_post", "")
+    return script_data.get("xiaohongshu_post", "") or script_data.get("facebook_post", "")
+
+
+def _get_avatar_image_path_for_task(task: dict) -> str:
+    workflow_config = task.get("workflow_config", {}) or {}
+    avatar_option = _get_avatar_option(workflow_config.get("avatar_id"))
+    if avatar_option and avatar_option.get("image_path"):
+        return avatar_option["image_path"]
+    return task.get("image_path", "")
+
+
+def _get_avatar_prompt_for_task(task: dict) -> str:
+    workflow_config = task.get("workflow_config", {}) or {}
+    avatar_option = _get_avatar_option(workflow_config.get("avatar_id"))
+    return avatar_option.get("style_prompt", "") if avatar_option else ""
+
+
+def _sync_live_task_result(output_dir: Optional[str], result: dict):
+    live_task_id = _find_live_task_id_for_output_dir(output_dir or "")
+    if live_task_id and live_task_id in tasks:
+        tasks[live_task_id]["result"] = result
+
+
+def _combine_prompt(avatar_prompt: str, segment_action: str) -> str:
+    parts = [part.strip() for part in [avatar_prompt, segment_action] if part and part.strip()]
+    return "。".join(parts)
+
+
+def _save_readable_script(script_data: dict, output_path: str):
+    lines = [
+        f"标题：{script_data.get('title', '')}",
+        f"封面：{script_data.get('cover_title', '')}",
+        f"总时长：{script_data.get('total_duration', 0)}秒",
+        "\n" + "=" * 50,
+        "【播报稿+时间轴】",
+        "=" * 50,
+    ]
+    for seg in script_data.get("segments", []):
+        seg_type = "数字人" if seg.get("type") == "digital_human" else "素材"
+        lines.append(f"\n【{seg_type} | {seg.get('start', 0)}s~{seg.get('end', 0)}s】")
+        lines.append(seg.get("script", ""))
+        if seg.get("type") == "digital_human":
+            lines.append(f"动作描述：{seg.get('action', '')}")
+        else:
+            lines.append(f"素材关键词：{seg.get('material_keyword', '')}")
+            lines.append(f"素材说明：{seg.get('material_desc', '')}")
+    Path(output_path).write_text("\n".join(lines), encoding="utf-8")
+
+
+def _save_social_posts(script_data: dict, output_path: str, target_market: str = "cn"):
+    content = "\n".join(["=" * 50, "【SNS发布文案】", "=" * 50, _get_social_post(script_data, target_market)])
+    Path(output_path).write_text(content, encoding="utf-8")
+
+
+def run_pipeline_with_progress(
+    task_id: str,
+    topic: str,
+    image_path: str,
+    public_base_url: str,
+    script_data: Optional[dict] = None,
+    voice_preset: Optional[dict] = None,
+    avatar_option: Optional[dict] = None,
+):
+    tracker = tasks[task_id]["tracker"]
+
+    try:
+        from fetch_materials import fetch_all_materials
+        from generate_audio import generate_audio
+        from generate_digital_human import generate_digital_human_video
+        from generate_script import generate_script
+        from tos_uploader import upload_file_and_get_url
+        from video_composer import compose_history_video
+
+        task = tasks[task_id]
+        workflow_config = task.get("workflow_config", {}) or {}
+        target_market = workflow_config.get("target_market", "cn")
+        department_id = workflow_config.get("department_id", "real_estate")
+        target_market_obj = _get_target_market(target_market)
+        voice_preset = dict(voice_preset or _get_voice_preset(workflow_config.get("voice_preset_id"), target_market))
+        avatar_option = avatar_option or _get_avatar_option(workflow_config.get("avatar_id"))
+        tts_voice = voice_preset.get("voice_id")
+        tts_speed = float(voice_preset.get("selected_speed", voice_preset.get("default_speed", 1.1)))
+        tts_volume = float(voice_preset.get("selected_volume", voice_preset.get("default_volume", 1.0)))
+        avatar_prompt = avatar_option.get("style_prompt", "") if avatar_option else ""
+
+        output_dir = _create_output_dir("full", topic)
+        task["output_dir"] = output_dir
+
+        image_url = None
+        if image_path and os.path.exists(image_path):
+            image_url = upload_file_and_get_url(image_path, key_prefix="full/image")
+            tracker.log("数字人主播素材已上传到 TOS")
+
+        if script_data is None:
+            tracker.log("正在生成视频文案...", step=1)
+            script_data = generate_script(
+                topic,
+                enable_web_search=workflow_config.get("web_search_enabled", False),
+                target_market=target_market,
+                department_id=department_id,
+            )
+        else:
+            tracker.log("已加载确认后的文案脚本", step=1)
+
+        Path(output_dir, "script.json").write_text(json.dumps(script_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        _save_readable_script(script_data, os.path.join(output_dir, "script_readable.txt"))
+        _save_social_posts(script_data, os.path.join(output_dir, "social_posts.txt"), target_market=target_market)
+        tracker.log(f"文案准备完成，共 {len(script_data.get('segments', []))} 段，总时长 {script_data.get('total_duration', 0)} 秒")
+
+        tracker.log("正在生成全部配音...", step=2)
+        audio_segments = []
+        total_segments = len(script_data.get("segments", []))
+        for index, seg in enumerate(script_data.get("segments", []), start=1):
+            script_text = (seg.get("script") or "").strip()
+            if not script_text:
+                continue
+            tracker.log(f"配音生成中（{index}/{total_segments}）：{script_text[:28]}...")
+            seg_type = seg.get("type", "")
+            audio_path = os.path.join(output_dir, "audio", f"segment_{index - 1:02d}_{seg_type}.mp3")
+            generate_audio(script_text, audio_path, tts_voice, speed=tts_speed, volume=tts_volume)
+            seg_with_audio = dict(seg)
+            seg_with_audio["audio_path"] = audio_path
+            seg_with_audio["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+            seg_with_audio["target_market"] = target_market
+            audio_segments.append(seg_with_audio)
+            _record_cost_entry(
+                event_type="tts_generate",
+                amount=_estimate_tts_cost(script_text, audio_path),
+                provider=COST_RULES["tts_generate"]["provider"],
+                task=task,
+                meta={"segment_index": index, "audio_path": audio_path, "scope": "produce"},
+            )
+        tracker.log(f"全部配音完成，共 {len(audio_segments)} 段")
+
+        tracker.log("正在生成数字人视频...", step=3)
+        if not image_url:
+            tracker.log("未选择数字人主播图，跳过数字人视频生成")
+            segments_with_dh = audio_segments
+        else:
+            segments_with_dh = []
+            dh_segments = [seg for seg in audio_segments if seg.get("type") == "digital_human"]
+            completed = 0
+            for index, seg in enumerate(audio_segments):
+                if seg.get("type") != "digital_human":
+                    segments_with_dh.append(seg)
+                    continue
+                completed += 1
+                tracker.log(f"数字人生成中（{completed}/{len(dh_segments)}）")
+                video_output = os.path.join(output_dir, "digital_human", f"dh_{index:02d}.mp4")
+                video_path = _run_omnihuman_job(
+                    job_id=f"{task_id}:segment:{index}",
+                    label=f"数字人生成（第{completed}/{len(dh_segments)}段）",
+                    tracker=tracker,
+                    runner=lambda seg=seg, video_output=video_output: generate_digital_human_video(
+                        image_url=image_url,
+                        audio_url=seg.get("audio_url"),
+                        output_path=video_output,
+                        prompt=_combine_prompt(avatar_prompt, seg.get("action", "")),
+                    ),
+                )
+                seg_copy = dict(seg)
+                seg_copy["video_path"] = video_path
+                segments_with_dh.append(seg_copy)
+                _record_cost_entry(
+                    event_type="digital_human_generate",
+                    amount=_estimate_digital_human_cost(_probe_media_duration(video_path) or seg.get("duration", 0)),
+                    provider=COST_RULES["digital_human_generate"]["provider"],
+                    task=task,
+                    meta={"segment_index": index + 1, "video_path": video_path, "scope": "produce"},
+                )
+            tracker.log("数字人视频生成完成")
+
+        tracker.log("正在匹配素材内容...", step=4)
+        try:
+            final_segments = fetch_all_materials(segments=segments_with_dh, output_dir=output_dir)
+            tracker.log(f"素材匹配完成，共 {sum(1 for seg in final_segments if seg.get('material_paths'))} 组素材")
+        except Exception as exc:
+            tracker.log(f"素材匹配失败：{exc}，已跳过该步骤")
+            final_segments = segments_with_dh
+
+        result_data = {
+            "topic": topic,
+            "owner_username": task.get("owner_username"),
+            "owner_display_name": task.get("owner_display_name"),
+            "owner_role": task.get("owner_role", "user"),
+            "title": script_data.get("title", ""),
+            "cover_title": script_data.get("cover_title", ""),
+            "total_duration": script_data.get("total_duration", 0),
+            "segment_count": len(final_segments),
+            "script": script_data,
+            "segments": final_segments,
+            "social_post": _get_social_post(script_data, target_market),
+            "workflow_config": {
+                "voice_preset": {
+                    "id": voice_preset.get("id"),
+                    "name": voice_preset.get("name"),
+                    "subtitle": voice_preset.get("subtitle"),
+                    "selected_speed": tts_speed,
+                    "selected_volume": tts_volume,
+                    "language": target_market_obj.get("content_language", ""),
+                },
+                "web_search_enabled": workflow_config.get("web_search_enabled", False),
+                "target_market": target_market,
+                "department_id": department_id,
+                "avatar": {
+                    "id": avatar_option.get("id") if avatar_option else None,
+                    "image_url": avatar_option.get("image_url") if avatar_option else "",
+                },
+                "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
+                "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+            },
+            "cost_entries": task.get("cost_entries", []),
+            "cost_summary": task.get("cost_summary", _empty_cost_summary()),
+        }
+
+        tracker.log("正在自动成片...", step=4)
+        compose_result = compose_history_video(
+            output_dir,
+            result_data,
+            transition_id=workflow_config.get("compose_transition_id", "fade"),
+            subtitle_template_id=workflow_config.get("subtitle_template_id", "classic"),
+        )
+        result_data.update(compose_result)
+        _record_cost_entry(
+            event_type="compose_video",
+            amount=_estimate_compose_cost(result_data.get("total_duration", 0)),
+            provider=COST_RULES["compose_video"]["provider"],
+            task=task,
+            meta={"final_video_path": result_data.get("final_video_path", ""), "scope": "produce"},
+        )
+
+        task["result"] = result_data
+        _persist_task_result(task)
+        tracker.finish(result_data)
+    except Exception as exc:
+        tracker.fail(str(exc))
+        import traceback
+        traceback.print_exc()
+
+
+def run_avatar_test_with_progress(task_id: str, image_path: str, audio_path: str, public_base_url: str):
+    tracker = tasks[task_id]["tracker"]
+    try:
+        from generate_digital_human import generate_digital_human_video
+        from tos_uploader import upload_file_and_get_url
+
+        output_dir = tasks[task_id]["output_dir"]
+        tracker.log("正在上传图片和音频到 TOS...", step=1)
+        image_url = upload_file_and_get_url(image_path, key_prefix="avatar-test/image")
+        audio_url = upload_file_and_get_url(audio_path, key_prefix="avatar-test/audio")
+        tracker.log("TOS 上传完成")
+
+        tracker.log("正在合成数字人视频...", step=2)
+        video_dir = os.path.join(output_dir, "digital_human")
+        os.makedirs(video_dir, exist_ok=True)
+        video_path = _run_omnihuman_job(
+            job_id=f"{task_id}:avatar-test",
+            label="数字人单段测试",
+            tracker=tracker,
+            runner=lambda: generate_digital_human_video(
+                image_url=image_url,
+                audio_url=audio_url,
+                output_path=os.path.join(video_dir, "avatar_test.mp4"),
+                prompt="",
+                output_resolution=720,
+                pe_fast_mode=True,
+            ),
+        )
+        tracker.log("数字人视频生成完成")
+
+        result_data = {
+            "mode": "avatar_test",
+            "topic": "数字人单段测试",
+            "owner_username": tasks[task_id].get("owner_username"),
+            "owner_display_name": tasks[task_id].get("owner_display_name"),
+            "owner_role": tasks[task_id].get("owner_role", "user"),
+            "title": "数字人单段测试完成",
+            "cover_title": "数字人生成测试",
+            "total_duration": _probe_media_duration(video_path),
+            "segment_count": 1,
+            "image_path": image_path,
+            "audio_path": audio_path,
+            "image_url": image_url,
+            "audio_url": audio_url,
+            "video_path": video_path,
+            "social_post": "",
+            "segments": [
+                {
+                    "type": "digital_human",
+                    "start": 0,
+                    "end": _probe_media_duration(video_path),
+                    "duration": _probe_media_duration(video_path),
+                    "script": "单段数字人测试",
+                    "action": "",
+                    "audio_path": audio_path,
+                    "video_path": video_path,
+                    "material_paths": [],
+                }
+            ],
+            "cost_entries": tasks[task_id].get("cost_entries", []),
+            "cost_summary": tasks[task_id].get("cost_summary", _empty_cost_summary()),
+        }
+        tasks[task_id]["result"] = result_data
+        _persist_task_result(tasks[task_id])
+        tracker.finish(result_data)
+    except Exception as exc:
+        tracker.fail(str(exc))
+        import traceback
+        traceback.print_exc()
+
+
 def _omnihuman_queue_snapshot() -> dict:
     with OMNIHUMAN_QUEUE_CONDITION:
         running = [dict(item) for item in OMNIHUMAN_RUNNING_ITEMS]
