@@ -283,6 +283,13 @@ def _resolve_local_file(file_path: str) -> Optional[Path]:
     return path if path.exists() else None
 
 
+def _friendly_ai_error_message(exc: Exception, action_label: str) -> tuple[str, int]:
+    text = str(exc).lower()
+    if any(token in text for token in ["overloaded_error", "overloaded", "rate limit", "rate_limit", "429", "529", "暂时繁忙"]):
+        return f"{action_label}服务当前较忙，请稍后重试", 503
+    return f"{action_label}失败，请稍后重试", 500
+
+
 def _history_id_from_output_dir(output_dir: Optional[str]) -> str:
     if not output_dir:
         return ""
@@ -1689,7 +1696,8 @@ async def script_preview(request: Request, topic: str = Form(...), use_web_searc
         script_data = generate_script(topic, enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id)
         script_usage = (script_data.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
-        return JSONResponse({"error": f"文案生成失败：{exc}"}, status_code=500)
+        message, status_code = _friendly_ai_error_message(exc, "文案生成")
+        return JSONResponse({"error": message}, status_code=status_code)
     _record_cost_entry(
         event_type="script_generate",
         amount=_estimate_script_cost(topic, script_data, web_search_enabled=web_search_enabled, usage=script_usage),
@@ -2056,7 +2064,8 @@ async def revise_script_preview_segment(
         revised_segment = revise_script_segment(topic, script_data, segment_index - 1, instruction.strip(), enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id)
         revise_usage = (revised_segment.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
-        return JSONResponse({"error": f"AI 修改失败：{exc}"}, status_code=500)
+        message, status_code = _friendly_ai_error_message(exc, "AI 修改")
+        return JSONResponse({"error": message}, status_code=status_code)
     _record_cost_entry(
         event_type="script_revise",
         amount=_estimate_script_cost(instruction.strip(), {"segment": revised_segment}, web_search_enabled=web_search_enabled, revise=True, usage=revise_usage),

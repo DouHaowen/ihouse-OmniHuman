@@ -6,6 +6,7 @@
 import json
 import os
 import re
+import time
 from typing import Any
 
 import anthropic
@@ -14,6 +15,10 @@ from dotenv import load_dotenv
 load_dotenv(override=False)
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+
+class UpstreamBusyError(Exception):
+    pass
 
 SYSTEM_PROMPT = """你是一个专业的AI短视频内容制作助手，服务于iHouse公司。
 
@@ -251,6 +256,33 @@ def _merge_usage(base: dict | None, extra: dict | None) -> dict:
     return merged
 
 
+def _is_retryable_anthropic_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    if status_code in {429, 500, 502, 503, 504, 529}:
+        return True
+    return any(token in text for token in ["overloaded_error", "overloaded", "rate limit", "rate_limit", "timeout", "temporarily unavailable"])
+
+
+def _create_message_with_retry(**kwargs):
+    attempts = max(1, int(os.getenv("ANTHROPIC_RETRY_ATTEMPTS", "4")))
+    base_delay = max(1.0, float(os.getenv("ANTHROPIC_RETRY_BASE_DELAY_SECONDS", "2")))
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return client.messages.create(**kwargs)
+        except Exception as exc:
+            last_error = exc
+            if not _is_retryable_anthropic_error(exc) or attempt >= attempts:
+                break
+            time.sleep(base_delay * attempt)
+    if last_error and _is_retryable_anthropic_error(last_error):
+        raise UpstreamBusyError("上游文案服务暂时繁忙，请稍后重试") from last_error
+    if last_error:
+        raise last_error
+    raise ValueError("Claude 请求失败")
+
+
 def _extract_message_text(message: Any) -> str:
     parts = []
     for block in getattr(message, 'content', []) or []:
@@ -319,7 +351,7 @@ def _repair_json_with_claude(raw: str) -> tuple[dict, dict]:
 原始内容：
 {current}
 """
-        message = client.messages.create(
+        message = _create_message_with_retry(
             model='claude-sonnet-4-6',
             max_tokens=2600,
             messages=[{'role': 'user', 'content': repair_prompt}],
@@ -361,7 +393,7 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
     last_error = None
     total_usage = {}
     for prompt in prompts:
-        message = client.messages.create(**_build_message_kwargs(prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id))
+        message = _create_message_with_retry(**_build_message_kwargs(prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id))
         total_usage = _merge_usage(total_usage, _extract_usage_from_message(message))
         raw = _extract_message_text(message)
         try:
