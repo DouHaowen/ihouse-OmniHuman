@@ -345,7 +345,33 @@ def _make_silent_segment(output_path: Path, duration: float) -> None:
     ])
 
 
-def _build_material_segment(images: list[str], duration: float, output_path: Path, transition_id: str = "fade") -> None:
+def _material_asset_kind(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix in {".mp4", ".mov", ".m4v", ".webm"}:
+        return "video"
+    return "image"
+
+
+def _normalize_material_assets(raw_assets) -> list[dict]:
+    normalized: list[dict] = []
+    for item in raw_assets or []:
+        if isinstance(item, dict):
+            path = str(item.get("path") or item.get("file_path") or item.get("url") or "").strip()
+            if not path:
+                continue
+            normalized.append({
+                "path": path,
+                "kind": item.get("kind") or _material_asset_kind(path),
+            })
+        else:
+            path = str(item or "").strip()
+            if not path:
+                continue
+            normalized.append({"path": path, "kind": _material_asset_kind(path)})
+    return [item for item in normalized if Path(item["path"]).exists()]
+
+
+def _build_image_material_segment(images: list[str], duration: float, output_path: Path, transition_id: str = "fade") -> None:
     valid_images = [str(Path(p)) for p in images if p and Path(p).exists()]
     if not valid_images:
         _make_silent_segment(output_path, duration)
@@ -393,6 +419,52 @@ def _build_material_segment(images: list[str], duration: float, output_path: Pat
         str(output_path),
     ]
     _run(cmd)
+
+
+def _prepare_material_video_clip(video_path: str, duration: float, output_path: Path, transition_id: str = "fade") -> None:
+    transition_filter = ""
+    if transition_id == "fade" and duration > 0.9:
+        fade_out_start = max(duration - 0.35, 0.15)
+        transition_filter = f",fade=t=in:st=0:d=0.20,fade=t=out:st={fade_out_start:.3f}:d=0.20"
+    _run([
+        "ffmpeg", "-y",
+        "-stream_loop", "-1",
+        "-i", str(video_path),
+        "-t", f"{duration:.3f}",
+        "-vf", _video_filter() + transition_filter,
+        "-an",
+        "-r", str(FPS),
+        "-c:v", VIDEO_CODEC,
+        "-preset", PRESET,
+        "-pix_fmt", PIX_FMT,
+        str(output_path),
+    ])
+
+
+def _build_material_segment(material_assets, duration: float, output_path: Path, transition_id: str = "fade") -> None:
+    assets = _normalize_material_assets(material_assets)
+    if not assets:
+        _make_silent_segment(output_path, duration)
+        return
+
+    if all(item.get("kind") == "image" for item in assets):
+        _build_image_material_segment([item["path"] for item in assets], duration, output_path, transition_id=transition_id)
+        return
+
+    per_asset = max(duration / len(assets), 0.6)
+    clip_paths: list[Path] = []
+    try:
+        for idx, asset in enumerate(assets):
+            clip_path = output_path.with_name(f"{output_path.stem}_part_{idx:02d}.mp4")
+            if asset.get("kind") == "video":
+                _prepare_material_video_clip(asset["path"], per_asset, clip_path, transition_id=transition_id)
+            else:
+                _build_image_material_segment([asset["path"]], per_asset, clip_path, transition_id=transition_id)
+            clip_paths.append(clip_path)
+        _concat_media_from_list(clip_paths, output_path, "video")
+    finally:
+        for path in clip_paths:
+            path.unlink(missing_ok=True)
 
 
 def _prepare_video_segment(video_path: str, duration: float, output_path: Path) -> None:
@@ -862,7 +934,9 @@ def compose_history_video(output_dir: str, result: dict, transition_id: str = "f
                 _prepare_video_segment(str(dh_video), duration, segment_video)
             else:
                 _build_material_segment(
-                    seg.get("material_paths", []) or [], duration, segment_video,
+                    seg.get("material_items") or seg.get("material_paths", []) or [],
+                    duration,
+                    segment_video,
                     transition_id=transition_id,
                 )
             segment_video_files.append(segment_video)

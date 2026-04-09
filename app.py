@@ -566,22 +566,6 @@ def run_pipeline_with_progress(
             "cost_summary": task.get("cost_summary", _empty_cost_summary()),
         }
 
-        tracker.log("正在自动成片...", step=4)
-        compose_result = compose_history_video(
-            output_dir,
-            result_data,
-            transition_id=workflow_config.get("compose_transition_id", "fade"),
-            subtitle_template_id=workflow_config.get("subtitle_template_id", "classic"),
-        )
-        result_data.update(compose_result)
-        _record_cost_entry(
-            event_type="compose_video",
-            amount=_estimate_compose_cost(result_data.get("total_duration", 0)),
-            provider=COST_RULES["compose_video"]["provider"],
-            task=task,
-            meta={"final_video_path": result_data.get("final_video_path", ""), "scope": "produce"},
-        )
-
         task["result"] = result_data
         _persist_task_result(task)
         tracker.finish(result_data)
@@ -1324,13 +1308,19 @@ def _serialize_segment(output_dir: str, topic: str, seg: dict, index: int) -> di
         }
 
     materials = []
-    for material_path in data.get("material_paths") or []:
+    raw_materials = data.get("material_items") or [{"path": path} for path in (data.get("material_paths") or [])]
+    for item in raw_materials:
+        material_path = item.get("path") if isinstance(item, dict) else str(item)
+        material_kind = (
+            item.get("kind") if isinstance(item, dict) else None
+        ) or ("video" if Path(str(material_path)).suffix.lower() in {".mp4", ".mov", ".m4v", ".webm"} else "image")
         material_url = _history_file_url(output_dir, material_path)
         if not material_url:
             continue
         materials.append({
             "url": material_url,
             "name": Path(str(material_path)).name or f"material_{index + 1:02d}.jpg",
+            "kind": material_kind,
         })
     if materials:
         data["materials"] = materials
@@ -1370,6 +1360,27 @@ def _serialize_result_for_ui(output_dir: str, result: dict, topic: str) -> dict:
             "name": Path(str(payload.get("subtitle_path", ""))).name or "timeline_subtitles.srt",
         }
     return payload
+
+
+def _segment_material_items(segment: dict) -> list[dict]:
+    items = segment.get("material_items")
+    if isinstance(items, list) and items:
+        normalized = []
+        for item in items:
+            if isinstance(item, dict) and item.get("path"):
+                path = str(item.get("path"))
+                kind = item.get("kind") or ("video" if Path(path).suffix.lower() in {".mp4", ".mov", ".m4v", ".webm"} else "image")
+                normalized.append({"path": path, "kind": kind})
+        if normalized:
+            segment["material_items"] = normalized
+            segment["material_paths"] = [item["path"] for item in normalized]
+            return normalized
+
+    paths = [str(path) for path in (segment.get("material_paths") or []) if path]
+    normalized = [{"path": path, "kind": ("video" if Path(path).suffix.lower() in {".mp4", ".mov", ".m4v", ".webm"} else "image")} for path in paths]
+    segment["material_items"] = normalized
+    segment["material_paths"] = paths
+    return normalized
 
 
 def _build_script_preview_payload(script_data: dict, topic: str, web_search_enabled: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> dict:
@@ -2141,11 +2152,12 @@ async def delete_history_material(history_id: str, segment_index: int, material_
     if segment.get("type") != "material":
         return JSONResponse({"error": "只有素材段支持删除素材"}, status_code=400)
 
-    material_paths = segment.get("material_paths", []) or []
-    if material_index < 0 or material_index >= len(material_paths):
+    material_items = _segment_material_items(segment)
+    if material_index < 0 or material_index >= len(material_items):
         return JSONResponse({"error": "素材不存在"}, status_code=404)
 
-    removed_path = material_paths.pop(material_index)
+    removed_item = material_items.pop(material_index)
+    removed_path = removed_item.get("path", "")
     resolved = _resolve_local_file(removed_path)
     if resolved and str(resolved).startswith(str(output_dir.resolve())) and resolved.exists():
         try:
@@ -2153,7 +2165,8 @@ async def delete_history_material(history_id: str, segment_index: int, material_
         except OSError:
             pass
 
-    segment["material_paths"] = material_paths
+    segment["material_items"] = material_items
+    segment["material_paths"] = [item.get("path", "") for item in material_items if item.get("path")]
     with open(output_dir / "result.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     _sync_live_task_result(str(output_dir), result)
@@ -2178,7 +2191,7 @@ async def upload_history_materials(history_id: str, segment_index: int, request:
 
     material_dir = output_dir / "materials"
     material_dir.mkdir(parents=True, exist_ok=True)
-    material_paths = segment.get("material_paths", []) or []
+    material_items = _segment_material_items(segment)
     for upload in images:
         if not upload.filename:
             continue
@@ -2187,8 +2200,10 @@ async def upload_history_materials(history_id: str, segment_index: int, request:
         output_path = material_dir / filename
         with open(output_path, "wb") as f:
             f.write(await upload.read())
-        material_paths.append(str(output_path))
-    segment["material_paths"] = material_paths
+        kind = "video" if ext.lower() in {".mp4", ".mov", ".m4v", ".webm"} else "image"
+        material_items.append({"path": str(output_path), "kind": kind})
+    segment["material_items"] = material_items
+    segment["material_paths"] = [item.get("path", "") for item in material_items if item.get("path")]
     with open(output_dir / "result.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     _sync_live_task_result(str(output_dir), result)

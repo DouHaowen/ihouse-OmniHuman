@@ -1,6 +1,6 @@
 """
 素材搜索模块
-根据关键词自动搜索并下载Pexels免费素材图片
+根据关键词自动搜索并下载 Pexels 图片/视频素材
 """
 
 import os
@@ -12,6 +12,22 @@ load_dotenv(override=False)
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 PEXELS_API_URL = "https://api.pexels.com/v1/search"
 PEXELS_VIDEO_URL = "https://api.pexels.com/videos/search"
+
+
+def _asset_kind_for_suffix(path: str) -> str:
+    suffix = os.path.splitext(str(path))[1].lower()
+    if suffix in {".mp4", ".mov", ".m4v", ".webm"}:
+        return "video"
+    return "image"
+
+
+def _material_entry(path: str, *, kind: str | None = None, source: str = "pexels") -> dict:
+    return {
+        "path": path,
+        "kind": kind or _asset_kind_for_suffix(path),
+        "source": source,
+        "name": os.path.basename(path),
+    }
 
 
 def search_photos(keyword: str, count: int = 3) -> list:
@@ -59,37 +75,46 @@ def search_photos(keyword: str, count: int = 3) -> list:
 
 def search_videos(keyword: str, count: int = 2) -> list:
     """
-    搜索视频素材
+    搜索视频素材，优先竖屏，其次方屏，最后横屏。
     """
     headers = {"Authorization": PEXELS_API_KEY}
-    params = {
-        "query": keyword,
-        "per_page": count,
-        "orientation": "landscape",
-    }
-    
-    response = requests.get(PEXELS_VIDEO_URL, headers=headers, params=params)
-    response.raise_for_status()
-    
-    data = response.json()
-    videos = data.get("videos", [])
-    
     results = []
-    for v in videos:
-        # 选择最合适的分辨率（优先720p）
-        files = sorted(v.get("video_files", []), key=lambda x: x.get("height", 0))
-        best_file = next(
-            (f for f in files if f.get("height", 0) >= 720),
-            files[-1] if files else None
-        )
-        
-        if best_file:
+    seen = set()
+
+    for orientation in ["portrait", "square", "landscape"]:
+        params = {
+            "query": keyword,
+            "per_page": count,
+            "orientation": orientation,
+        }
+
+        response = requests.get(PEXELS_VIDEO_URL, headers=headers, params=params)
+        response.raise_for_status()
+
+        data = response.json()
+        videos = data.get("videos", [])
+
+        for v in videos:
+            files = sorted(v.get("video_files", []), key=lambda x: x.get("height", 0))
+            best_file = next(
+                (f for f in files if f.get("height", 0) >= 720),
+                files[-1] if files else None
+            )
+            if not best_file:
+                continue
+            url = best_file["link"]
+            if url in seen:
+                continue
+            seen.add(url)
             results.append({
-                "url": best_file["link"],
+                "url": url,
                 "width": best_file.get("width"),
                 "height": best_file.get("height"),
+                "orientation": orientation,
             })
-    
+            if len(results) >= count:
+                return results
+
     return results
 
 
@@ -124,26 +149,40 @@ def fetch_all_materials(segments: list, output_dir: str) -> list:
         
         seg_with_materials = seg.copy()
         
-        # 搜索图片
+        material_items = []
+        material_paths = []
+
+        # 优先抓一条视频素材，成片时可直接裁成对应段落长度
+        try:
+            videos = search_videos(keyword, count=1)
+            for j, video in enumerate(videos):
+                ext = "mp4"
+                filename = f"material_{i:02d}_video_{j}.{ext}"
+                output_path = os.path.join(output_dir, "materials", filename)
+                download_file(video["url"], output_path)
+                material_paths.append(output_path)
+                material_items.append(_material_entry(output_path, kind="video"))
+                print(f"  ✅ 视频已下载：{filename}")
+        except Exception as e:
+            print(f"  ⚠️ 视频素材搜索失败：{e}")
+
+        # 再补图片素材，供人工替换或成片兜底
         try:
             photos = search_photos(keyword, count=2)
-            material_paths = []
-            
             for j, photo in enumerate(photos):
                 ext = "jpg"
                 filename = f"material_{i:02d}_photo_{j}.{ext}"
                 output_path = os.path.join(output_dir, "materials", filename)
-                
                 download_file(photo["url"], output_path)
                 material_paths.append(output_path)
+                material_items.append(_material_entry(output_path, kind="image"))
                 print(f"  ✅ 图片已下载：{filename}")
-            
-            seg_with_materials["material_paths"] = material_paths
-        
         except Exception as e:
-            print(f"  ⚠️ 素材搜索失败：{e}")
-            seg_with_materials["material_paths"] = []
-        
+            print(f"  ⚠️ 图片素材搜索失败：{e}")
+
+        seg_with_materials["material_paths"] = material_paths
+        seg_with_materials["material_items"] = material_items
+
         results.append(seg_with_materials)
     
     return results
