@@ -51,6 +51,23 @@ def _get_bucket() -> str:
     return bucket
 
 
+def _is_retryable_tos_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    retry_tokens = [
+        "timeout",
+        "timed out",
+        "connection aborted",
+        "connection reset",
+        "temporarily unavailable",
+        "503",
+        "504",
+        "500",
+        "slow down",
+        "broken pipe",
+    ]
+    return any(token in text for token in retry_tokens)
+
+
 def _prepare_upload_file(local_path: str) -> tuple[str, Callable | None]:
     file_path = Path(local_path)
     suffix = file_path.suffix.lower()
@@ -93,24 +110,39 @@ def upload_file_and_get_url(local_path: str, key_prefix: str = "avatar-tests", e
     object_key = f"{key_prefix}/{time.strftime('%Y%m%d')}/{uuid.uuid4().hex}{suffix}"
     content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
 
-    client = _get_client()
     bucket = _get_bucket()
+    attempts = max(1, int(_env("TOS_UPLOAD_ATTEMPTS", "5") or 5))
+    base_delay = max(1.0, float(_env("TOS_UPLOAD_RETRY_BASE_DELAY_SECONDS", "3") or 3))
     try:
-        with open(file_path, "rb") as f:
-            client.put_object(
-                bucket=bucket,
-                key=object_key,
-                content=f,
-                content_type=content_type,
-            )
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            client = _get_client()
+            try:
+                with open(file_path, "rb") as f:
+                    client.put_object(
+                        bucket=bucket,
+                        key=object_key,
+                        content=f,
+                        content_type=content_type,
+                    )
 
-        signed = client.pre_signed_url(
-            http_method=tos.HttpMethodType.Http_Method_Get,
-            bucket=bucket,
-            key=object_key,
-            expires=expires,
-        )
-        return signed.signed_url
+                signed = client.pre_signed_url(
+                    http_method=tos.HttpMethodType.Http_Method_Get,
+                    bucket=bucket,
+                    key=object_key,
+                    expires=expires,
+                )
+                return signed.signed_url
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts or not _is_retryable_tos_error(exc):
+                    raise
+                wait_seconds = base_delay * attempt
+                print(f"⚠️ TOS 上传超时，{wait_seconds:.0f} 秒后重试 ({attempt}/{attempts})：{file_path.name}")
+                time.sleep(wait_seconds)
+        if last_error:
+            raise last_error
+        raise RuntimeError("TOS 上传失败")
     finally:
         if cleanup:
             cleanup()

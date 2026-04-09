@@ -32,13 +32,47 @@ def _download_file(url: str, output_path: str):
     """下载文件到本地"""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    response = requests.get(url, stream=True, timeout=300)
-    response.raise_for_status()
+    attempts = max(1, int(os.getenv("OMNIHUMAN_DOWNLOAD_ATTEMPTS", "8")))
+    retry_delay = max(1, int(os.getenv("OMNIHUMAN_DOWNLOAD_RETRY_DELAY_SECONDS", "5")))
+    timeout = max(30, int(os.getenv("OMNIHUMAN_DOWNLOAD_TIMEOUT_SECONDS", "300")))
+    retryable_statuses = {403, 404, 408, 409, 423, 424, 425, 429, 500, 502, 503, 504}
+    last_error = None
 
-    with open(output_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(url, stream=True, timeout=timeout)
+            if response.status_code in retryable_statuses:
+                response.close()
+                raise requests.HTTPError(
+                    f"下载结果视频暂不可用: status={response.status_code}",
+                    response=response,
+                )
+            response.raise_for_status()
+
+            with open(output_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            return
+        except requests.RequestException as exc:
+            last_error = exc
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            retryable = status_code in retryable_statuses or isinstance(
+                exc,
+                (
+                    requests.Timeout,
+                    requests.ConnectionError,
+                ),
+            )
+            if not retryable or attempt >= attempts:
+                raise
+            print(
+                f"⏳ 结果视频暂时还不可下载，{retry_delay} 秒后重试 ({attempt}/{attempts - 1})..."
+                + (f" status={status_code}" if status_code else "")
+            )
+            time.sleep(retry_delay)
+
+    raise last_error
 
 
 def submit_video_task(
@@ -93,6 +127,14 @@ def _is_retryable_submit_error(exc: Exception) -> bool:
         or "Concurrent Limit" in message
         or "Request Has Reached API Concurrent Limit" in message
     )
+
+
+def _get_poll_max_wait() -> int:
+    return max(300, int(os.getenv("OMNIHUMAN_POLL_MAX_WAIT_SECONDS", "1800")))
+
+
+def _get_empty_done_retry_limit() -> int:
+    return max(0, int(os.getenv("OMNIHUMAN_EMPTY_DONE_RETRY_LIMIT", "8")))
 
 
 def poll_task_result(task_id: str, max_wait: int = 600, empty_done_retry_limit: int = 8) -> str:
@@ -188,7 +230,11 @@ def generate_digital_human_video(
     else:
         raise last_error
 
-    video_url = poll_task_result(task_id)
+    video_url = poll_task_result(
+        task_id,
+        max_wait=_get_poll_max_wait(),
+        empty_done_retry_limit=_get_empty_done_retry_limit(),
+    )
     _download_file(video_url, output_path)
 
     print(f"✅ 数字人视频已保存：{output_path}")

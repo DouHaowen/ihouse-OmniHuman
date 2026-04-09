@@ -56,7 +56,7 @@ VOICE_PRESETS = [
         "gender": "male",
         "language": "zh-CN",
         "style": "适合资讯解读、房产科普、专业解说",
-        "voice_id": os.getenv("VOICE_MANDARIN_MALE", "Chinese (Mandarin)_Warm_Bestie"),
+        "voice_id": os.getenv("VOICE_MANDARIN_MALE", "Chinese (Mandarin)_Gentleman"),
         "default_speed": 1.1,
         "default_volume": 1.0,
         "tags": ["男声", "普通话", "沉稳"],
@@ -195,6 +195,11 @@ OMNIHUMAN_QUEUE_CONDITION = threading.Condition()
 OMNIHUMAN_WAITING_JOBS: list[dict] = []
 OMNIHUMAN_RUNNING_JOBS = 0
 OMNIHUMAN_RUNNING_ITEMS: list[dict] = []
+SCRIPT_AI_MAX_CONCURRENT = max(1, int(os.getenv("SCRIPT_AI_MAX_CONCURRENT", "1")))
+SCRIPT_AI_QUEUE_CONDITION = threading.Condition()
+SCRIPT_AI_WAITING_JOBS: list[dict] = []
+SCRIPT_AI_RUNNING_JOBS = 0
+SCRIPT_AI_RUNNING_ITEMS: list[dict] = []
 LIVE_EVENTS = deque(maxlen=120)
 COST_LEDGER_PATH = OUTPUT_DIR / "_cost_ledger.json"
 COST_LEDGER_LOCK = threading.Lock()
@@ -670,6 +675,36 @@ def _omnihuman_queue_snapshot() -> dict:
         "current_owner_username": running[0].get("owner_username") if running else "",
         "current_owner_display_name": running[0].get("owner_display_name") if running else "",
     }
+
+
+def _run_script_ai_job(job_id: str, label: str, runner):
+    global SCRIPT_AI_RUNNING_JOBS
+    queue_item = {
+        "job_id": job_id,
+        "label": label,
+        "created_at": time.time(),
+    }
+    with SCRIPT_AI_QUEUE_CONDITION:
+        SCRIPT_AI_WAITING_JOBS.append(queue_item)
+        while True:
+            try:
+                ahead = next((idx for idx, item in enumerate(SCRIPT_AI_WAITING_JOBS) if item.get("job_id") == job_id), 0)
+            except ValueError:
+                ahead = 0
+            can_run = ahead == 0 and SCRIPT_AI_RUNNING_JOBS < SCRIPT_AI_MAX_CONCURRENT
+            if can_run:
+                SCRIPT_AI_WAITING_JOBS.pop(0)
+                SCRIPT_AI_RUNNING_JOBS += 1
+                SCRIPT_AI_RUNNING_ITEMS.append(queue_item)
+                break
+            SCRIPT_AI_QUEUE_CONDITION.wait(timeout=1)
+    try:
+        return runner()
+    finally:
+        with SCRIPT_AI_QUEUE_CONDITION:
+            SCRIPT_AI_RUNNING_JOBS = max(0, SCRIPT_AI_RUNNING_JOBS - 1)
+            SCRIPT_AI_RUNNING_ITEMS[:] = [item for item in SCRIPT_AI_RUNNING_ITEMS if item.get("job_id") != job_id]
+            SCRIPT_AI_QUEUE_CONDITION.notify_all()
 
 
 def _run_omnihuman_job(job_id: str, label: str, runner, tracker: Optional[ProgressTracker] = None):
@@ -1693,7 +1728,11 @@ async def script_preview(request: Request, topic: str = Form(...), use_web_searc
 
     web_search_enabled = _parse_bool_form(use_web_search)
     try:
-        script_data = generate_script(topic, enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id)
+        script_data = _run_script_ai_job(
+            job_id=f"preview:{user.get('username', 'guest')}:{time.time_ns()}",
+            label="文案生成",
+            runner=lambda: generate_script(topic, enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id),
+        )
         script_usage = (script_data.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
         message, status_code = _friendly_ai_error_message(exc, "文案生成")
@@ -2061,7 +2100,11 @@ async def revise_script_preview_segment(
 
     web_search_enabled = _parse_bool_form(use_web_search)
     try:
-        revised_segment = revise_script_segment(topic, script_data, segment_index - 1, instruction.strip(), enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id)
+        revised_segment = _run_script_ai_job(
+            job_id=f"revise:{user.get('username', 'guest')}:{time.time_ns()}",
+            label="AI 修改",
+            runner=lambda: revise_script_segment(topic, script_data, segment_index - 1, instruction.strip(), enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id),
+        )
         revise_usage = (revised_segment.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
         message, status_code = _friendly_ai_error_message(exc, "AI 修改")

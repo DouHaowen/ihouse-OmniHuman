@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 import anthropic
+import requests
 from dotenv import load_dotenv
 
 load_dotenv(override=False)
@@ -18,6 +19,10 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
 class UpstreamBusyError(Exception):
+    pass
+
+
+class OpenAIFallbackUnavailableError(Exception):
     pass
 
 SYSTEM_PROMPT = """你是一个专业的AI短视频内容制作助手，服务于iHouse公司。
@@ -256,6 +261,14 @@ def _merge_usage(base: dict | None, extra: dict | None) -> dict:
     return merged
 
 
+def _get_openai_api_key() -> str:
+    return (os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def _get_openai_fallback_model() -> str:
+    return (os.getenv("OPENAI_FALLBACK_MODEL") or "gpt-5-mini").strip()
+
+
 def _is_retryable_anthropic_error(exc: Exception) -> bool:
     status_code = getattr(exc, "status_code", None)
     text = str(exc).lower()
@@ -264,15 +277,23 @@ def _is_retryable_anthropic_error(exc: Exception) -> bool:
     return any(token in text for token in ["overloaded_error", "overloaded", "rate limit", "rate_limit", "timeout", "temporarily unavailable"])
 
 
+def _is_anthropic_overloaded_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    return status_code == 529 or "overloaded_error" in text or "overloaded" in text
+
+
 def _create_message_with_retry(**kwargs):
-    attempts = max(1, int(os.getenv("ANTHROPIC_RETRY_ATTEMPTS", "4")))
-    base_delay = max(1.0, float(os.getenv("ANTHROPIC_RETRY_BASE_DELAY_SECONDS", "2")))
+    attempts = max(1, int(os.getenv("ANTHROPIC_RETRY_ATTEMPTS", "6")))
+    base_delay = max(1.0, float(os.getenv("ANTHROPIC_RETRY_BASE_DELAY_SECONDS", "3")))
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
             return client.messages.create(**kwargs)
         except Exception as exc:
             last_error = exc
+            if _is_anthropic_overloaded_error(exc) and _get_openai_api_key():
+                raise UpstreamBusyError("Claude 当前过载，切换到 OpenAI 备用模型") from exc
             if not _is_retryable_anthropic_error(exc) or attempt >= attempts:
                 break
             time.sleep(base_delay * attempt)
@@ -292,6 +313,158 @@ def _extract_message_text(message: Any) -> str:
     if not text:
         raise ValueError('Claude 未返回可解析的文本内容')
     return text
+
+
+def _extract_openai_text(payload: dict) -> str:
+    choices = payload.get("choices") or []
+    if not choices:
+        raise ValueError("OpenAI 未返回 choices")
+    message = choices[0].get("message") or {}
+    content = message.get("content", "")
+    if isinstance(content, str):
+        text = content.strip()
+    elif isinstance(content, list):
+        text = "\n".join(
+            item.get("text", "").strip()
+            for item in content
+            if isinstance(item, dict) and item.get("type") in {"text", "output_text"} and item.get("text")
+        ).strip()
+    else:
+        text = ""
+    if not text:
+        raise ValueError("OpenAI 未返回可解析的文本内容")
+    return text
+
+
+def _extract_usage_from_openai_payload(payload: dict) -> dict:
+    usage_obj = payload.get("usage") or {}
+    return {
+        "input_tokens": int(usage_obj.get("prompt_tokens", 0) or 0),
+        "output_tokens": int(usage_obj.get("completion_tokens", 0) or 0),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "web_search_calls": 0,
+    }
+
+
+def _has_expected_script_shape(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if not isinstance(data.get("title"), str):
+        return False
+    if not isinstance(data.get("cover_title"), str):
+        return False
+    if not isinstance(data.get("social_post"), str):
+        return False
+    if not isinstance(data.get("segments"), list) or not data.get("segments"):
+        return False
+    for seg in data.get("segments", []):
+        if not isinstance(seg, dict):
+            return False
+        if seg.get("type") not in {"digital_human", "material"}:
+            return False
+        for key in ("start", "end", "duration"):
+            if not isinstance(seg.get(key), int):
+                return False
+        if not isinstance(seg.get("script"), str):
+            return False
+    return True
+
+
+def _repair_schema_with_openai(raw_payload: dict, max_tokens: int, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
+    api_key = _get_openai_api_key()
+    if not api_key:
+        raise OpenAIFallbackUnavailableError("未配置 OPENAI_API_KEY")
+    repair_prompt = f"""
+下面这份 JSON 不是 iHouse 系统需要的最终结构。请你在保留原始主题信息的前提下，把它重写成 iHouse 规定的严格 JSON 结构。
+
+必须满足：
+1. 顶层只允许包含：title, cover_title, total_duration, segments, social_post
+2. segments 必须是数组，且每一段只允许是以下两种结构之一：
+   - digital_human: type/start/end/duration/script/action
+   - material: type/start/end/duration/script/material_keyword/material_search_keyword/material_desc
+3. 开头和结尾必须是 digital_human
+4. 数字全部使用整数
+5. 只返回合法 JSON，不要解释
+
+原始 JSON：
+{json.dumps(raw_payload, ensure_ascii=False, indent=2)}
+"""
+    payload = {
+        "model": _get_openai_fallback_model(),
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)},
+            {"role": "user", "content": repair_prompt},
+        ],
+        "max_completion_tokens": max_tokens,
+    }
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=180,
+    )
+    if response.status_code >= 400:
+        raise requests.HTTPError(response.text[:500], response=response)
+    body = response.json()
+    raw = _extract_openai_text(body)
+    data, repair_usage = _parse_json_response(raw)
+    if not _has_expected_script_shape(data):
+        raise ValueError("OpenAI schema repair 后仍未返回符合要求的脚本结构")
+    return data, _merge_usage(_extract_usage_from_openai_payload(body), repair_usage)
+
+
+def _request_json_from_openai(user_prompt: str, max_tokens: int, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
+    api_key = _get_openai_api_key()
+    if not api_key:
+        raise OpenAIFallbackUnavailableError("未配置 OPENAI_API_KEY")
+
+    payload = {
+        "model": _get_openai_fallback_model(),
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_completion_tokens": max_tokens,
+    }
+    attempts = max(1, int(os.getenv("OPENAI_RETRY_ATTEMPTS", "3")))
+    base_delay = max(1.0, float(os.getenv("OPENAI_RETRY_BASE_DELAY_SECONDS", "2")))
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=180,
+            )
+            if response.status_code >= 400:
+                raise requests.HTTPError(response.text[:500], response=response)
+            body = response.json()
+            raw = _extract_openai_text(body)
+            data, repair_usage = _parse_json_response(raw)
+            usage = _merge_usage(_extract_usage_from_openai_payload(body), repair_usage)
+            if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
+                data, schema_usage = _repair_schema_with_openai(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+                usage = _merge_usage(usage, schema_usage)
+            return data, usage
+        except Exception as exc:
+            last_error = exc
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code not in {408, 409, 429, 500, 502, 503, 504} and "timeout" not in str(exc).lower():
+                break
+            if attempt >= attempts:
+                break
+            time.sleep(base_delay * attempt)
+    if last_error:
+        raise last_error
+    raise ValueError("OpenAI fallback 请求失败")
 
 
 
@@ -393,9 +566,16 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
     last_error = None
     total_usage = {}
     for prompt in prompts:
-        message = _create_message_with_retry(**_build_message_kwargs(prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id))
-        total_usage = _merge_usage(total_usage, _extract_usage_from_message(message))
-        raw = _extract_message_text(message)
+        try:
+            message = _create_message_with_retry(**_build_message_kwargs(prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id))
+            total_usage = _merge_usage(total_usage, _extract_usage_from_message(message))
+            raw = _extract_message_text(message)
+        except UpstreamBusyError as exc:
+            if _get_openai_api_key():
+                print(f"⚠️ Claude 当前过载，切换到 OpenAI {_get_openai_fallback_model()} 继续生成")
+                return _request_json_from_openai(prompt, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+            last_error = exc
+            continue
         try:
             data, repair_usage = _parse_json_response(raw)
             return data, _merge_usage(total_usage, repair_usage)
