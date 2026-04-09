@@ -1331,6 +1331,9 @@ def _serialize_result_for_ui(output_dir: str, result: dict, topic: str) -> dict:
     payload = dict(result)
     payload["topic"] = topic or payload.get("topic", "")
     payload["output_dir"] = output_dir
+    payload["history_id"] = _history_id_from_output_dir(output_dir)
+    payload["id"] = payload["history_id"]
+    payload["live_task_id"] = _find_live_task_id_for_output_dir(output_dir) if output_dir else payload.get("live_task_id", "")
     payload["files"] = _build_file_entries(output_dir) if output_dir else []
     if not isinstance(payload.get("cost_entries"), list):
         payload["cost_entries"] = []
