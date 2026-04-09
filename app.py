@@ -1176,10 +1176,10 @@ def _load_result_from_output_dir(output_dir: Path) -> Optional[dict]:
         result = json.loads(result_path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if not result.get("cost_entries"):
-        result["cost_entries"] = _derive_cost_entries_for_result(output_dir, result)
+    if not isinstance(result.get("cost_entries"), list):
+        result["cost_entries"] = []
     if not result.get("cost_summary"):
-        result["cost_summary"] = _summarize_cost_entries(result.get("cost_entries", []))
+        result["cost_summary"] = _summarize_cost_entries(result["cost_entries"])
     return result
 
 
@@ -1299,8 +1299,9 @@ def _serialize_result_for_ui(output_dir: str, result: dict, topic: str) -> dict:
     payload["topic"] = topic or payload.get("topic", "")
     payload["output_dir"] = output_dir
     payload["files"] = _build_file_entries(output_dir) if output_dir else []
-    payload["cost_entries"] = payload.get("cost_entries") or _derive_cost_entries_for_result(Path(output_dir) if output_dir else None, payload)
-    payload["cost_summary"] = payload.get("cost_summary") or _summarize_cost_entries(payload.get("cost_entries", []))
+    if not isinstance(payload.get("cost_entries"), list):
+        payload["cost_entries"] = []
+    payload["cost_summary"] = payload.get("cost_summary") or _summarize_cost_entries(payload["cost_entries"])
     payload["segments"] = [_serialize_segment(output_dir, payload["topic"], seg, index) for index, seg in enumerate(payload.get("segments") or [])]
     payload["segment_count"] = int(payload.get("segment_count") or len(payload["segments"]))
     payload["social_post"] = payload.get("social_post") or payload.get("xiaohongshu_post") or payload.get("facebook_post") or ""
