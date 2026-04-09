@@ -16,30 +16,45 @@ PEXELS_VIDEO_URL = "https://api.pexels.com/videos/search"
 
 def search_photos(keyword: str, count: int = 3) -> list:
     """
-    搜索图片素材
+    搜索图片素材，优先竖图，其次方图，最后横图。
     返回图片URL列表
     """
     headers = {"Authorization": PEXELS_API_KEY}
-    params = {
-        "query": keyword,
-        "per_page": count,
-        "orientation": "landscape",
-    }
-    
-    response = requests.get(PEXELS_API_URL, headers=headers, params=params)
-    response.raise_for_status()
-    
-    data = response.json()
-    photos = data.get("photos", [])
-    
-    return [
-        {
-            "url": p["src"]["large"],
-            "photographer": p["photographer"],
-            "alt": p.get("alt", keyword),
+    collected = []
+    seen = set()
+
+    for orientation in ["portrait", "square", "landscape"]:
+        params = {
+            "query": keyword,
+            "per_page": count,
+            "orientation": orientation,
         }
-        for p in photos
-    ]
+
+        response = requests.get(PEXELS_API_URL, headers=headers, params=params)
+        response.raise_for_status()
+
+        data = response.json()
+        photos = data.get("photos", [])
+
+        for photo in photos:
+            url = photo["src"]["large"]
+            if url in seen:
+                continue
+            seen.add(url)
+            collected.append(
+                {
+                    "url": url,
+                    "photographer": photo["photographer"],
+                    "alt": photo.get("alt", keyword),
+                    "width": photo.get("width"),
+                    "height": photo.get("height"),
+                    "orientation": orientation,
+                }
+            )
+            if len(collected) >= count:
+                return collected
+
+    return collected
 
 
 def search_videos(keyword: str, count: int = 2) -> list:

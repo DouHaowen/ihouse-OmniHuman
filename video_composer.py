@@ -114,6 +114,75 @@ def _material_motion_filter(duration: float) -> str:
     )
 
 
+def _image_dimensions(image_path: str) -> tuple[int, int]:
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0:s=x",
+            str(image_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        width_str, height_str = result.stdout.strip().split("x", 1)
+        return int(width_str), int(height_str)
+    except Exception:
+        return WIDTH, HEIGHT
+
+
+def _material_frame_mode(width: int, height: int) -> str:
+    ratio = (width / max(height, 1)) if width and height else (WIDTH / HEIGHT)
+    if ratio <= 0.82:
+        return "portrait"
+    if ratio <= 1.15:
+        return "square"
+    return "landscape"
+
+
+def _portrait_foreground_filter(duration: float) -> str:
+    return (
+        f"scale={int(WIDTH * 1.06)}:{int(HEIGHT * 1.06)}:force_original_aspect_ratio=increase,"
+        f"crop={WIDTH}:{HEIGHT}:"
+        f"x='(in_w-out_w)/2+8*sin(t/({max(duration, 0.1):.3f}/2+0.45))':"
+        f"y='(in_h-out_h)/2+16*cos(t/({max(duration, 0.1):.3f}/2+0.65))',"
+        f"setsar=1"
+    )
+
+
+def _soft_background_filter() -> str:
+    return (
+        f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop={WIDTH}:{HEIGHT},"
+        f"boxblur=34:12,"
+        f"eq=brightness=-0.04:saturation=0.92:contrast=1.03,"
+        f"setsar=1"
+    )
+
+
+def _square_foreground_filter() -> str:
+    return (
+        f"scale={int(WIDTH * 0.90)}:{int(HEIGHT * 0.90)}:force_original_aspect_ratio=decrease,"
+        f"setsar=1"
+    )
+
+
+def _landscape_foreground_filter() -> str:
+    return (
+        f"scale={int(WIDTH * 0.88)}:{int(HEIGHT * 0.88)}:force_original_aspect_ratio=decrease,"
+        f"setsar=1"
+    )
+
+
+def _card_overlay_expr(duration: float, intensity: int = 8) -> str:
+    return (
+        f"overlay=(W-w)/2+{intensity}*sin(t/({max(duration, 0.1):.3f}/2+0.55)):"
+        f"(H-h)/2+{max(10, intensity + 4)}*cos(t/({max(duration, 0.1):.3f}/2+0.75))"
+    )
+
+
 def _subtitle_filter(subtitle_path: Path, template_id: str) -> str:
     escaped = subtitle_path.as_posix().replace('\\', '/').replace(':', r'\:').replace("'", r"\'")
     style_config = SUBTITLE_TEMPLATE_STYLES.get(template_id) or SUBTITLE_TEMPLATE_STYLES["classic"]
@@ -288,14 +357,30 @@ def _build_material_segment(images: list[str], duration: float, output_path: Pat
     concat_inputs = []
     for idx, image in enumerate(valid_images):
         cmd += ["-loop", "1", "-t", f"{per_image:.3f}", "-i", image]
-        motion = _material_motion_filter(per_image)
+        width, height = _image_dimensions(image)
+        mode = _material_frame_mode(width, height)
         transition_filter = ""
         if transition_id == "fade" and per_image > 0.9:
             fade_out_start = max(per_image - 0.45, 0.15)
             transition_filter = f",fade=t=in:st=0:d=0.28,fade=t=out:st={fade_out_start:.3f}:d=0.32"
-        filter_parts.append(
-            f"[{idx}:v]{motion}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[v{idx}]"
-        )
+
+        if mode == "portrait":
+            motion = _portrait_foreground_filter(per_image)
+            filter_parts.append(
+                f"[{idx}:v]{motion}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[v{idx}]"
+            )
+        elif mode == "square":
+            filter_parts.append(f"[{idx}:v]{_soft_background_filter()}[bg{idx}]")
+            filter_parts.append(f"[{idx}:v]{_square_foreground_filter()}[fg{idx}]")
+            filter_parts.append(
+                f"[bg{idx}][fg{idx}]{_card_overlay_expr(per_image, 6)}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[v{idx}]"
+            )
+        else:
+            filter_parts.append(f"[{idx}:v]{_soft_background_filter()}[bg{idx}]")
+            filter_parts.append(f"[{idx}:v]{_landscape_foreground_filter()}[fg{idx}]")
+            filter_parts.append(
+                f"[bg{idx}][fg{idx}]{_card_overlay_expr(per_image, 10)}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[v{idx}]"
+            )
         concat_inputs.append(f"[v{idx}]")
     filter_parts.append(f"{''.join(concat_inputs)}concat=n={len(valid_images)}:v=1:a=0[vout]")
     cmd += [
