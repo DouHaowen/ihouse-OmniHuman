@@ -14,7 +14,7 @@ import time
 import uuid
 import zipfile
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 from urllib.parse import quote_plus
 from xml.etree import ElementTree as ET
@@ -39,8 +39,9 @@ ASSETS_DIR = BASE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
 
 AVATAR_DISPLAY_NAME_MAP = {
-    "avatar_test_0cd3d70a.png": "主播A",
-    "avatar_test_new_01.png": "主播B",
+    "avatar_test_0cd3d70a.png": "女主播A",
+    "avatar_host_c.png": "男主播A",
+    "avatar_test_new_01.png": "林晨专属",
 }
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -91,14 +92,14 @@ VOICE_PRESETS = [
         "subtitle": "中文台湾语",
         "gender": "female",
         "language": "zh-TW",
-        "style": "使用台湾同事真实声音克隆，当前待填写 voice_id 后可用",
+        "style": "使用台湾同事真实声音克隆，适合台湾市场口播与生活资讯内容。",
         "voice_id": os.getenv("VOICE_TAIWAN_CLONE", ""),
         "default_speed": 1.1,
         "default_volume": 1.0,
         "tags": ["女声", "台湾", "克隆"],
-        "sample_text": "待填入 voice_id 后即可用于台湾市场配音。",
+        "sample_text": "嗨，今天用更自然亲切的语气，陪你快速看懂这个主题。",
         "enabled": bool(os.getenv("VOICE_TAIWAN_CLONE", "").strip()),
-        "availability_note": "待填写 voice_id 后可用",
+        "availability_note": "已启用",
     },
     {
         "id": "japanese_female",
@@ -812,9 +813,81 @@ def _build_file_entries(output_dir: str) -> list[dict]:
     return entries
 
 
+def _history_relpath_from_value(output_dir: str, value: str) -> str:
+    if not output_dir or not value:
+        return ""
+    base = Path(output_dir)
+    history_id = base.name
+    raw = str(value).strip()
+    if not raw or raw.startswith("http://") or raw.startswith("https://"):
+        return ""
+
+    path_obj = Path(raw)
+    if not path_obj.is_absolute():
+        candidate = (base / raw).resolve()
+        if candidate.exists():
+            return candidate.relative_to(base).as_posix()
+
+    posix_parts = PurePosixPath(raw).parts
+    if history_id in posix_parts:
+        idx = posix_parts.index(history_id)
+        rel = "/".join(posix_parts[idx + 1:])
+        if rel:
+            return rel
+
+    basename = Path(raw).name
+    if basename:
+        matches = sorted(base.rglob(basename))
+        if matches:
+            return matches[0].relative_to(base).as_posix()
+    return ""
+
+
+def _history_file_url(output_dir: str, value: str) -> str:
+    rel = _history_relpath_from_value(output_dir, value)
+    if not rel:
+        return ""
+    history_id = Path(output_dir).name
+    return f"/api/history/{history_id}/download/{rel}"
+
+
 def _serialize_segment(output_dir: str, topic: str, seg: dict, index: int) -> dict:
     data = dict(seg)
     data["index"] = index + 1
+    data["type"] = data.get("type", "material")
+    for field in ("start", "end", "duration"):
+        raw = data.get(field, 0)
+        try:
+            numeric = float(raw or 0)
+        except (TypeError, ValueError):
+            numeric = 0.0
+        data[field] = int(numeric) if numeric.is_integer() else round(numeric, 2)
+
+    audio_url = _history_file_url(output_dir, data.get("audio_path", ""))
+    if audio_url:
+        data["audio"] = {
+            "url": audio_url,
+            "name": Path(str(data.get("audio_path", ""))).name or f"segment_{index + 1:02d}.mp3",
+        }
+
+    video_url = _history_file_url(output_dir, data.get("video_path", ""))
+    if video_url:
+        data["video"] = {
+            "url": video_url,
+            "name": Path(str(data.get("video_path", ""))).name or f"segment_{index + 1:02d}.mp4",
+        }
+
+    materials = []
+    for material_path in data.get("material_paths") or []:
+        material_url = _history_file_url(output_dir, material_path)
+        if not material_url:
+            continue
+        materials.append({
+            "url": material_url,
+            "name": Path(str(material_path)).name or f"material_{index + 1:02d}.jpg",
+        })
+    if materials:
+        data["materials"] = materials
     return data
 
 
@@ -825,6 +898,30 @@ def _serialize_result_for_ui(output_dir: str, result: dict, topic: str) -> dict:
     payload["files"] = _build_file_entries(output_dir) if output_dir else []
     payload["cost_entries"] = payload.get("cost_entries") or _derive_cost_entries_for_result(Path(output_dir) if output_dir else None, payload)
     payload["cost_summary"] = payload.get("cost_summary") or _summarize_cost_entries(payload.get("cost_entries", []))
+    payload["segments"] = [_serialize_segment(output_dir, payload["topic"], seg, index) for index, seg in enumerate(payload.get("segments") or [])]
+    payload["segment_count"] = int(payload.get("segment_count") or len(payload["segments"]))
+    payload["social_post"] = payload.get("social_post") or payload.get("xiaohongshu_post") or payload.get("facebook_post") or ""
+
+    final_video_url = _history_file_url(output_dir, payload.get("final_video_path", ""))
+    if final_video_url:
+        payload["final_video"] = {
+            "url": final_video_url,
+            "name": Path(str(payload.get("final_video_path", ""))).name or "final_video.mp4",
+        }
+
+    cover_image_url = _history_file_url(output_dir, payload.get("cover_image_path", ""))
+    if cover_image_url:
+        payload["cover_image"] = {
+            "url": cover_image_url,
+            "name": Path(str(payload.get("cover_image_path", ""))).name or "cover.jpg",
+        }
+
+    subtitle_url = _history_file_url(output_dir, payload.get("subtitle_path", ""))
+    if subtitle_url:
+        payload["subtitle_file"] = {
+            "url": subtitle_url,
+            "name": Path(str(payload.get("subtitle_path", ""))).name or "timeline_subtitles.srt",
+        }
     return payload
 
 
@@ -911,7 +1008,12 @@ def _resolve_history_for_user(history_id: str, user: Optional[dict]) -> tuple[Op
 
 def _list_avatar_options() -> list[dict]:
     items = []
-    for path in sorted(ASSETS_DIR.iterdir() if ASSETS_DIR.exists() else []):
+    preferred_order = {
+        "avatar_test_0cd3d70a.png": 0,
+        "avatar_host_c.png": 1,
+        "avatar_test_new_01.png": 2,
+    }
+    for path in sorted(ASSETS_DIR.iterdir() if ASSETS_DIR.exists() else [], key=lambda p: (preferred_order.get(p.name, 999), p.name)):
         if not path.is_file():
             continue
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
