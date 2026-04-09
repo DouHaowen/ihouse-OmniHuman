@@ -93,10 +93,31 @@ DEPARTMENT_RULES = {
     "robotics": "内容角度更偏机器人、AI硬件、智能设备、产业动态、产品进展与应用场景。",
 }
 
+XIAOHONGSHU_SAFE_MODE_GUIDANCE = """
+
+如果目标市场是中国市场，请额外遵守“小红书知识科普安全模式”：
+1. 内容定位必须是知识科普、新闻解读、生活方式认知差，不要写成房产中介广告。
+2. 严禁直接提及公司品牌、机构品牌、团队品牌，例如 iHouse、IHOUSE、艾豪斯 等。
+3. 严禁出现顾问身份、自我介绍式导流，例如“我是某某顾问”“我们团队”“欢迎咨询我们”。
+4. 严禁出现咨询导流词，例如私信、微信、加微、扫码、联系客服、联系我们、一对一解答、关注我们获取服务。
+5. 严禁出现强交易或强营销表达，例如上车、抄底、捡漏、最佳时机、赶紧买、立即行动、稳赚、高收益、资产配置首选。
+6. 标题、封面标题和正文要更像中立问题句、误区拆解、制度科普或新闻解读，不要像销售文案。
+7. 结尾只允许轻互动，例如“你最在意哪一点？”“你之前最大的误解是什么？”，不要出现转化型 CTA。
+8. social_post 也必须遵守以上规则，不得出现品牌、顾问、咨询和导流表达。
+"""
+
+CN_MARKETING_RISK_TERMS = [
+    "ihouse", "艾豪斯", "咨询", "私信", "微信", "加微", "扫码", "联系客服", "联系我们",
+    "顾问", "团队", "置业顾问", "一对一", "关注我们", "帮你买房", "带你买房", "上车",
+    "抄底", "捡漏", "稳赚", "高收益", "高回报", "投资回报", "最佳时机", "立即行动",
+    "抓紧", "限时", "资产配置首选",
+]
+
 
 def _build_context_guidance(target_market: str, department_id: str) -> str:
     market = TARGET_MARKET_RULES.get(target_market, TARGET_MARKET_RULES["cn"])
     department_rule = DEPARTMENT_RULES.get(department_id, "内容角度保持通用商业资讯表达。")
+    extra = XIAOHONGSHU_SAFE_MODE_GUIDANCE if target_market == "cn" else ""
     return f"""
 
 当前内容目标市场：{market['name']}
@@ -104,7 +125,78 @@ def _build_context_guidance(target_market: str, department_id: str) -> str:
 市场输出规则：{market['content_rules']}
 当前业务部门：{department_id}
 部门表达要求：{department_rule}
+{extra}
 """
+
+def _iter_text_values(value: Any):
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_text_values(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_text_values(item)
+
+
+def _find_cn_marketing_hits(data: dict) -> list[str]:
+    haystack = "\n".join(text for text in _iter_text_values(data) if isinstance(text, str)).lower()
+    hits = []
+    for term in CN_MARKETING_RISK_TERMS:
+        if term.lower() in haystack:
+            hits.append(term)
+    return hits
+
+
+def _rewrite_script_for_cn_safety(topic: str, data: dict, enable_web_search: bool, target_market: str, department_id: str) -> tuple[dict, dict]:
+    hits = _find_cn_marketing_hits(data)
+    prompt = f"""
+下面是一份已经生成好的短视频 JSON 脚本，但它面向中国市场，需要进一步改成“小红书知识科普安全模式”。
+
+选题：{topic}
+当前脚本：
+{json.dumps(data, ensure_ascii=False, indent=2)}
+
+已命中的高风险词：{', '.join(hits) if hits else '无'}
+
+请你在不改变整体主题、不改变 JSON 结构的前提下，重写 title、cover_title、segments 中的 script、social_post，让它变成更中立的知识型内容。
+必须遵守：
+1. 保留 total_duration 与每段的 type/start/end/duration 不变。
+2. digital_human 继续保留 action 字段，但动作描述只允许坐在台前能完成的动作。
+3. material_keyword、material_search_keyword、material_desc 保持原意，可以按需要微调表达，但不要改成营销口吻。
+4. 严禁出现品牌名、公司名、顾问、团队、咨询导流、微信私信、强交易词、收益承诺。
+5. 标题和封面标题更像问题句、误区拆解、制度科普或新闻解读。
+6. social_post 结尾只允许轻互动，不允许转化导流。
+7. 只返回合法 JSON，本次不要输出任何解释。
+"""
+    rewritten, usage = _request_json_from_claude(prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    return rewritten, usage
+
+
+def _rewrite_segment_for_cn_safety(topic: str, script_data: dict, segment_index: int, segment: dict, enable_web_search: bool, target_market: str, department_id: str) -> tuple[dict, dict]:
+    prompt = f"""
+下面是一条面向中国市场的小红书知识型短视频脚本中的单个段落，请你把它改成更安全、更中立的科普表达。
+
+选题：{topic}
+整条脚本：
+{json.dumps(script_data, ensure_ascii=False, indent=2)}
+
+当前段落：
+{json.dumps(segment, ensure_ascii=False, indent=2)}
+
+要求：
+1. 保留 type/start/end/duration 不变。
+2. 如果是 digital_human，只返回 type/start/end/duration/script/action。
+3. 如果是 material，只返回 type/start/end/duration/script/material_keyword/material_search_keyword/material_desc。
+4. 严禁品牌名、公司名、顾问身份、咨询导流、私信微信、强交易词和收益承诺。
+5. 表达要更像知识科普、误区拆解、制度解释，而不是营销文案。
+6. 只返回合法 JSON，不要输出解释。
+"""
+    rewritten, usage = _request_json_from_claude(prompt, max_tokens=1800, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    return rewritten, usage
+
 
 def _extract_json_text(raw: str) -> str:
     raw = raw.strip()
@@ -314,6 +406,10 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
 """
 
     revised, usage = _request_json_from_claude(prompt, max_tokens=1600, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    if target_market == "cn" and _find_cn_marketing_hits(revised):
+        safe_revised, safe_usage = _rewrite_segment_for_cn_safety(topic, script_data, segment_index, revised, enable_web_search, target_market, department_id)
+        revised = safe_revised
+        usage = _merge_usage(usage, safe_usage)
     for key in ('type', 'start', 'end', 'duration'):
         revised[key] = target.get(key)
 
@@ -352,6 +448,11 @@ def generate_script(topic: str, enable_web_search: bool = False, target_market: 
 
     prompt = f"请为以下选题生成视频文案：{topic}"
     data, usage = _request_json_from_claude(prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    if target_market == "cn" and _find_cn_marketing_hits(data):
+        print("🛡️ 命中中国市场营销风险词，正在自动改写为小红书安全模式")
+        safe_data, safe_usage = _rewrite_script_for_cn_safety(topic, data, enable_web_search, target_market, department_id)
+        data = safe_data
+        usage = _merge_usage(usage, safe_usage)
     data['_meta'] = {'usage': usage}
     print(f"✅ 文案生成完成，共 {len(data['segments'])} 段，总时长 {data['total_duration']} 秒")
     return data
