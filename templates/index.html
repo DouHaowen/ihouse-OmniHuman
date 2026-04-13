@@ -2872,6 +2872,7 @@
       if (state.expandedPreviewSegment === undefined || state.expandedPreviewSegment === null) {
         state.expandedPreviewSegment = 1;
       }
+      const expandedSegmentIndex = state.expandedPreviewSegment ?? 1;
       const source = preview.source || {};
       const sourceKindLabel = source.kind === 'youtube'
         ? (currentCopy().sourceTypeYoutube || 'YouTube 视频')
@@ -2897,7 +2898,7 @@
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelDepartment || '业务部门')}</div><div class="value">${escapeHtml(localizedDepartmentName(preview.department_id, ((state.options?.departments || []).find(item => item.id === preview.department_id)?.name) || copyText('statusUnset', '未设置')))}</div></div>
       `;
       els.scriptSegments.innerHTML = (preview.segments || []).map(segment => `
-        <article class="segment-card compact ${Number(segment.index) === Number(state.expandedPreviewSegment || 1) ? 'expanded' : ''}" data-preview-segment="${segment.index}">
+        <article class="segment-card compact ${Number(segment.index) === Number(expandedSegmentIndex) ? 'expanded' : ''}" data-preview-segment="${segment.index}">
           <div class="segment-top">
             <div class="segment-index">${segment.index}</div>
             <div class="segment-badge ${segment.type}">${segment.type === 'digital_human' ? (currentCopy().segmentTypeDigital || '数字人段') : (currentCopy().segmentTypeMaterial || '素材段') }</div>
@@ -2905,7 +2906,7 @@
           </div>
           <div class="segment-summary">${escapeHtml(segment.script || '')}</div>
           <div class="segment-toggle-row">
-            <button class="btn btn-secondary preview-segment-toggle" type="button" data-segment-index="${segment.index}">${Number(segment.index) === Number(state.expandedPreviewSegment || 1) ? '收起详细编辑' : '展开详细编辑'}</button>
+            <button class="btn btn-secondary preview-segment-toggle" type="button" data-segment-index="${segment.index}">${Number(segment.index) === Number(expandedSegmentIndex) ? '收起详细编辑' : '展开详细编辑'}</button>
           </div>
           <div class="segment-editor">
             <div>

@@ -1900,6 +1900,43 @@ def _build_script_preview_payload(
     return payload
 
 
+def _shorten_text(value: str, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _build_source_generation_topic(source_info: dict, topic_text: str = "", fallback_topic: str = "") -> str:
+    source_kind = (source_info or {}).get("kind") or "text"
+    if source_kind == "text":
+        return _shorten_text(topic_text or fallback_topic or "", 1200)
+
+    kind_label = {
+        "youtube": "YouTube来源",
+        "news": "新闻来源",
+    }.get(source_kind, "来源链接")
+    lines = [f"【{kind_label}】"]
+    title = _shorten_text((source_info or {}).get("title", ""), 160)
+    source_name = _shorten_text((source_info or {}).get("source_name", ""), 80)
+    url = _shorten_text((source_info or {}).get("url", ""), 240)
+    summary = _shorten_text((source_info or {}).get("summary", ""), 260)
+    user_note = _shorten_text((source_info or {}).get("user_note", ""), 120)
+
+    if title:
+        lines.append(f"标题：{title}")
+    if source_name:
+        lines.append(f"来源：{source_name}")
+    if url:
+        lines.append(f"链接：{url}")
+    if summary:
+        lines.append(f"摘要：{summary}")
+    if user_note:
+        lines.append(f"用户备注：{user_note}")
+    lines.append("请基于以上来源提炼适合短视频表达的选题角度，并在不捏造事实的前提下输出脚本。")
+    return "\n".join(lines)
+
+
 def _list_history_items(user: Optional[dict], include_all: bool = False) -> list[dict]:
     items = []
     if not OUTPUT_DIR.exists():
@@ -2332,8 +2369,8 @@ async def script_preview(
     from generate_script import generate_script
 
     source_info = analyze_topic_fields(topic_text=topic_text, source_url=source_url, fallback_topic=topic)
-    generation_topic = source_info.get("normalized_topic") or topic_text or source_url or topic
-    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") != "text"
+    generation_topic = _build_source_generation_topic(source_info, topic_text=topic_text, fallback_topic=topic)
+    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") == "news"
     try:
         script_data = _run_script_ai_job(
             job_id=f"preview:{user.get('username', 'guest')}:{time.time_ns()}",
@@ -2385,8 +2422,8 @@ async def produce_video(
         return JSONResponse({"error": "文案数据格式错误"}, status_code=400)
 
     source_info = analyze_topic_fields(topic_text=topic_text, source_url=source_url, fallback_topic=topic)
-    generation_topic = source_info.get("normalized_topic") or topic_text or source_url or topic
-    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") != "text"
+    generation_topic = _build_source_generation_topic(source_info, topic_text=topic_text, fallback_topic=topic)
+    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") == "news"
     submission_key = _make_produce_submission_key(
         owner_username=user.get("username", ""),
         topic=generation_topic,
@@ -2481,7 +2518,7 @@ async def start_generation(
     if error:
         return error
     source_info = analyze_topic_fields(topic_text=topic_text, source_url=source_url, fallback_topic=topic)
-    generation_topic = source_info.get("normalized_topic") or topic_text or source_url or topic
+    generation_topic = _build_source_generation_topic(source_info, topic_text=topic_text, fallback_topic=topic)
     task_id = str(uuid.uuid4())[:8]
     image_path = ""
     if image and image.filename:
@@ -2803,8 +2840,8 @@ async def revise_script_preview_segment(
     from generate_script import revise_script_segment
 
     source_info = analyze_topic_fields(topic_text=topic_text, source_url=source_url, fallback_topic=topic)
-    generation_topic = source_info.get("normalized_topic") or topic_text or source_url or topic
-    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") != "text"
+    generation_topic = _build_source_generation_topic(source_info, topic_text=topic_text, fallback_topic=topic)
+    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") == "news"
     try:
         revised_segment = _run_script_ai_job(
             job_id=f"revise:{user.get('username', 'guest')}:{time.time_ns()}",
