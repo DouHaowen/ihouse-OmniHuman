@@ -645,7 +645,14 @@ def run_pipeline_with_progress(
             tracker.log(f"配音生成中（{index}/{total_segments}）：{script_text[:28]}...")
             seg_type = seg.get("type", "")
             audio_path = os.path.join(output_dir, "audio", f"segment_{index - 1:02d}_{seg_type}.mp3")
-            generate_audio(script_text, audio_path, tts_voice, speed=tts_speed, volume=tts_volume)
+            generate_audio(
+                script_text,
+                audio_path,
+                tts_voice,
+                speed=tts_speed,
+                volume=tts_volume,
+                language=voice_preset.get("language", ""),
+            )
             seg_with_audio = dict(seg)
             seg_with_audio["audio_path"] = audio_path
             seg_with_audio["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
@@ -849,7 +856,14 @@ def run_resume_pipeline_with_progress(task_id: str):
                     seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
             else:
                 tracker.log(f"补生成配音（{index}/{len(base_segments)}）：{script_text[:28]}...")
-                generate_audio(script_text, audio_path, tts_voice, speed=tts_speed, volume=tts_volume)
+                generate_audio(
+                    script_text,
+                    audio_path,
+                    tts_voice,
+                    speed=tts_speed,
+                    volume=tts_volume,
+                    language=voice_cfg.get("language", voice_preset.get("language", "")),
+                )
                 seg["audio_path"] = audio_path
                 seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
                 _record_cost_entry(
@@ -2847,6 +2861,167 @@ async def upload_history_materials(history_id: str, segment_index: int, request:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     _sync_live_task_result(str(output_dir), result)
     return {"result": _serialize_result_for_ui(str(output_dir), result, result.get("topic", ""))}
+
+
+@app.post("/api/history/{history_id}/segments/{segment_index}/regenerate-audio")
+async def regenerate_history_segment_audio(history_id: str, segment_index: int, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    output_dir, result, access_error = _resolve_history_for_user(history_id, user)
+    if access_error:
+        return access_error
+
+    segments = result.get("segments", [])
+    if segment_index < 1 or segment_index > len(segments):
+        return JSONResponse({"error": "段落不存在"}, status_code=404)
+
+    segment = segments[segment_index - 1]
+    script_text = str(segment.get("script") or "").strip()
+    if not script_text:
+        return JSONResponse({"error": "该段缺少可用文案"}, status_code=400)
+
+    workflow_config = result.get("workflow_config", {}) or {}
+    target_market = workflow_config.get("target_market", "cn")
+    voice_cfg = workflow_config.get("voice_preset", {}) or {}
+    voice_preset = _get_voice_preset(voice_cfg.get("id"), target_market)
+    tts_voice = voice_preset.get("voice_id")
+    if not tts_voice:
+        return JSONResponse({"error": "当前任务缺少可用配音方案"}, status_code=400)
+    tts_speed = float(voice_cfg.get("selected_speed", voice_preset.get("default_speed", 1.1)))
+    tts_volume = float(voice_cfg.get("selected_volume", voice_preset.get("default_volume", 1.0)))
+    tts_language = voice_cfg.get("language", voice_preset.get("language", ""))
+
+    from generate_audio import generate_audio
+    from tos_uploader import upload_file_and_get_url
+
+    audio_dir = output_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    seg_type = segment.get("type", "segment")
+    audio_path = audio_dir / f"segment_{segment_index - 1:02d}_{seg_type}.mp3"
+
+    try:
+        generate_audio(
+            script_text,
+            str(audio_path),
+            tts_voice,
+            speed=tts_speed,
+            volume=tts_volume,
+            language=tts_language,
+        )
+    except Exception as exc:
+        return JSONResponse({"error": f"重新生成配音失败：{exc}"}, status_code=500)
+
+    segment["audio_path"] = str(audio_path)
+    try:
+        segment["audio_url"] = upload_file_and_get_url(str(audio_path), key_prefix="full/audio")
+    except Exception:
+        segment["audio_url"] = segment.get("audio_url", "")
+
+    if segment.get("type") == "digital_human":
+        segment["video_path"] = ""
+        segment["video_url"] = ""
+
+    result["final_video_path"] = ""
+    result["subtitle_path"] = ""
+    _record_history_cost(
+        output_dir=output_dir,
+        result=result,
+        user=user,
+        event_type="tts_generate",
+        amount=_estimate_tts_cost(script_text, str(audio_path)),
+        provider=COST_RULES["tts_generate"]["provider"],
+        topic=result.get("topic", ""),
+        meta={"segment_index": segment_index, "audio_path": str(audio_path), "scope": "regenerate_audio"},
+    )
+    with open(output_dir / "result.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+    _sync_live_task_result(str(output_dir), result)
+    return {
+        "message": "配音已重新生成",
+        "segment": _serialize_segment(str(output_dir), result.get("topic", ""), segment, segment_index - 1),
+        "result": _serialize_result_for_ui(str(output_dir), result, result.get("topic", "")),
+    }
+
+
+@app.post("/api/history/{history_id}/segments/{segment_index}/regenerate-digital-human")
+async def regenerate_history_segment_digital_human(history_id: str, segment_index: int, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    output_dir, result, access_error = _resolve_history_for_user(history_id, user)
+    if access_error:
+        return access_error
+
+    segments = result.get("segments", [])
+    if segment_index < 1 or segment_index > len(segments):
+        return JSONResponse({"error": "段落不存在"}, status_code=404)
+
+    segment = segments[segment_index - 1]
+    if segment.get("type") != "digital_human":
+        return JSONResponse({"error": "只有数字人段支持重新生成"}, status_code=400)
+
+    audio_path = str(segment.get("audio_path") or "").strip()
+    if not audio_path or not os.path.exists(audio_path):
+        return JSONResponse({"error": "该段缺少可用音频文件"}, status_code=400)
+
+    workflow_config = result.get("workflow_config", {}) or {}
+    target_market = workflow_config.get("target_market", "cn")
+    avatar_cfg = workflow_config.get("avatar", {}) or {}
+    avatar_option = _get_avatar_option(avatar_cfg.get("id"), target_market_id=target_market)
+    image_path = avatar_option.get("image_path") if avatar_option else ""
+    if not image_path or not os.path.exists(image_path):
+        return JSONResponse({"error": "当前任务缺少可用的主播图片"}, status_code=400)
+
+    from generate_digital_human import generate_digital_human_video
+    from tos_uploader import upload_file_and_get_url
+
+    try:
+        image_url = upload_file_and_get_url(image_path, key_prefix="full/image")
+        audio_url = segment.get("audio_url") or upload_file_and_get_url(audio_path, key_prefix="full/audio")
+        segment["audio_url"] = audio_url
+    except Exception as exc:
+        return JSONResponse({"error": f"准备数字人素材失败：{exc}"}, status_code=500)
+
+    digital_human_dir = output_dir / "digital_human"
+    digital_human_dir.mkdir(parents=True, exist_ok=True)
+    video_output = digital_human_dir / f"dh_{segment_index - 1:02d}_regen_{int(time.time())}.mp4"
+
+    try:
+        video_path = _run_omnihuman_job(
+            job_id=f"{history_id}:regen:{segment_index}",
+            label=f"历史数字人重生成（第{segment_index}段）",
+            runner=lambda: generate_digital_human_video(
+                image_url=image_url,
+                audio_url=audio_url,
+                output_path=str(video_output),
+                prompt=_combine_prompt(avatar_option.get("style_prompt", "") if avatar_option else "", segment.get("action", "")),
+            ),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": f"重新生成数字人视频失败：{exc}"}, status_code=500)
+
+    segment["video_path"] = video_path
+    result["final_video_path"] = ""
+    result["subtitle_path"] = ""
+    _record_history_cost(
+        output_dir=output_dir,
+        result=result,
+        user=user,
+        event_type="digital_human_generate",
+        amount=_estimate_digital_human_cost(segment.get("duration", 0)),
+        provider=COST_RULES["digital_human_generate"]["provider"],
+        topic=result.get("topic", ""),
+        meta={"segment_index": segment_index, "video_path": video_path, "scope": "regenerate_digital_human", "duration": segment.get("duration", 0), "video_duration": _probe_media_duration(video_path)},
+    )
+    with open(output_dir / "result.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+    _sync_live_task_result(str(output_dir), result)
+    return {
+        "message": "数字人视频已重新生成",
+        "segment": _serialize_segment(str(output_dir), result.get("topic", ""), segment, segment_index - 1),
+        "result": _serialize_result_for_ui(str(output_dir), result, result.get("topic", "")),
+    }
 
 
 @app.get("/api/tasks/{task_id}/files")

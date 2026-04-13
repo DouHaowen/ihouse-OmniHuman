@@ -186,23 +186,89 @@
     }
 
     .stage {
-      display: grid;
-      grid-template-columns: 320px minmax(0, 1fr) 290px;
+      display: block;
       min-height: 1000px;
-      gap: 0;
     }
 
-    .intro {
-      padding: 24px 18px 24px 24px;
-      background: linear-gradient(180deg, rgba(255,255,255,0.42), rgba(255,255,255,0.18));
-      border-right: 1px solid var(--line);
-    }
-
-    .intro-inner {
-      position: sticky;
-      top: 18px;
+    .workflow-strip {
       display: grid;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .workflow-strip-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .workflow-strip-copy {
+      display: grid;
+      gap: 6px;
+    }
+
+    .workflow-strip-copy strong {
+      font-size: 18px;
+      letter-spacing: -0.03em;
+    }
+
+    .workflow-strip-copy span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .workflow-pills {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .workflow-pill {
+      display: grid;
+      gap: 4px;
+      padding: 14px 16px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.88);
+      transition: .18s ease;
+    }
+
+    .workflow-pill-step {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .workflow-pill strong {
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .workflow-pill span:last-child {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.66;
+    }
+
+    .workflow-pill.active {
+      background: linear-gradient(180deg, rgba(241,251,249,0.95), rgba(255,255,255,0.96));
+      border-color: rgba(13,107,99,0.28);
+      box-shadow: 0 0 0 4px rgba(13,107,99,0.06);
+    }
+
+    .workflow-pill.active .workflow-pill-step,
+    .workflow-pill.active strong {
+      color: var(--brand-deep);
+    }
+
+    .workflow-pill.done {
+      background: rgba(13,107,99,0.08);
+      border-color: rgba(13,107,99,0.18);
     }
 
     .eyebrow {
@@ -816,17 +882,6 @@
       background: rgba(255,255,255,0.98);
     }
 
-    .rightbar {
-      padding: 22px 22px 22px 14px;
-      background: rgba(255,255,255,0.12);
-    }
-
-    .side-stack {
-      position: sticky;
-      top: 18px;
-      gap: 14px;
-    }
-
     .result-shell,
     .progress-shell { display: none; }
     .result-shell.active,
@@ -867,6 +922,128 @@
 
     .log-line + .log-line { margin-top: 6px; }
     .log-time { color: rgba(255,255,255,0.34); margin-right: 8px; }
+
+    .compact-stack {
+      display: grid;
+      gap: 14px;
+    }
+
+    .inline-disclosure {
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.72);
+      overflow: hidden;
+    }
+
+    .inline-disclosure-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: transparent;
+      border: none;
+      padding: 16px 18px;
+      cursor: pointer;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 800;
+      text-align: left;
+    }
+
+    .inline-disclosure-toggle span:last-child {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .inline-disclosure-body {
+      display: none;
+      padding: 0 18px 18px;
+    }
+
+    .inline-disclosure.open .inline-disclosure-body {
+      display: block;
+    }
+
+    .inline-disclosure.open .inline-disclosure-toggle span:last-child {
+      transform: rotate(180deg);
+    }
+
+    .segment-card.compact {
+      padding: 18px 20px;
+    }
+
+    .segment-card.compact .segment-top {
+      margin-bottom: 10px;
+    }
+
+    .segment-summary {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.8;
+      margin-bottom: 14px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .segment-editor {
+      display: none;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+
+    .segment-card.expanded .segment-editor {
+      display: grid;
+      gap: 12px;
+    }
+
+    .segment-toggle-row {
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .drawer-overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: stretch;
+      justify-content: flex-end;
+      background: rgba(8, 16, 28, 0.32);
+      backdrop-filter: blur(6px);
+      z-index: 13000;
+      padding-left: 24px;
+    }
+
+    .drawer-overlay.open {
+      display: flex;
+    }
+
+    .drawer-panel {
+      width: min(460px, 100%);
+      height: 100%;
+      background: linear-gradient(180deg, rgba(251,247,241,0.98), rgba(244,248,252,0.98));
+      border-left: 1px solid rgba(255,255,255,0.7);
+      box-shadow: -24px 0 60px rgba(18, 28, 43, 0.16);
+      padding: 22px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+    }
+
+    .drawer-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .drawer-body {
+      overflow: auto;
+      padding-right: 4px;
+    }
 
     .media-box audio,
     .media-box video,
@@ -987,15 +1164,9 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     @media (max-width: 1380px) {
-      .stage {
-        grid-template-columns: 1fr;
+      .workflow-pills {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }
-      .intro { border-right: none; border-bottom: 1px solid var(--line); }
-      .rightbar {
-        grid-column: 1 / -1;
-        border-top: 1px solid var(--line);
-      }
-      .side-stack { position: static; }
     }
 
     @media (max-width: 1080px) {
@@ -1003,6 +1174,7 @@
       .summary-grid,
       .result-kpis,
       .stage-steps,
+      .workflow-pills,
       .preset-grid,
       .avatar-grid,
       .segment-meta,
@@ -1019,11 +1191,11 @@
       .stage-caption,
       .segment-top { flex-direction: column; align-items: stretch; }
       .topbar,
-      .intro,
       .workspace,
-      .rightbar,
       .panel { padding: 18px; }
       .btn { width: 100%; }
+      .drawer-overlay { padding-left: 0; }
+      .drawer-panel { width: 100%; }
     }
   </style>
 </head>
@@ -1067,6 +1239,8 @@
             <label for="topInterfaceLanguageSelect" id="topInterfaceLanguageLabel" style="font-size:11px; letter-spacing:0.12em; text-transform:uppercase; color:var(--muted); margin-bottom:6px;">界面语言</label>
             <select id="topInterfaceLanguageSelect" class="select-input" style="min-height:42px; padding:10px 14px; background:rgba(255,255,255,0.86);"></select>
           </div>
+          <button class="btn btn-secondary" id="activeTasksDrawerBtn" type="button" style="min-height:42px;">当前任务</button>
+          <button class="btn btn-secondary" id="historyDrawerBtn" type="button" style="min-height:42px;">历史记录</button>
           <div class="user-chip" id="sessionUser" style="display:none;"></div>
           <a class="btn btn-secondary" id="adminDashboardBtn" href="/admin/dashboard" style="display:none; min-height:42px; text-decoration:none;">管理员看板</a>
           <a class="btn btn-ghost" id="logoutBtn" href="/logout" style="display:none; min-height:42px; text-decoration:none;">退出登录</a>
@@ -1075,32 +1249,39 @@
       </div>
 
       <div class="stage">
-        <aside class="intro">
-          <div class="intro-inner">
-            <div class="eyebrow" id="workflowEyebrow">iHouse Workflow</div>
-            <h1 id="workflowTitle">内容生产流程</h1>
-            <div class="usage-list">
-              <div class="usage-item">
-                <div class="usage-num">01</div>
-                <div class="usage-copy"><strong id="usageTitle1">输入选题</strong><span id="usageDesc1">输入本次视频主题，系统先生成标题、封面标题和分镜脚本。</span></div>
+        <main class="workspace">
+          <section class="workflow-strip panel" style="padding:18px 20px;">
+            <div class="workflow-strip-head">
+              <div class="workflow-strip-copy">
+                <strong id="workflowTitle">当前工作流</strong>
+                <span id="workflowDesc">页面只保留当前需要处理的内容。任务和历史改到右上角抽屉里，减少切换时的干扰。</span>
               </div>
-              <div class="usage-item">
-                <div class="usage-num">02</div>
-                <div class="usage-copy"><strong id="usageTitle2">确认脚本</strong><span id="usageDesc2">逐段检查并修改文案、动作提示词和素材描述。</span></div>
+              <div class="eyebrow" id="workflowEyebrow" style="margin:0;">iHouse Workflow</div>
+            </div>
+            <div class="workflow-pills">
+              <div class="workflow-pill active" id="workflowPillTopic">
+                <span class="workflow-pill-step">Step 1</span>
+                <strong>输入选题</strong>
+                <span>先确定主题、市场和是否联网检索。</span>
               </div>
-              <div class="usage-item">
-                <div class="usage-num">03</div>
-                <div class="usage-copy"><strong id="usageTitle3">开始生产</strong><span id="usageDesc3">确认配音方案和主播图片后，一键生成整条视频素材。</span></div>
+              <div class="workflow-pill" id="workflowPillScript">
+                <span class="workflow-pill-step">Step 2</span>
+                <strong>确认脚本</strong>
+                <span>逐段检查内容，只展开正在修改的段落。</span>
               </div>
-              <div class="usage-item">
-                <div class="usage-num">04</div>
-                <div class="usage-copy"><strong id="usageTitle4">结果交付</strong><span id="usageDesc4">按顺序查看配音、数字人、素材、成片和打包文件。</span></div>
+              <div class="workflow-pill" id="workflowPillProgress">
+                <span class="workflow-pill-step">Step 3</span>
+                <strong>生产中</strong>
+                <span>默认只看阶段摘要，详细日志按需展开。</span>
+              </div>
+              <div class="workflow-pill" id="workflowPillResult">
+                <span class="workflow-pill-step">Step 4</span>
+                <strong>查看结果</strong>
+                <span>先看交付结果，再按需查看分段素材和文件。</span>
               </div>
             </div>
-          </div>
-        </aside>
+          </section>
 
-        <main class="workspace">
           <div class="main-stack">
             <section class="panel">
               <div class="workspace-stage">                <section id="topicPanel">
@@ -1172,6 +1353,7 @@
                   <div class="field">
                     <label>配音方案</label>
                     <div class="preset-grid" id="voicePresetGrid"></div>
+                    <div class="helper" id="marketVoiceHint" style="margin-top:10px;"></div>
                   </div>
 
                   <div class="field">
@@ -1205,14 +1387,33 @@
                   <h2 class="section-title" id="progressTitle">内容生产进行中</h2>
                   <p class="section-desc" id="progressDesc">这里会把当前流程拆成阶段，让运营知道系统现在处理到哪一步，而不是只看到一串技术日志。</p>
                 </div>
-                <div class="actions" style="justify-content:flex-end;">
-                  <div class="topbar-status" id="progressStatus"><span class="spinner"></span> 正在处理</div>
-                  <button class="btn btn-ghost" id="stopTaskBtn" type="button" style="display:none;">停止任务</button>
-                </div>
+                  <div class="actions" style="justify-content:flex-end;">
+                    <div class="topbar-status" id="progressStatus"><span class="spinner"></span> 正在处理</div>
+                    <button class="btn btn-ghost" id="stopTaskBtn" type="button" style="display:none;">停止任务</button>
+                  </div>
               </div>
               <div class="progress-board" id="progressSteps"></div>
-              <div class="insight-grid" id="queueStatusPanel" style="margin: 16px 0 0;"></div>
-              <div class="log-panel" id="logPanel"></div>
+              <div class="compact-stack" style="margin-top:16px;">
+                <div class="insight-grid" id="progressSummary"></div>
+                <div class="inline-disclosure" id="queueDisclosure">
+                  <button class="inline-disclosure-toggle" type="button" data-disclosure-target="queueStatusBody">
+                    <span id="queueDisclosureLabel">查看队列详情</span>
+                    <span>⌄</span>
+                  </button>
+                  <div class="inline-disclosure-body" id="queueStatusBody">
+                    <div class="insight-grid" id="queueStatusPanel"></div>
+                  </div>
+                </div>
+                <div class="inline-disclosure" id="logDisclosure">
+                  <button class="inline-disclosure-toggle" type="button" data-disclosure-target="logPanelWrap">
+                    <span id="logDisclosureLabel">查看详细日志</span>
+                    <span>⌄</span>
+                  </button>
+                  <div class="inline-disclosure-body" id="logPanelWrap">
+                    <div class="log-panel" id="logPanel"></div>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <section class="panel result-shell" id="resultPanel">
@@ -1257,23 +1458,6 @@
             </section>
           </div>
         </main>
-
-        <aside class="rightbar">
-          <div class="side-stack">
-            <section class="panel">
-              <div class="section-kicker">Tasks</div>
-              <h3 class="section-title" style="font-size:22px;"><span id="activeTasksTitle">后台任务</span></h3>
-              <div class="helper" style="margin: 10px 0 14px;"><span id="activeTasksDesc">这里会显示当前账号仍在后台运行的任务。你可以继续查看任意一条的进度，避免关页后失去现场。</span></div>
-              <div class="file-board" id="activeTaskList"></div>
-            </section>
-            <section class="panel">
-              <div class="section-kicker">History</div>
-              <h3 class="section-title" style="font-size:22px;"><span id="historyTitle">历史任务</span></h3>
-              <div class="helper" style="margin: 10px 0 14px;"><span id="historyDesc">这里会保留已经落盘的历史结果。服务重启后，旧任务也可以继续打开与下载。</span></div>
-              <div class="file-board" id="historyList"></div>
-            </section>
-          </div>
-        </aside>
       </div>
     </div>
   </div>
@@ -1295,6 +1479,36 @@
     <div style="position:relative; max-width:min(92vw, 1400px); max-height:90vh; width:100%; display:flex; align-items:center; justify-content:center;">
       <button id="lightboxClose" type="button" class="btn btn-secondary" style="position:absolute; top:-14px; right:0; z-index:2;">关闭</button>
       <img id="lightboxImage" src="" alt="放大预览" style="max-width:100%; max-height:90vh; border-radius:24px; box-shadow:0 30px 80px rgba(0,0,0,0.36); background:#fff;">
+    </div>
+  </div>
+  <div class="drawer-overlay" id="activeTasksDrawer" aria-hidden="true">
+    <div class="drawer-panel">
+      <div class="drawer-head">
+        <div>
+          <div class="section-kicker">Tasks</div>
+          <h3 class="section-title" style="font-size:22px;"><span id="activeTasksTitle">后台任务</span></h3>
+          <div class="helper" style="margin-top:8px;"><span id="activeTasksDesc">这里会显示当前账号仍在后台运行的任务。你可以继续查看任意一条的进度，避免关页后失去现场。</span></div>
+        </div>
+        <button class="btn btn-ghost drawer-close-btn" type="button" data-drawer-close="activeTasksDrawer">关闭</button>
+      </div>
+      <div class="drawer-body">
+        <div class="file-board" id="activeTaskList"></div>
+      </div>
+    </div>
+  </div>
+  <div class="drawer-overlay" id="historyDrawer" aria-hidden="true">
+    <div class="drawer-panel">
+      <div class="drawer-head">
+        <div>
+          <div class="section-kicker">History</div>
+          <h3 class="section-title" style="font-size:22px;"><span id="historyTitle">历史任务</span></h3>
+          <div class="helper" style="margin-top:8px;"><span id="historyDesc">这里会保留已经落盘的历史结果。服务重启后，旧任务也可以继续打开与下载。</span></div>
+        </div>
+        <button class="btn btn-ghost drawer-close-btn" type="button" data-drawer-close="historyDrawer">关闭</button>
+      </div>
+      <div class="drawer-body">
+        <div class="file-board" id="historyList"></div>
+      </div>
     </div>
   </div>
 
@@ -1321,6 +1535,9 @@
       selectedDepartmentId: "real_estate",
       selectedTargetMarket: "cn",
       productionLocked: false,
+      expandedPreviewSegment: 1,
+      activeTasksExpanded: false,
+      historyExpanded: false,
     };
 
     const progressLabels = ["文案策划", "配音制作", "数字人视频", "素材匹配"];
@@ -1352,6 +1569,7 @@
       speedRange: document.getElementById('speedRange'),
       speedValue: document.getElementById('speedValue'),
       progressSteps: document.getElementById('progressSteps'),
+      progressSummary: document.getElementById('progressSummary'),
       queueStatusPanel: document.getElementById('queueStatusPanel'),
       logPanel: document.getElementById('logPanel'),
       progressStatus: document.getElementById('progressStatus'),
@@ -1367,8 +1585,10 @@
       bundleDownloadBtn: document.getElementById('bundleDownloadBtn'),
       composeVideoBtn: document.getElementById('composeVideoBtn'),
       stopTaskBtn: document.getElementById('stopTaskBtn'),
-      pillScript: document.getElementById('pillScript'),
-      pillConfig: document.getElementById('pillConfig'),
+      workflowPillTopic: document.getElementById('workflowPillTopic'),
+      workflowPillScript: document.getElementById('workflowPillScript'),
+      workflowPillProgress: document.getElementById('workflowPillProgress'),
+      workflowPillResult: document.getElementById('workflowPillResult'),
       newTaskBtn: document.getElementById('newTaskBtn'),
       historyList: document.getElementById('historyList'),
       activeTaskList: document.getElementById('activeTaskList'),
@@ -1387,6 +1607,10 @@
       logoutBtn: document.getElementById('logoutBtn'),
       sessionUser: document.getElementById('sessionUser'),
       adminDashboardBtn: document.getElementById('adminDashboardBtn'),
+      activeTasksDrawerBtn: document.getElementById('activeTasksDrawerBtn'),
+      historyDrawerBtn: document.getElementById('historyDrawerBtn'),
+      activeTasksDrawer: document.getElementById('activeTasksDrawer'),
+      historyDrawer: document.getElementById('historyDrawer'),
     };
 
     function escapeHtml(value = '') {
@@ -1401,6 +1625,31 @@
     function setHeroStatus(text, error = false) {
       els.heroStatus.textContent = text;
       els.heroStatus.classList.toggle('error', error);
+    }
+
+    function openDrawer(drawerId) {
+      [els.activeTasksDrawer, els.historyDrawer].forEach(node => {
+        if (!node) return;
+        const open = node.id === drawerId;
+        node.classList.toggle('open', open);
+        node.setAttribute('aria-hidden', open ? 'false' : 'true');
+      });
+    }
+
+    function closeDrawers() {
+      [els.activeTasksDrawer, els.historyDrawer].forEach(node => {
+        if (!node) return;
+        node.classList.remove('open');
+        node.setAttribute('aria-hidden', 'true');
+      });
+    }
+
+    function setDisclosureOpen(targetId, open) {
+      const body = document.getElementById(targetId);
+      if (!body) return;
+      const wrapper = body.closest('.inline-disclosure');
+      if (!wrapper) return;
+      wrapper.classList.toggle('open', !!open);
     }
 
     function activeTaskStorageKey() {
@@ -1452,6 +1701,7 @@
         els.activeTaskList.innerHTML = `<div class="empty-box">${escapeHtml(copyText('activeTasksEmpty', '当前没有后台运行中的任务。'))}</div>`;
         return;
       }
+      const maxVisiblePerGroup = state.activeTasksExpanded ? Number.MAX_SAFE_INTEGER : 3;
       const groupOrder = ['running', 'queued', 'stopping'];
       const grouped = groupOrder
         .map(group => [group, state.activeTasks.filter(item => (item.status_group || 'running') === group)])
@@ -1483,13 +1733,14 @@
         return 'rgba(13,107,99,0.10); color: var(--brand-deep);';
       };
 
+      const totalHidden = grouped.reduce((sum, [, rows]) => sum + Math.max(0, rows.length - maxVisiblePerGroup), 0);
       els.activeTaskList.innerHTML = grouped.map(([group, rows]) => `
         <div style="display:grid; gap:10px;">
           <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 2px 0;">
             <div style="font-size:13px; font-weight:800; color:var(--muted);">${escapeHtml(groupTitle(group))}</div>
             <div class="tag">${escapeHtml(String(rows.length))}</div>
           </div>
-          ${rows.map(item => `
+          ${rows.slice(0, maxVisiblePerGroup).map(item => `
             <div class="history-item" style="${item.task_id === state.currentTaskId ? 'border-color: rgba(13,107,99,0.30); box-shadow: 0 0 0 4px rgba(13,107,99,0.06);' : ''}">
               <div class="history-main">
                 <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:4px;">
@@ -1506,13 +1757,21 @@
             </div>
           `).join('')}
         </div>
-      `).join('');
+      `).join('') + (totalHidden > 0 ? `
+        <button class="btn btn-secondary" type="button" id="activeTasksExpandBtn" style="margin-top:6px;">${state.activeTasksExpanded ? '收起任务列表' : `展开更多任务（还有 ${totalHidden} 条）`}</button>
+      ` : (state.activeTasksExpanded && state.activeTasks.length > 3 ? `
+        <button class="btn btn-secondary" type="button" id="activeTasksExpandBtn" style="margin-top:6px;">收起任务列表</button>
+      ` : ''));
 
       document.querySelectorAll('.active-task-open-btn').forEach(btn => {
         btn.addEventListener('click', () => openActiveTask(btn.dataset.taskId));
       });
       document.querySelectorAll('.active-task-stop-btn').forEach(btn => {
         btn.addEventListener('click', () => stopTaskById(btn.dataset.taskId, btn));
+      });
+      document.getElementById('activeTasksExpandBtn')?.addEventListener('click', () => {
+        state.activeTasksExpanded = !state.activeTasksExpanded;
+        renderActiveTasks(state.activeTasks || []);
       });
     }
 
@@ -1636,6 +1895,7 @@
         if (!res.ok) throw new Error(data.error || '历史任务加载失败');
         state.currentHistoryId = data.history_id || historyId;
         state.currentTaskId = data.live_task_id || null;
+        closeDrawers();
         renderResult(data);
         setHeroStatus('已载入历史任务');
         window.scrollTo({ top: els.resultPanel.offsetTop - 20, behavior: 'smooth' });
@@ -1649,6 +1909,7 @@
       if (!taskId) return;
       state.currentTaskId = taskId;
       persistActiveTask(taskId);
+      closeDrawers();
       renderProgressShell();
       setHeroStatus(copyText('resumeTaskFound', '已恢复后台任务进度'));
       subscribeProgress(taskId);
@@ -1661,7 +1922,9 @@
         els.historyList.innerHTML = `<div class="empty-box">${escapeHtml(currentCopy().noHistory || '暂时还没有历史任务。')}</div>`;
         return;
       }
-      els.historyList.innerHTML = items.map(item => `
+      const visibleItems = state.historyExpanded ? items : items.slice(0, 6);
+      const hiddenCount = Math.max(0, items.length - visibleItems.length);
+      els.historyList.innerHTML = visibleItems.map(item => `
         <div class="history-item" style="${item.history_id === state.currentHistoryId ? 'border-color: rgba(13,107,99,0.30); box-shadow: 0 0 0 4px rgba(13,107,99,0.06);' : ''}">
           <div class="history-main">
             <div class="history-title">${escapeHtml(item.title || item.topic || item.history_id)}</div>
@@ -1676,7 +1939,11 @@
             <button class="btn btn-ghost history-delete-btn" type="button" data-history-id="${item.history_id}">${escapeHtml(copyText('historyDelete', '删除'))}</button>
           </div>
         </div>
-      `).join('');
+      `).join('') + (hiddenCount > 0 ? `
+        <button class="btn btn-secondary" type="button" id="historyExpandBtn" style="margin-top:6px;">${state.historyExpanded ? '收起历史记录' : `展开更多历史（还有 ${hiddenCount} 条）`}</button>
+      ` : (state.historyExpanded && items.length > 6 ? `
+        <button class="btn btn-secondary" type="button" id="historyExpandBtn" style="margin-top:6px;">收起历史记录</button>
+      ` : ''));
       document.querySelectorAll('.history-open-btn').forEach(btn => {
         btn.addEventListener('click', () => {
           if (btn.dataset.liveTaskId) {
@@ -1694,6 +1961,10 @@
       });
       document.querySelectorAll('.history-delete-btn').forEach(btn => {
         btn.addEventListener('click', () => deleteHistoryTask(btn.dataset.historyId));
+      });
+      document.getElementById('historyExpandBtn')?.addEventListener('click', () => {
+        state.historyExpanded = !state.historyExpanded;
+        renderHistory(state.historyItems || []);
       });
     }
 
@@ -2263,12 +2534,20 @@
     }
 
     function activateStep(name) {
-      if (els.pillScript) {
-        els.pillScript.classList.toggle('active', name === 'script' || name === 'config' || name === 'result');
-      }
-      if (els.pillConfig) {
-        els.pillConfig.classList.toggle('active', name === 'config' || name === 'progress' || name === 'result');
-      }
+      const order = ['topic', 'script', 'progress', 'result'];
+      const normalized = name === 'config' ? 'script' : name;
+      const currentIndex = order.indexOf(normalized);
+      [
+        ['topic', els.workflowPillTopic],
+        ['script', els.workflowPillScript],
+        ['progress', els.workflowPillProgress],
+        ['result', els.workflowPillResult],
+      ].forEach(([key, node]) => {
+        if (!node) return;
+        const idx = order.indexOf(key);
+        node.classList.toggle('active', idx === currentIndex);
+        node.classList.toggle('done', currentIndex > idx);
+      });
     }
 
     async function loadOptions() {
@@ -2530,6 +2809,13 @@
     }
 
     function bindPreviewEditors() {
+      document.querySelectorAll('.preview-segment-toggle').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const segmentIndex = Number(btn.dataset.segmentIndex || 1);
+          state.expandedPreviewSegment = state.expandedPreviewSegment === segmentIndex ? 0 : segmentIndex;
+          renderScriptPreview(state.previewData || { segments: [] });
+        });
+      });
       document.querySelectorAll('.segment-edit-input').forEach(input => {
         input.addEventListener('input', () => {
           updatePreviewSegmentField(input.dataset.segmentIndex, input.dataset.field, input.value);
@@ -2565,7 +2851,10 @@
     function renderScriptPreview(preview) {
       els.scriptPanel.style.display = 'block';
       els.configPanel.style.display = 'block';
-      activateStep('config');
+      activateStep('script');
+      if (state.expandedPreviewSegment === undefined || state.expandedPreviewSegment === null) {
+        state.expandedPreviewSegment = 1;
+      }
       els.scriptSummary.innerHTML = `
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelTitle || '视频标题')}</div><div class="value">${escapeHtml(preview.title || copyText('statusNotGenerated', '未生成'))}</div></div>
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelCover || '封面标题')}</div><div class="value">${escapeHtml(preview.cover_title || copyText('statusNotGenerated', '未生成'))}</div></div>
@@ -2575,13 +2864,17 @@
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelDepartment || '业务部门')}</div><div class="value">${escapeHtml(localizedDepartmentName(preview.department_id, ((state.options?.departments || []).find(item => item.id === preview.department_id)?.name) || copyText('statusUnset', '未设置')))}</div></div>
       `;
       els.scriptSegments.innerHTML = (preview.segments || []).map(segment => `
-        <article class="segment-card">
+        <article class="segment-card compact ${Number(segment.index) === Number(state.expandedPreviewSegment || 1) ? 'expanded' : ''}" data-preview-segment="${segment.index}">
           <div class="segment-top">
             <div class="segment-index">${segment.index}</div>
             <div class="segment-badge ${segment.type}">${segment.type === 'digital_human' ? (currentCopy().segmentTypeDigital || '数字人段') : (currentCopy().segmentTypeMaterial || '素材段') }</div>
             <div class="segment-time">${segment.start}s - ${segment.end}s · ${segment.duration}s</div>
           </div>
-          <div style="display:grid; gap:12px;">
+          <div class="segment-summary">${escapeHtml(segment.script || '')}</div>
+          <div class="segment-toggle-row">
+            <button class="btn btn-secondary preview-segment-toggle" type="button" data-segment-index="${segment.index}">${Number(segment.index) === Number(state.expandedPreviewSegment || 1) ? '收起详细编辑' : '展开详细编辑'}</button>
+          </div>
+          <div class="segment-editor">
             <div>
               <div class="label" style="margin-bottom:8px; color:var(--muted); font-size:12px; font-weight:800;">${escapeHtml(currentCopy().segmentLabelScript || '段落文案')}</div>
               <textarea class="segment-edit-input" data-segment-index="${segment.index}" data-field="script" style="min-height:130px;">${escapeHtml(segment.script || '')}</textarea>
@@ -2635,7 +2928,21 @@
       `).join('');
       renderQueueStatus({});
       startQueuePolling();
+      if (els.progressSummary) {
+        els.progressSummary.innerHTML = `
+          <div class="insight-card">
+            <div class="label">当前阶段</div>
+            <div class="value">${escapeHtml(copyText('progressRunning', '正在处理'))}</div>
+          </div>
+          <div class="insight-card">
+            <div class="label">最新状态</div>
+            <div class="value">${escapeHtml(copyText('produceQueued', '任务已提交，正在进入生产队列...'))}</div>
+          </div>
+        `;
+      }
       els.logPanel.innerHTML = '';
+      setDisclosureOpen('queueStatusBody', false);
+      setDisclosureOpen('logPanelWrap', false);
       els.progressStatus.innerHTML = `<span class="spinner"></span> ${escapeHtml(copyText('progressRunning', '正在处理'))}`;
       activateStep('progress');
       setHeroStatus(currentCopy().heroRunning || '任务进行中');
@@ -2669,6 +2976,19 @@
         if (index + 1 < step) desc.textContent = copyText('progressDone', '已完成');
         if (index + 1 === step) desc.textContent = message;
       });
+      if (els.progressSummary) {
+        const stageLabel = progressLabels[Math.max(0, Number(step || 1) - 1)] || copyText('progressRunning', '正在处理');
+        els.progressSummary.innerHTML = `
+          <div class="insight-card">
+            <div class="label">当前阶段</div>
+            <div class="value">${escapeHtml(stageLabel)}</div>
+          </div>
+          <div class="insight-card">
+            <div class="label">最新状态</div>
+            <div class="value">${escapeHtml(message || copyText('progressRunning', '正在处理'))}</div>
+          </div>
+        `;
+      }
       const time = new Date().toLocaleTimeString(state.selectedInterfaceLanguage === 'ja-JP' ? 'ja-JP' : state.selectedInterfaceLanguage, { hour12: false });
       const line = document.createElement('div');
       line.className = 'log-line';
@@ -2789,6 +3109,7 @@
       state.resultData = result;
       state.currentHistoryId = result.history_id || state.currentHistoryId;
       state.currentTaskId = result.live_task_id || state.currentTaskId;
+      const historyIdForActions = result.history_id || state.currentHistoryId;
       els.resultPanel.classList.add('active');
       els.progressPanel.classList.remove('active');
       stopQueuePolling();
@@ -2807,7 +3128,7 @@
       renderWorkflowSummary(result);
       renderComposeSettings(result);
       els.resultSocial.textContent = result.social_post || copyText('statusNone', '暂无');
-      const bundleHref = state.currentHistoryId ? `/api/history/${state.currentHistoryId}/bundle` : '';
+      const bundleHref = historyIdForActions ? `/api/history/${historyIdForActions}/bundle` : '';
       if (els.bundleDownloadBtn) {
         els.bundleDownloadBtn.textContent = copyText('bundleDownload', '一键打包下载');
         if (bundleHref) {
@@ -2820,7 +3141,7 @@
       }
       if (els.composeVideoBtn) {
         els.composeVideoBtn.textContent = copyText('composeVideo', '一键生成成片');
-        els.composeVideoBtn.style.display = state.currentHistoryId ? 'inline-flex' : 'none';
+        els.composeVideoBtn.style.display = historyIdForActions ? 'inline-flex' : 'none';
       }
       if (els.finalOutputPanel) {
         const finalBlocks = [];
@@ -2872,6 +3193,11 @@
             </div>
             ${renderReferenceLinks(segment.reference_links || [])}
           </div>`}
+          <div class="actions" style="margin: 10px 0 4px; flex-wrap:wrap; gap:8px;">
+            ${historyIdForActions ? `<button type="button" class="btn btn-secondary regenerate-audio-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultRegenerateAudio', '重生成这一段配音'))}</button>` : ''}
+            ${historyIdForActions && segment.type === 'digital_human' ? `<button type="button" class="btn btn-secondary regenerate-dh-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultRegenerateVideo', '重新生成这一段数字人视频'))}</button>` : ''}
+          </div>
+          ${historyIdForActions ? `<div class="helper" style="margin-bottom:12px;">${escapeHtml(copyText('resultRegenerateHint', '当前段落异常时，可只重生当前段，不用整条重跑。'))}</div>` : ''}
           <div class="media-grid">
             <div class="media-box">
               <div class="label">${escapeHtml(copyText('resultAudioLabel', '对应配音'))}</div>
@@ -2880,15 +3206,15 @@
             <div class="media-box">
               <div class="label">${escapeHtml(copyText('resultVisualLabel', '视觉结果'))}</div>
               ${segment.type === 'digital_human'
-                ? `<div style="display:grid; gap:10px;">${segment.video?.url ? `<video controls playsinline src="${segment.video.url}"></video><div class="actions"><a class="btn btn-secondary" href="${segment.video.url}" target="_blank" download="video_${segment.index}.mp4">${escapeHtml(copyText('resultDownloadVideo', '下载数字人视频'))}</a>${state.currentTaskId ? `<button type="button" class="btn btn-secondary regenerate-dh-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultRegenerateVideo', '重新生成数字人视频'))}</button>` : ''}</div>` : `<div class="empty-box">${escapeHtml(copyText('resultNoVideo', '数字人视频暂未生成'))}</div>`}</div>`
-                : ((segment.materials || []).length ? `<div style="display:grid; gap:12px; grid-template-columns: repeat(2, minmax(0,1fr));">${segment.materials.map((item, materialIndex) => `<div style="display:grid; gap:8px;">${(item.kind === 'video' || /\.(mp4|mov|m4v|webm)(\?|$)/i.test(item.url || '') || /\.(mp4|mov|m4v|webm)$/i.test(item.name || '')) ? `<video controls playsinline src="${item.url}" style="width:100%; border-radius:20px; background:#0b0f14;"></video>` : `<img src="${item.url}" alt="素材图" class="zoomable-media" data-full-src="${item.url}" style="cursor:zoom-in;">`}<div class="actions" style="gap:8px;"><a href="${item.url}" download="${item.name || 'material'}" target="_blank" class="btn btn-secondary" style="padding:10px 14px; min-height:40px; text-decoration:none;">${escapeHtml(copyText('resultDownloadMaterial', '下载素材'))}</a>${state.currentHistoryId ? `<button type="button" class="btn btn-ghost delete-material-btn" data-segment-index="${segment.index}" data-material-index="${materialIndex}">${escapeHtml(copyText('resultDeleteMaterial', '删除'))}</button>` : ''}</div></div>`).join('')}</div><div style="margin-top:12px; display:grid; gap:10px;"><input type="file" class="material-upload-input" data-segment-index="${segment.index}" accept="image/*,video/mp4,video/quicktime,video/webm" multiple>${state.currentHistoryId ? `<button type="button" class="btn btn-secondary upload-material-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultUploadReplace', '上传替换素材'))}</button>` : ''}</div>` : `${state.currentHistoryId ? `<div style="display:grid; gap:10px;"><div class="empty-box">${escapeHtml(copyText('resultNoMaterials', '暂无素材图'))}</div><input type="file" class="material-upload-input" data-segment-index="${segment.index}" accept="image/*,video/mp4,video/quicktime,video/webm" multiple><button type="button" class="btn btn-secondary upload-material-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultUploadMaterial', '上传素材'))}</button></div>` : `<div class="empty-box">${escapeHtml(copyText('resultNoMaterials', '暂无素材图'))}</div>`}`)}
+                ? `<div style="display:grid; gap:10px;">${segment.video?.url ? `<video controls playsinline src="${segment.video.url}"></video><div class="actions"><a class="btn btn-secondary" href="${segment.video.url}" target="_blank" download="video_${segment.index}.mp4">${escapeHtml(copyText('resultDownloadVideo', '下载数字人视频'))}</a></div>` : `<div class="empty-box">${escapeHtml(copyText('resultNoVideo', '数字人视频暂未生成'))}</div>`}</div>`
+                : ((segment.materials || []).length ? `<div style="display:grid; gap:12px; grid-template-columns: repeat(2, minmax(0,1fr));">${segment.materials.map((item, materialIndex) => `<div style="display:grid; gap:8px;">${(item.kind === 'video' || /\.(mp4|mov|m4v|webm)(\?|$)/i.test(item.url || '') || /\.(mp4|mov|m4v|webm)$/i.test(item.name || '')) ? `<video controls playsinline src="${item.url}" style="width:100%; border-radius:20px; background:#0b0f14;"></video>` : `<img src="${item.url}" alt="素材图" class="zoomable-media" data-full-src="${item.url}" style="cursor:zoom-in;">`}<div class="actions" style="gap:8px;"><a href="${item.url}" download="${item.name || 'material'}" target="_blank" class="btn btn-secondary" style="padding:10px 14px; min-height:40px; text-decoration:none;">${escapeHtml(copyText('resultDownloadMaterial', '下载素材'))}</a>${historyIdForActions ? `<button type="button" class="btn btn-ghost delete-material-btn" data-segment-index="${segment.index}" data-material-index="${materialIndex}">${escapeHtml(copyText('resultDeleteMaterial', '删除'))}</button>` : ''}</div></div>`).join('')}</div><div style="margin-top:12px; display:grid; gap:10px;"><input type="file" class="material-upload-input" data-segment-index="${segment.index}" accept="image/*,video/mp4,video/quicktime,video/webm" multiple>${historyIdForActions ? `<button type="button" class="btn btn-secondary upload-material-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultUploadReplace', '上传替换素材'))}</button>` : ''}</div>` : `${historyIdForActions ? `<div style="display:grid; gap:10px;"><div class="empty-box">${escapeHtml(copyText('resultNoMaterials', '暂无素材图'))}</div><input type="file" class="material-upload-input" data-segment-index="${segment.index}" accept="image/*,video/mp4,video/quicktime,video/webm" multiple><button type="button" class="btn btn-secondary upload-material-btn" data-segment-index="${segment.index}">${escapeHtml(copyText('resultUploadMaterial', '上传素材'))}</button></div>` : `<div class="empty-box">${escapeHtml(copyText('resultNoMaterials', '暂无素材图'))}</div>`}`)}
             </div>
           </div>
         </article>
       `).join('');
 
-      if (state.currentHistoryId) {
-        fetch(`/api/history/${state.currentHistoryId}/files`).then(res => res.json()).then(data => {
+      if (historyIdForActions) {
+        fetch(`/api/history/${historyIdForActions}/files`).then(res => res.json()).then(data => {
           const files = data.files || [];
           els.fileList.innerHTML = files.length ? files.map(file => `
             <div class="file-item">
@@ -2910,9 +3236,9 @@
 
       document.querySelectorAll('.delete-material-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
-          if (!state.currentHistoryId) return;
+          if (!historyIdForActions) return;
           try {
-            const res = await fetch(`/api/history/${state.currentHistoryId}/segments/${btn.dataset.segmentIndex}/materials/${btn.dataset.materialIndex}`, { method: 'DELETE' });
+            const res = await fetch(`/api/history/${historyIdForActions}/segments/${btn.dataset.segmentIndex}/materials/${btn.dataset.materialIndex}`, { method: 'DELETE' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || copyText('resultDeleteFailed', '删除素材失败'));
             renderResult(data.result);
@@ -2925,7 +3251,7 @@
 
       document.querySelectorAll('.upload-material-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
-          if (!state.currentHistoryId) return;
+          if (!historyIdForActions) return;
           const segmentIndex = btn.dataset.segmentIndex;
           const input = document.querySelector(`.material-upload-input[data-segment-index="${segmentIndex}"]`);
           const files = input?.files ? Array.from(input.files) : [];
@@ -2939,7 +3265,7 @@
           try {
             const formData = new FormData();
             files.forEach(file => formData.append('images', file));
-            const res = await fetch(`/api/history/${state.currentHistoryId}/segments/${segmentIndex}/materials/upload`, { method: 'POST', body: formData });
+            const res = await fetch(`/api/history/${historyIdForActions}/segments/${segmentIndex}/materials/upload`, { method: 'POST', body: formData });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || copyText('resultUploadFailed', '上传素材失败'));
             renderResult(data.result);
@@ -2953,6 +3279,30 @@
         });
       });
 
+      document.querySelectorAll('.regenerate-audio-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!historyIdForActions) return;
+          const segmentIndex = btn.dataset.segmentIndex;
+          const originalText = btn.textContent;
+          btn.disabled = true;
+          btn.textContent = copyText('resultRegeneratingAudio', '配音重生成中...');
+          try {
+            setHeroStatus(copyText('resultRegenerateAudioRunning', '正在单独重生成这一段配音'));
+            const res = await fetch(`/api/history/${historyIdForActions}/segments/${segmentIndex}/regenerate-audio`, { method: 'POST' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || copyText('resultRegenerateAudioFailed', '重新生成配音失败'));
+            renderResult(data.result);
+            loadHistory();
+            setHeroStatus(copyText('resultRegenerateAudioDone', '该段配音已重新生成'));
+          } catch (error) {
+            btn.disabled = false;
+            btn.textContent = originalText;
+            setHeroStatus(copyText('resultRegenerateAudioFailed', '重新生成配音失败'), true);
+            alert(error.message || copyText('resultRegenerateAudioFailed', '重新生成配音失败'));
+          }
+        });
+      });
+
       document.querySelectorAll('.regenerate-dh-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
           const segmentIndex = btn.dataset.segmentIndex;
@@ -2961,7 +3311,7 @@
           btn.textContent = copyText('resultRegenerating', '重新生成中...');
           try {
             setHeroStatus(copyText('resultRegenerateRunning', '正在单独重生成数字人视频'));
-            const res = await fetch(`/api/tasks/${state.currentTaskId}/segments/${segmentIndex}/regenerate-digital-human`, { method: 'POST' });
+            const res = await fetch(`/api/history/${historyIdForActions}/segments/${segmentIndex}/regenerate-digital-human`, { method: 'POST' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || copyText('resultRegenerateFailed', '重新生成失败'));
             renderResult(data.result);
@@ -3189,6 +3539,9 @@
       state.selectedDepartmentId = defaults.departmentId;
       state.selectedTargetMarket = defaults.targetMarket;
       state.productionLocked = false;
+      state.expandedPreviewSegment = 1;
+      state.activeTasksExpanded = false;
+      state.historyExpanded = false;
       state.currentTaskId = null;
       state.currentHistoryId = null;
       state.resultData = null;
@@ -3227,6 +3580,9 @@
       document.getElementById('resultFilesWrap').style.display = 'none';
       document.querySelectorAll('[data-script-tab]').forEach((btn, index) => btn.classList.toggle('active', index === 0));
       document.querySelectorAll('[data-result-tab]').forEach((btn, index) => btn.classList.toggle('active', index === 0));
+      closeDrawers();
+      setDisclosureOpen('queueStatusBody', false);
+      setDisclosureOpen('logPanelWrap', false);
       activateStep('topic');
       setHeroStatus(currentCopy().heroReady || '工作台已就绪');
       updateSelectionSummary();
@@ -3288,6 +3644,8 @@
     els.produceConfirmSubmitBtn?.addEventListener('click', performProduction);
     els.stopTaskBtn?.addEventListener('click', stopCurrentTask);
     els.newTaskBtn.addEventListener('click', resetWorkspace);
+    els.activeTasksDrawerBtn?.addEventListener('click', () => openDrawer('activeTasksDrawer'));
+    els.historyDrawerBtn?.addEventListener('click', () => openDrawer('historyDrawer'));
     if (els.composeVideoBtn) els.composeVideoBtn.addEventListener('click', composeFinalVideo);
     els.loginForm.addEventListener('submit', handleLogin);
     els.logoutBtn.addEventListener('click', handleLogout);
@@ -3301,6 +3659,22 @@
     });
     els.mediaLightbox.addEventListener('click', event => {
       if (event.target === els.mediaLightbox) closeLightbox();
+    });
+    document.querySelectorAll('.drawer-close-btn').forEach(btn => {
+      btn.addEventListener('click', () => closeDrawers());
+    });
+    [els.activeTasksDrawer, els.historyDrawer].forEach(drawer => {
+      drawer?.addEventListener('click', event => {
+        if (event.target === drawer) closeDrawers();
+      });
+    });
+    document.querySelectorAll('[data-disclosure-target]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const body = document.getElementById(btn.dataset.disclosureTarget);
+        const wrapper = body?.closest('.inline-disclosure');
+        if (!wrapper) return;
+        wrapper.classList.toggle('open');
+      });
     });
 
     initializeWorkspace().catch(error => {

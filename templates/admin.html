@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>iHouse 管理员看板</title>
+  <style>
+    :root {
+      --bg:#f4f7f6;
+      --card:#ffffff;
+      --line:rgba(11,31,40,0.08);
+      --ink:#102031;
+      --muted:#66758a;
+      --brand:#0d6b63;
+      --brand-soft:rgba(13,107,99,0.10);
+      --shadow:0 18px 45px rgba(12,29,41,0.08);
+      --radius:24px;
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; background:linear-gradient(180deg,#f8fbfa 0%, var(--bg) 100%); color:var(--ink); font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    .page { max-width:1500px; margin:0 auto; padding:24px; }
+    .shell { background:rgba(255,255,255,0.76); backdrop-filter:blur(18px); border:1px solid rgba(255,255,255,0.65); border-radius:32px; box-shadow:var(--shadow); overflow:hidden; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:24px 28px; border-bottom:1px solid var(--line); }
+    .brand { display:flex; align-items:center; gap:14px; }
+    .brand-mark { width:48px; height:48px; border-radius:16px; display:grid; place-items:center; background:linear-gradient(135deg,#0d6b63,#2a8c82); color:#fff; font-weight:900; }
+    .brand-copy strong { display:block; font-size:22px; }
+    .brand-copy span { color:var(--muted); }
+    .top-actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .chip { border-radius:999px; padding:10px 14px; background:var(--brand-soft); color:var(--brand); font-weight:700; }
+    .btn { border:1px solid var(--line); background:#fff; color:var(--ink); min-height:42px; padding:10px 16px; border-radius:999px; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; font-weight:700; }
+    .btn-primary { background:var(--brand); color:#fff; border-color:transparent; }
+    .content { padding:28px; display:grid; gap:18px; }
+    .grid { display:grid; gap:16px; }
+    .kpis { grid-template-columns:repeat(4,minmax(0,1fr)); }
+    .overview-grid { grid-template-columns:repeat(3,minmax(0,1fr)); align-items:start; }
+    .finance-grid { grid-template-columns:0.9fr 1.1fr; align-items:start; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:18px; }
+    .label { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); font-weight:800; margin-bottom:8px; }
+    .value { font-size:28px; font-weight:900; line-height:1.15; }
+    .helper { color:var(--muted); margin-top:8px; }
+    .feed { display:grid; gap:10px; }
+    .feed-item { border:1px solid var(--line); border-radius:18px; padding:14px; background:rgba(248,251,250,0.92); display:grid; gap:6px; }
+    .feed-top { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+    .feed-name { font-weight:800; font-size:15px; }
+    .badge { border-radius:999px; padding:4px 10px; background:var(--brand-soft); color:var(--brand); font-size:12px; font-weight:800; white-space:nowrap; }
+    .meta { color:var(--muted); font-size:13px; }
+    .stats { display:grid; gap:12px; }
+    .stat-card { border:1px solid var(--line); border-radius:22px; padding:14px; background:#fff; display:grid; gap:8px; }
+    .stat-head { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+    .stat-name { font-weight:800; font-size:15px; }
+    .stat-count { color:var(--brand); font-weight:800; }
+    .stat-sub { color:var(--muted); font-size:13px; }
+    .history-list { display:grid; gap:6px; }
+    .history-item { color:var(--muted); font-size:13px; line-height:1.5; word-break:break-word; }
+    .segmented { display:inline-flex; gap:6px; padding:6px; border:1px solid var(--line); border-radius:999px; background:rgba(248,251,250,0.92); }
+    .segment-btn { border:none; background:transparent; color:var(--muted); border-radius:999px; padding:8px 12px; font-weight:800; cursor:pointer; }
+    .segment-btn.active { background:var(--brand); color:#fff; box-shadow:0 10px 24px rgba(13,107,99,0.18); }
+    .view-switch { display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+    .view-panels { display:grid; gap:16px; }
+    .view-panel { display:none; }
+    .view-panel.active { display:block; }
+    .focus-card { display:grid; gap:14px; padding:20px; }
+    .focus-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+    .focus-item { border:1px solid var(--line); border-radius:18px; background:rgba(248,251,250,0.92); padding:14px; display:grid; gap:6px; }
+    .focus-item strong { font-size:20px; line-height:1.2; }
+    .cost-bar { height:10px; background:#ecf5f3; border-radius:999px; overflow:hidden; margin-top:12px; }
+    .cost-bar-fill { height:100%; border-radius:999px; background:linear-gradient(90deg, var(--brand), #53b9ad); }
+    .stat-row { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+    .stat-percent { color:var(--muted); font-weight:700; white-space:nowrap; }
+    .empty { border:1px dashed var(--line); border-radius:18px; padding:16px; color:var(--muted); text-align:center; }
+    @media (max-width: 1100px) { .kpis, .overview-grid, .finance-grid, .focus-metrics { grid-template-columns:1fr; } }
+    @media (max-width: 720px) { .page { padding:10px; } .topbar { flex-direction:column; align-items:stretch; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="shell">
+      <div class="topbar">
+        <div class="brand">
+          <div class="brand-mark">IH</div>
+          <div class="brand-copy">
+            <strong>iHouse 管理员看板</strong>
+            <span>实时查看系统状态、数字人队列、员工状态、最新动态与费用</span>
+          </div>
+        </div>
+        <div class="top-actions">
+          <div class="chip" id="sessionUser">管理员</div>
+          <a class="btn" href="/">返回内容工作台</a>
+          <button class="btn btn-primary" id="logoutBtn" type="button">退出登录</button>
+        </div>
+      </div>
+      <div class="content">
+        <div class="grid kpis" id="kpiGrid"></div>
+        <section class="card focus-card" id="focusCard">
+          <div class="view-switch">
+            <div>
+              <div class="label">管理员视图</div>
+              <div class="helper" style="margin-top:0;">一次只看一种工作内容，减少列表同时曝光造成的干扰。</div>
+            </div>
+            <div class="segmented" id="viewTabs">
+              <button class="segment-btn active" type="button" data-view="overview">实时总览</button>
+              <button class="segment-btn" type="button" data-view="team">员工状态</button>
+              <button class="segment-btn" type="button" data-view="finance">费用统计</button>
+            </div>
+          </div>
+          <div class="focus-metrics" id="focusMetrics"></div>
+        </section>
+        <div class="view-panels">
+          <section class="view-panel active" id="view-overview">
+            <div class="grid overview-grid">
+              <section class="card">
+                <div class="label">数字人生成队列</div>
+                <div class="helper" style="margin-bottom:12px;">只看当前执行账号和排队顺序。</div>
+                <div class="feed" id="queueFeed"></div>
+              </section>
+              <section class="card">
+                <div class="label">当前进行中的任务</div>
+                <div class="helper" style="margin-bottom:12px;">系统里仍在运行的任务会实时显示在这里。</div>
+                <div class="feed" id="taskFeed"></div>
+              </section>
+              <section class="card">
+                <div class="label">最近实时动态</div>
+                <div class="helper" style="margin-bottom:12px;">只保留刚刚发生的关键状态。</div>
+                <div class="feed" id="eventFeed"></div>
+              </section>
+            </div>
+          </section>
+          <section class="view-panel" id="view-team">
+            <section class="card">
+              <div class="label">员工当前状态</div>
+              <div class="helper" style="margin-bottom:12px;">快速判断谁在处理任务、谁在等待数字人。</div>
+              <div class="feed" id="userFeed"></div>
+            </section>
+          </section>
+          <section class="view-panel" id="view-finance">
+            <div class="grid finance-grid">
+              <section class="card">
+                <div class="label">费用构成</div>
+                <div class="helper" style="margin-bottom:12px;">按当前真实价格规则查看费用构成：Claude 按官方 token 与联网搜索价格，MiniMax 按 speech-2.8-hd 字符价格，OmniHuman 按 1 元/秒折算；Pexels、TOS 与自动成片当前不计入。</div>
+                <div class="segmented" id="costRangeTabs" style="margin-bottom:12px;">
+                  <button class="segment-btn active" type="button" data-range="today">今日</button>
+                  <button class="segment-btn" type="button" data-range="month">本月</button>
+                  <button class="segment-btn" type="button" data-range="total">累计</button>
+                </div>
+                <div class="stats" id="costBreakdownGrid"></div>
+              </section>
+              <section class="card">
+                <div class="label">账号统计与费用</div>
+                <div class="helper" style="margin-bottom:12px;">当前统一按美元展示：Claude 按官方 API 价格、MiniMax 按 speech-2.8-hd 字符价格、OmniHuman 按 1 元/秒并按 1 USD≈7.2 CNY 折算；Pexels、TOS 与自动成片暂不计入。</div>
+                <div class="stats" id="statsGrid"></div>
+              </section>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const els = {
+      sessionUser: document.getElementById('sessionUser'),
+      logoutBtn: document.getElementById('logoutBtn'),
+      kpiGrid: document.getElementById('kpiGrid'),
+      queueFeed: document.getElementById('queueFeed'),
+      taskFeed: document.getElementById('taskFeed'),
+      userFeed: document.getElementById('userFeed'),
+      statsGrid: document.getElementById('statsGrid'),
+      costBreakdownGrid: document.getElementById('costBreakdownGrid'),
+      costRangeTabs: document.getElementById('costRangeTabs'),
+      eventFeed: document.getElementById('eventFeed'),
+      viewTabs: document.getElementById('viewTabs'),
+      focusMetrics: document.getElementById('focusMetrics'),
+    };
+    let liveTimer = null;
+    let statsTimer = null;
+    let activeCostRange = 'today';
+    let activeView = 'overview';
+    let costBreakdownExpanded = false;
+    let accountStatsExpanded = false;
+
+    function escapeHtml(value = '') {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function stopTimers() {
+      if (liveTimer) clearInterval(liveTimer);
+      if (statsTimer) clearInterval(statsTimer);
+      liveTimer = null;
+      statsTimer = null;
+    }
+
+    function formatTime(ts) {
+      if (!ts) return '未知时间';
+      const date = new Date(Number(ts) * 1000);
+      if (Number.isNaN(date.getTime())) return '未知时间';
+      return date.toLocaleTimeString('zh-CN', { hour12: false });
+    }
+
+    function renderViewTabs() {
+      els.viewTabs?.querySelectorAll('[data-view]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.view === activeView);
+      });
+      document.querySelectorAll('.view-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.id === `view-${activeView}`);
+      });
+    }
+
+    function renderFocusMetrics(summary = {}) {
+      const currentOwner = summary.current_owner_display_name || summary.current_owner_username || '暂无';
+      const itemsByView = {
+        overview: [
+          { label: '当前运行任务', value: String(summary.running_task_count || 0), note: '进行中的系统任务' },
+          { label: '数字人排队数', value: String(summary.waiting_queue_count || 0), note: '等待进入 OmniHuman' },
+          { label: '当前执行账号', value: currentOwner, note: '当前数字人通道焦点' },
+        ],
+        team: [
+          { label: '活跃员工', value: String(summary.active_user_count || 0), note: '当前有状态变化的账号' },
+          { label: '今日完成任务', value: String(summary.completed_today || 0), note: '按历史记录统计' },
+          { label: '当前执行账号', value: currentOwner, note: '便于定位谁占用通道' },
+        ],
+        finance: [
+          { label: '当前运行任务', value: String(summary.running_task_count || 0), note: '当前并发情况' },
+          { label: '数字人排队数', value: String(summary.waiting_queue_count || 0), note: '辅助判断峰值压力' },
+          { label: '今日完成任务', value: String(summary.completed_today || 0), note: '今日新增落盘任务' },
+        ],
+      };
+      const items = itemsByView[activeView] || itemsByView.overview;
+      els.focusMetrics.innerHTML = items.map(item => `
+        <div class="focus-item">
+          <div class="label">${escapeHtml(item.label)}</div>
+          <strong>${escapeHtml(item.value)}</strong>
+          <div class="meta">${escapeHtml(item.note)}</div>
+        </div>
+      `).join('');
+    }
+
+    async function ensureAdmin() {
+      const res = await fetch('/api/me');
+      if (res.status === 401) { window.location.replace('/?logged_out=' + Date.now()); return null; }
+      const data = await res.json();
+      const user = data.user;
+      if (!user || user.role !== 'admin') { window.location.replace('/?logged_out=' + Date.now()); return null; }
+      els.sessionUser.textContent = `${user.display_name} · ${user.username} · Admin`;
+      return user;
+    }
+
+    function renderLive(data) {
+      const summary = data?.summary || {};
+      const queue = data?.queue || {};
+      const users = Array.isArray(data?.users) ? data.users : [];
+      const activeTasks = Array.isArray(data?.active_tasks) ? data.active_tasks : [];
+      const events = Array.isArray(data?.recent_events) ? data.recent_events : [];
+      const currentOwner = summary.current_owner_display_name || summary.current_owner_username || '暂无';
+      const kpis = [
+        { label: '当前运行任务', value: String(summary.running_task_count || 0), note: '系统里仍在进行中的任务总数' },
+        { label: '数字人排队数', value: String(summary.waiting_queue_count || 0), note: '等待进入 OmniHuman 的任务数' },
+        { label: '当前执行账号', value: currentOwner, note: summary.current_owner_username ? `账号：${summary.current_owner_username}` : '当前没有数字人任务在运行' },
+        { label: '今日完成任务', value: String(summary.completed_today || 0), note: '按历史记录统计今天已经落盘的任务' },
+      ];
+      summary.active_user_count = users.filter(item => (item.status || '').trim()).length;
+      els.kpiGrid.innerHTML = kpis.map(item => `
+        <div class="card">
+          <div class="label">${escapeHtml(item.label)}</div>
+          <div class="value">${escapeHtml(item.value)}</div>
+          <div class="helper">${escapeHtml(item.note)}</div>
+        </div>
+      `).join('');
+      renderFocusMetrics(summary);
+
+      const queueItems = [];
+      (queue.running || []).forEach((item, index) => {
+        queueItems.push(`
+          <div class="feed-item">
+            <div class="feed-top">
+              <div class="feed-name">${escapeHtml(item.owner_display_name || item.owner_username || '未知账号')}</div>
+              <div class="badge">执行中</div>
+            </div>
+            <div class="meta">${escapeHtml(item.topic || item.label || '数字人生成任务')}</div>
+            <div class="meta">${escapeHtml(item.label || `数字人任务 ${index + 1}`)}</div>
+          </div>
+        `);
+      });
+      (queue.waiting || []).forEach((item, index) => {
+        queueItems.push(`
+          <div class="feed-item">
+            <div class="feed-top">
+              <div class="feed-name">${escapeHtml(item.owner_display_name || item.owner_username || '未知账号')}</div>
+              <div class="badge">排队第 ${index + 1} 位</div>
+            </div>
+            <div class="meta">${escapeHtml(item.topic || item.label || '数字人生成任务')}</div>
+            <div class="meta">${escapeHtml(item.label || '等待执行')}</div>
+          </div>
+        `);
+      });
+      els.queueFeed.innerHTML = queueItems.length ? queueItems.join('') : `<div class="empty">当前队列空闲，数字人通道没有运行或等待中的任务。</div>`;
+
+      els.userFeed.innerHTML = users.length ? users.map(item => `
+        <div class="feed-item">
+          <div class="feed-top">
+            <div class="feed-name">${escapeHtml(item.display_name || item.username)}</div>
+            <div class="badge">${escapeHtml(item.status || '空闲')}</div>
+          </div>
+          <div class="meta">${escapeHtml(item.current_topic || '当前没有活动任务')}</div>
+          <div class="meta">${escapeHtml(item.detail || '')}</div>
+        </div>
+      `).join('') : `<div class="empty">暂无员工状态数据。</div>`;
+
+      els.taskFeed.innerHTML = activeTasks.length ? activeTasks.map(item => `
+        <div class="feed-item">
+          <div class="feed-top">
+            <div class="feed-name">${escapeHtml(item.topic || '未命名任务')}</div>
+            <div class="badge">${escapeHtml(item.owner_display_name || item.owner_username || '未知账号')}</div>
+          </div>
+          <div class="meta">${escapeHtml(item.mode_label || '任务')} · 第 ${escapeHtml(String(item.step || 0))}/${escapeHtml(String(item.total_steps || 0))} 步</div>
+          <div class="meta">${escapeHtml(item.latest_message || '处理中')}</div>
+        </div>
+      `).join('') : `<div class="empty">当前没有进行中的任务。</div>`;
+
+      els.eventFeed.innerHTML = events.length ? events.map(item => `
+        <div class="feed-item">
+          <div class="feed-top">
+            <div class="feed-name">${escapeHtml(item.message || '系统事件')}</div>
+            <div class="badge">${escapeHtml(formatTime(item.time))}</div>
+          </div>
+          <div class="meta">${escapeHtml(item.owner_display_name || item.owner_username || '系统')}</div>
+          <div class="meta">${escapeHtml(item.topic || item.label || '')}</div>
+        </div>
+      `).join('') : `<div class="empty">最近还没有新的系统动态。</div>`;
+    }
+
+    function formatEstimatedCost(value) {
+      return `$${Number(value || 0).toFixed(3)}`;
+    }
+
+    function costRangeLabel(range) {
+      return range === 'today' ? '今日估算' : range === 'month' ? '本月估算' : '累计估算';
+    }
+
+    function costRangeValue(item, range) {
+      if (range === 'today') return Number(item?.today_total || 0);
+      if (range === 'month') return Number(item?.month_total || 0);
+      return Number(item?.estimated_total || item?.estimated_cost_total || 0);
+    }
+
+    function renderCostRangeTabs() {
+      if (!els.costRangeTabs) return;
+      els.costRangeTabs.querySelectorAll('[data-range]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.range === activeCostRange);
+      });
+    }
+
+    function renderExpandButton(id, expanded, hiddenCount, expandLabel, collapseLabel) {
+      if (hiddenCount > 0) {
+        return `<button class="btn" type="button" id="${id}" style="margin-top:8px;">${expanded ? collapseLabel : `${expandLabel}（还有 ${hiddenCount} 条）`}</button>`;
+      }
+      if (expanded) {
+        return `<button class="btn" type="button" id="${id}" style="margin-top:8px;">${collapseLabel}</button>`;
+      }
+      return '';
+    }
+
+    function renderStats(data) {
+      const users = Array.isArray(data?.users) ? data.users : [];
+      const breakdown = Array.isArray(data?.cost_breakdown) ? data.cost_breakdown : [];
+      renderCostRangeTabs();
+      const totalForRange = breakdown.reduce((sum, item) => sum + costRangeValue(item, activeCostRange), 0);
+      const visibleBreakdown = costBreakdownExpanded ? breakdown : breakdown.slice(0, 4);
+      const hiddenBreakdown = Math.max(0, breakdown.length - visibleBreakdown.length);
+      els.costBreakdownGrid.innerHTML = breakdown.length ? visibleBreakdown.map(item => {
+        const primary = costRangeValue(item, activeCostRange);
+        const percent = totalForRange > 0 ? (primary / totalForRange) * 100 : 0;
+        return `
+        <div class="stat-card">
+          <div class="stat-row">
+            <div class="stat-name">${escapeHtml(item.label || item.event_type)}</div>
+            <div class="stat-percent">${escapeHtml(percent.toFixed(1))}%</div>
+          </div>
+          <div class="stat-head" style="margin-top:8px;">
+            <div>
+              <div class="stat-sub">今日 ${escapeHtml(formatEstimatedCost(item.today_total || 0))} · 本月 ${escapeHtml(formatEstimatedCost(item.month_total || 0))}</div>
+            </div>
+            <div class="stat-count">${escapeHtml(formatEstimatedCost(primary))}</div>
+          </div>
+          <div class="cost-bar"><div class="cost-bar-fill" style="width:${percent.toFixed(2)}%"></div></div>
+          <div class="stat-sub">当前视图：${escapeHtml(costRangeLabel(activeCostRange))}</div>
+        </div>`;
+      }).join('') + renderExpandButton('costBreakdownExpandBtn', costBreakdownExpanded, hiddenBreakdown, '展开更多费用项', '收起费用项') : `<div class="empty">暂无费用构成数据。</div>`;
+      const visibleUsers = accountStatsExpanded ? users : users.slice(0, 5);
+      const hiddenUsers = Math.max(0, users.length - visibleUsers.length);
+      els.statsGrid.innerHTML = users.length ? visibleUsers.map(item => {
+        const primary = activeCostRange === 'today' ? Number(item.today_total || 0) : activeCostRange === 'month' ? Number(item.month_total || 0) : Number(item.estimated_cost_total || 0);
+        return `
+        <div class="stat-card">
+          <div class="stat-head">
+            <div>
+              <div class="stat-name">${escapeHtml(item.display_name || item.username)}</div>
+              <div class="stat-sub">今日 ${escapeHtml(formatEstimatedCost(item.today_total || 0))} · 本月 ${escapeHtml(formatEstimatedCost(item.month_total || 0))}</div>
+            </div>
+            <div class="stat-count">${escapeHtml(String(item.count || 0))} 条 · ${escapeHtml(formatEstimatedCost(primary))}</div>
+          </div>
+          <div class="stat-sub">当前视图：${escapeHtml(costRangeLabel(activeCostRange))}</div>
+          <div class="history-list">
+            ${(item.histories || []).length ? item.histories.slice(0, 5).map(history => `<div class="history-item">${escapeHtml(history.title || history.topic || history.history_id)} · ${escapeHtml(formatEstimatedCost(history.estimated_cost_total || 0))}</div>`).join('') : `<div class="history-item">暂无记录</div>`}
+          </div>
+        </div>`;
+      }).join('') + renderExpandButton('accountStatsExpandBtn', accountStatsExpanded, hiddenUsers, '展开更多账号', '收起账号列表') : `<div class="empty">暂无账号统计。</div>`;
+      document.getElementById('costBreakdownExpandBtn')?.addEventListener('click', () => {
+        costBreakdownExpanded = !costBreakdownExpanded;
+        renderStats(data);
+      });
+      document.getElementById('accountStatsExpandBtn')?.addEventListener('click', () => {
+        accountStatsExpanded = !accountStatsExpanded;
+        renderStats(data);
+      });
+    }
+
+    async function loadLive() {
+      const res = await fetch('/api/admin/live-status');
+      if (res.status === 401 || res.status === 403) { window.location.replace('/?logged_out=' + Date.now()); return; }
+      const data = await res.json();
+      if (res.ok) renderLive(data);
+    }
+
+    async function loadStats() {
+      const res = await fetch('/api/admin/stats');
+      if (res.status === 401 || res.status === 403) { window.location.replace('/?logged_out=' + Date.now()); return; }
+      const data = await res.json();
+      if (res.ok) renderStats(data);
+    }
+
+    function logout() {
+      stopTimers();
+      window.location.assign('/logout');
+    }
+
+    async function init() {
+      const user = await ensureAdmin();
+      if (!user) return;
+      renderViewTabs();
+      await Promise.all([loadLive(), loadStats()]);
+      liveTimer = setInterval(loadLive, 3000);
+      statsTimer = setInterval(loadStats, 15000);
+    }
+
+    els.logoutBtn.addEventListener('click', logout);
+    els.viewTabs?.addEventListener('click', (event) => {
+      const btn = event.target.closest('[data-view]');
+      if (!btn) return;
+      activeView = btn.dataset.view || 'overview';
+      renderViewTabs();
+    });
+    els.costRangeTabs?.addEventListener('click', (event) => {
+      const btn = event.target.closest('[data-range]');
+      if (!btn) return;
+      activeCostRange = btn.dataset.range || 'today';
+      costBreakdownExpanded = false;
+      accountStatsExpanded = false;
+      renderCostRangeTabs();
+      loadStats();
+    });
+    init();
+  </script>
+</body>
+</html>
