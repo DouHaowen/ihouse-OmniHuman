@@ -664,6 +664,14 @@
       background: linear-gradient(180deg, #fff, #f4fbfa);
     }
 
+    .avatar-card.is-disabled,
+    .preset-card.is-disabled {
+      opacity: 0.54;
+      cursor: not-allowed;
+      transform: none !important;
+      box-shadow: var(--shadow-md) !important;
+    }
+
     .preset-head {
       display: flex;
       align-items: flex-start;
@@ -731,6 +739,17 @@
     }
 
     .avatar-card.selected .avatar-dot { background: var(--brand); }
+
+    .avatar-card.is-disabled .avatar-dot {
+      background: rgba(140, 152, 164, 0.4);
+    }
+
+    .avatar-name {
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--ink);
+      line-height: 1.5;
+    }
 
     .range-row {
       display: flex;
@@ -1130,6 +1149,7 @@
                     <label><span id="avatarLabel">选择主播图片</span></label>
                     <div class="avatar-grid" id="avatarGrid"></div>
                     <div class="helper" id="avatarHint">这里展示当前数据库中的全部数字人主播素材，运营可以自由组合音色与主播。</div>
+                    <div class="helper" id="selectionGuardHint" style="color:var(--accent);"></div>
                   </div>
 
                   <div class="actions">
@@ -1275,6 +1295,7 @@
       voicePresetGrid: document.getElementById('voicePresetGrid'),
       avatarGrid: document.getElementById('avatarGrid'),
       avatarHint: document.getElementById('avatarHint'),
+      selectionGuardHint: document.getElementById('selectionGuardHint'),
       marketVoiceHint: document.getElementById('marketVoiceHint'),
       speedRange: document.getElementById('speedRange'),
       speedValue: document.getElementById('speedValue'),
@@ -1646,6 +1667,24 @@
       }
     };
 
+    const AVATAR_COPY = {
+      'zh-CN': {
+        'avatar_test_0cd3d70a.png': '女主播A',
+        'avatar_host_c.png': '男主播A',
+        'avatar_test_new_01.png': '林晨专属',
+      },
+      'zh-TW': {
+        'avatar_test_0cd3d70a.png': '女主播A',
+        'avatar_host_c.png': '男主播A',
+        'avatar_test_new_01.png': '林晨專屬',
+      },
+      'ja-JP': {
+        'avatar_test_0cd3d70a.png': '女性ホストA',
+        'avatar_host_c.png': '男性ホストA',
+        'avatar_test_new_01.png': '林晨専用',
+      },
+    };
+
     const UI_COPY = {
       "zh-CN": {
         brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "内容生产流程", workflowIntro: "",
@@ -1848,6 +1887,79 @@
       };
     }
 
+    function localizedAvatarName(avatar) {
+      return AVATAR_COPY[state.selectedInterfaceLanguage]?.[avatar.id] || avatar.name || avatar.id || '';
+    }
+
+    function currentVoicePresetObject() {
+      return (state.options?.voice_presets || []).find(item => item.id === state.selectedVoiceId) || null;
+    }
+
+    function visibleVoiceIdsForMarket(marketId) {
+      if (marketId === 'tw') return ['taiwan_clone'];
+      if (marketId === 'jp') return ['japanese_female'];
+      return ['mandarin_female', 'mandarin_male'];
+    }
+
+    function getVisibleAvatars() {
+      const all = state.options?.avatars || [];
+      return all.filter(item => {
+        const allowed = Array.isArray(item.allowed_target_markets) ? item.allowed_target_markets : [];
+        if (!allowed.length) return true;
+        return allowed.includes(state.selectedTargetMarket);
+      });
+    }
+
+    function recommendedAvatarIdForVoice(voiceId) {
+      if (state.selectedTargetMarket === 'tw' || state.selectedTargetMarket === 'jp') {
+        return 'avatar_test_0cd3d70a.png';
+      }
+      if (voiceId === 'mandarin_male') return 'avatar_host_c.png';
+      return 'avatar_test_0cd3d70a.png';
+    }
+
+    function recommendedVoiceIdForAvatar(avatarId) {
+      const avatar = (state.options?.avatars || []).find(item => item.id === avatarId);
+      return avatar?.preferred_voice_by_market?.[state.selectedTargetMarket] || null;
+    }
+
+    function isAvatarCompatibleWithVoice(avatar, voicePreset) {
+      if (!avatar || !voicePreset) return true;
+      if (!avatar.gender || !voicePreset.gender) return true;
+      return avatar.gender === voicePreset.gender;
+    }
+
+    function guardCopy() {
+      if (state.selectedInterfaceLanguage === 'zh-TW') {
+        return {
+          femaleLocksMale: '目前選擇的是女聲，男性主播圖片已停用。',
+          maleLocksFemale: '目前選擇的是男聲，女性主播圖片已停用。',
+          autoSwitchedAvatar: '系統已自動切換到較匹配的主播圖片。',
+          avatarMatchedVoice: '已依這位主播自動帶出較匹配的音色。',
+          twOnlyAvatar: '台灣市場僅保留 女主播A + みん音色。',
+          jpOnlyAvatar: '日本市場預設使用 女主播A + 自然日語女聲。',
+        };
+      }
+      if (state.selectedInterfaceLanguage === 'ja-JP') {
+        return {
+          femaleLocksMale: '現在は女性音声が選択されているため、男性ホスト画像は選択できません。',
+          maleLocksFemale: '現在は男性音声が選択されているため、女性ホスト画像は選択できません。',
+          autoSwitchedAvatar: 'より適したホスト画像に自動で切り替えました。',
+          avatarMatchedVoice: 'このホストに合わせて推奨音声へ自動切り替えしました。',
+          twOnlyAvatar: '台湾市場では 女性ホストA + みん音色 のみ表示されます。',
+          jpOnlyAvatar: '日本市場では 女性ホストA + 自然な日本語女性音声 を既定で使います。',
+        };
+      }
+      return {
+        femaleLocksMale: '当前选择的是女声，男主播图片已禁选。',
+        maleLocksFemale: '当前选择的是男声，女主播图片已禁选。',
+        autoSwitchedAvatar: '系统已自动切换到更匹配的主播图片。',
+        avatarMatchedVoice: '已根据这位主播自动带出更匹配的音色。',
+        twOnlyAvatar: '台湾市场仅保留 女主播A + みん音色。',
+        jpOnlyAvatar: '日本市场默认使用 女主播A + 自然日语女声。',
+      };
+    }
+
     function interfaceLanguageForMarket(marketId) {
       const market = (state.options?.target_markets || []).find(item => item.id === marketId);
       if (!market) return 'zh-CN';
@@ -1915,9 +2027,7 @@
       if (!market) return;
       const defaultVoiceId = market.default_voice_preset_id;
       if (!defaultVoiceId) return;
-      if (force || !state.selectedVoiceId) {
-        state.selectedVoiceId = defaultVoiceId;
-      } else {
+      if (force || !state.selectedVoiceId || !visibleVoiceIdsForMarket(state.selectedTargetMarket).includes(state.selectedVoiceId)) {
         state.selectedVoiceId = defaultVoiceId;
       }
       const selected = (state.options?.voice_presets || []).find(item => item.id === state.selectedVoiceId);
@@ -2006,19 +2116,10 @@
 
     function getVisibleVoicePresets() {
       const presets = state.options?.voice_presets || [];
-      if (state.selectedTargetMarket === 'tw') {
-        return presets.filter(item => item.id === 'taiwan_female' || item.id === 'mandarin_female' || item.id === 'taiwan_clone')
-          .sort((a, b) => {
-            const order = { mandarin_female: 0, taiwan_female: 1, taiwan_clone: 2 };
-            return (order[a.id] ?? 99) - (order[b.id] ?? 99);
-          });
-      }
-      if (state.selectedTargetMarket === 'jp') {
-        return presets.filter(item => item.id === 'japanese_female');
-      }
-      return presets.filter(item => item.id === 'mandarin_female' || item.id === 'mandarin_male')
+      const visibleIds = new Set(visibleVoiceIdsForMarket(state.selectedTargetMarket));
+      return presets.filter(item => visibleIds.has(item.id))
         .sort((a, b) => {
-          const order = { mandarin_female: 0, mandarin_male: 1 };
+          const order = { mandarin_female: 0, mandarin_male: 1, taiwan_clone: 2, japanese_female: 3 };
           return (order[a.id] ?? 99) - (order[b.id] ?? 99);
         });
     }
@@ -2056,37 +2157,85 @@
             els.speedRange.value = Number(selected.default_speed).toFixed(2);
             els.speedValue.value = Number(selected.default_speed).toFixed(2);
           }
+          const visibleAvatars = getVisibleAvatars();
+          const currentAvatar = visibleAvatars.find(item => item.id === state.selectedAvatarId) || null;
+          if (!isAvatarCompatibleWithVoice(currentAvatar, selected)) {
+            state.selectedAvatarId = recommendedAvatarIdForVoice(selected.id);
+            if (!visibleAvatars.some(item => item.id === state.selectedAvatarId && isAvatarCompatibleWithVoice(item, selected))) {
+              state.selectedAvatarId = (visibleAvatars.find(item => isAvatarCompatibleWithVoice(item, selected)) || visibleAvatars[0] || {}).id || null;
+            }
+            setHeroStatus(guardCopy().autoSwitchedAvatar);
+          }
           renderVoicePresets();
           updateSelectionSummary();
+          renderAvatarOptions();
         });
       });
     }
 
     function renderAvatarOptions() {
-      const avatars = state.options?.avatars || [];
+      const avatars = getVisibleAvatars();
+      const selectedVoice = currentVoicePresetObject();
       if (!avatars.length) {
         state.selectedAvatarId = null;
         els.avatarGrid.innerHTML = `<div class="empty-box">${escapeHtml(currentCopy().noAvatar || '当前还没有可用的数字人主播素材，请先在服务器 assets 目录补充图片。')}</div>`;
         els.avatarHint.textContent = currentCopy().noAvatarHint || '当前没有可选主播。';
+        if (els.selectionGuardHint) els.selectionGuardHint.textContent = '';
         updateSelectionSummary();
         return;
       }
-      if (!avatars.some(item => item.id === state.selectedAvatarId)) {
-        state.selectedAvatarId = avatars[0].id;
+      if (!avatars.some(item => item.id === state.selectedAvatarId && isAvatarCompatibleWithVoice(item, selectedVoice))) {
+        const recommendedId = recommendedAvatarIdForVoice(state.selectedVoiceId);
+        state.selectedAvatarId = (avatars.find(item => item.id === recommendedId && isAvatarCompatibleWithVoice(item, selectedVoice)) || avatars.find(item => isAvatarCompatibleWithVoice(item, selectedVoice)) || avatars[0]).id;
       }
       els.avatarHint.textContent = (currentCopy().avatarHint || '当前共 {count} 个主播素材，运营可以自由组合音色与主播。').replace('{count}', String(avatars.length));
+      if (els.selectionGuardHint) {
+        const copy = guardCopy();
+        if (state.selectedTargetMarket === 'tw') {
+          els.selectionGuardHint.textContent = copy.twOnlyAvatar;
+        } else if (state.selectedTargetMarket === 'jp') {
+          els.selectionGuardHint.textContent = copy.jpOnlyAvatar;
+        } else if (selectedVoice?.gender === 'female') {
+          els.selectionGuardHint.textContent = copy.femaleLocksMale;
+        } else if (selectedVoice?.gender === 'male') {
+          els.selectionGuardHint.textContent = copy.maleLocksFemale;
+        } else {
+          els.selectionGuardHint.textContent = '';
+        }
+      }
       els.avatarGrid.innerHTML = avatars.map(item => `
-        <article class="avatar-card ${item.id === state.selectedAvatarId ? 'selected' : ''}" data-avatar-id="${item.id}">
+        <article class="avatar-card ${item.id === state.selectedAvatarId ? 'selected' : ''} ${!isAvatarCompatibleWithVoice(item, selectedVoice) ? 'is-disabled' : ''}" data-avatar-id="${item.id}">
           <img class="avatar-thumb" src="${item.image_url}" alt="数字人主播图片">
           <div class="avatar-foot">
-            <span class="avatar-dot"></span>
-            ${item.id === state.selectedAvatarId ? `<span class="tag">${escapeHtml(copyText('avatarSelectedTag', '已选中'))}</span>` : `<span class="tag">${escapeHtml(copyText('avatarSelectTag', '点击选择'))}</span>`}
+            <div style="display:grid; gap:4px;">
+              <div class="avatar-name">${escapeHtml(localizedAvatarName(item))}</div>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="avatar-dot"></span>
+                ${item.id === state.selectedAvatarId ? `<span class="tag">${escapeHtml(copyText('avatarSelectedTag', '已选中'))}</span>` : `<span class="tag">${escapeHtml(!isAvatarCompatibleWithVoice(item, selectedVoice) ? copyText('avatarDisabledTag', '不可选择') : copyText('avatarSelectTag', '点击选择'))}</span>`}
+              </div>
+            </div>
           </div>
         </article>
       `).join('');
       document.querySelectorAll('.avatar-card').forEach(card => {
         card.addEventListener('click', () => {
+          const avatar = avatars.find(item => item.id === card.dataset.avatarId);
+          if (!isAvatarCompatibleWithVoice(avatar, selectedVoice)) {
+            setHeroStatus(selectedVoice?.gender === 'female' ? guardCopy().femaleLocksMale : guardCopy().maleLocksFemale, true);
+            return;
+          }
           state.selectedAvatarId = card.dataset.avatarId;
+          const recommendedVoiceId = recommendedVoiceIdForAvatar(card.dataset.avatarId);
+          if (recommendedVoiceId && visibleVoiceIdsForMarket(state.selectedTargetMarket).includes(recommendedVoiceId) && recommendedVoiceId !== state.selectedVoiceId) {
+            state.selectedVoiceId = recommendedVoiceId;
+            const matchedVoice = (state.options?.voice_presets || []).find(item => item.id === recommendedVoiceId);
+            if (matchedVoice?.default_speed) {
+              els.speedRange.value = Number(matchedVoice.default_speed).toFixed(2);
+              els.speedValue.value = Number(matchedVoice.default_speed).toFixed(2);
+            }
+            setHeroStatus(guardCopy().avatarMatchedVoice);
+            renderVoicePresets();
+          }
           renderAvatarOptions();
           updateSelectionSummary();
         });

@@ -46,6 +46,31 @@ AVATAR_DISPLAY_NAME_MAP = {
     "avatar_host_c.png": "男主播A",
     "avatar_test_new_01.png": "林晨专属",
 }
+AVATAR_RULES = {
+    "avatar_test_0cd3d70a.png": {
+        "gender": "female",
+        "allowed_target_markets": ["cn", "tw", "jp"],
+        "preferred_voice_by_market": {
+            "cn": "mandarin_female",
+            "tw": "taiwan_clone",
+            "jp": "japanese_female",
+        },
+    },
+    "avatar_host_c.png": {
+        "gender": "male",
+        "allowed_target_markets": ["cn"],
+        "preferred_voice_by_market": {
+            "cn": "mandarin_male",
+        },
+    },
+    "avatar_test_new_01.png": {
+        "gender": "male",
+        "allowed_target_markets": ["cn"],
+        "preferred_voice_by_market": {
+            "cn": "mandarin_male",
+        },
+    },
+}
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -133,7 +158,7 @@ DEPARTMENTS = [
 
 TARGET_MARKETS = [
     {"id": "cn", "name": "中国市场", "content_language": "简体中文", "default_voice_preset_id": "mandarin_female"},
-    {"id": "tw", "name": "台湾市场", "content_language": "繁體中文", "default_voice_preset_id": "mandarin_female"},
+    {"id": "tw", "name": "台湾市场", "content_language": "繁體中文", "default_voice_preset_id": "taiwan_clone"},
     {"id": "jp", "name": "日本市场", "content_language": "日语", "default_voice_preset_id": "japanese_female"},
 ]
 
@@ -363,8 +388,27 @@ def _get_voice_preset(voice_preset_id: Optional[str], target_market_id: Optional
     return dict(VOICE_PRESETS[0])
 
 
-def _get_avatar_option(avatar_id: Optional[str]) -> Optional[dict]:
-    avatars = _list_avatar_options()
+def _get_visible_voice_preset_ids(target_market_id: Optional[str]) -> set[str]:
+    target_market_id = (target_market_id or "cn").strip() or "cn"
+    if target_market_id == "tw":
+        return {"taiwan_clone"}
+    if target_market_id == "jp":
+        return {"japanese_female"}
+    return {"mandarin_female", "mandarin_male"}
+
+
+def _is_avatar_voice_compatible(avatar_option: Optional[dict], voice_preset: Optional[dict]) -> bool:
+    if not avatar_option or not voice_preset:
+        return True
+    avatar_gender = (avatar_option.get("gender") or "").strip().lower()
+    voice_gender = (voice_preset.get("gender") or "").strip().lower()
+    if not avatar_gender or not voice_gender:
+        return True
+    return avatar_gender == voice_gender
+
+
+def _get_avatar_option(avatar_id: Optional[str], target_market_id: Optional[str] = None) -> Optional[dict]:
+    avatars = _list_avatar_options(target_market_id=target_market_id, include_all=not target_market_id)
     if not avatars:
         return None
     for index, avatar in enumerate(avatars):
@@ -1568,7 +1612,7 @@ def _resolve_history_for_user(history_id: str, user: Optional[dict]) -> tuple[Op
     return output_dir, result, None
 
 
-def _list_avatar_options() -> list[dict]:
+def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bool = False) -> list[dict]:
     items = []
     preferred_order = {
         "avatar_test_0cd3d70a.png": 0,
@@ -1582,11 +1626,18 @@ def _list_avatar_options() -> list[dict]:
             continue
         if re.fullmatch(r"avatar_test_[0-9a-f]{8}", path.stem) and path.name not in AVATAR_DISPLAY_NAME_MAP:
             continue
+        rule = AVATAR_RULES.get(path.name, {})
+        allowed_target_markets = list(rule.get("allowed_target_markets") or [])
+        if target_market_id and not include_all and allowed_target_markets and target_market_id not in allowed_target_markets:
+            continue
         items.append({
             "id": path.name,
             "name": AVATAR_DISPLAY_NAME_MAP.get(path.name, path.stem),
             "image_url": f"/public/assets/{path.name}",
             "filename": path.name,
+            "gender": rule.get("gender", ""),
+            "allowed_target_markets": allowed_target_markets,
+            "preferred_voice_by_market": dict(rule.get("preferred_voice_by_market") or {}),
         })
     return items
 
@@ -2018,10 +2069,16 @@ async def produce_video(
             "message": latest_message,
         }
 
+    visible_voice_ids = _get_visible_voice_preset_ids(target_market)
     voice_preset = _get_voice_preset(voice_preset_id, target_market)
-    avatar_option = _get_avatar_option(avatar_id)
+    if voice_preset.get("id") not in visible_voice_ids:
+        return JSONResponse({"error": "当前目标市场不支持该配音方案，请调整后再试"}, status_code=400)
+
+    avatar_option = _get_avatar_option(avatar_id, target_market_id=target_market)
     if not avatar_option:
-        return JSONResponse({"error": "当前还没有可用的数字人主播图片，请先上传到服务器 assets 目录"}, status_code=400)
+        return JSONResponse({"error": "当前目标市场没有可用的主播图片，请调整市场或主播后再试"}, status_code=400)
+    if not _is_avatar_voice_compatible(avatar_option, voice_preset):
+        return JSONResponse({"error": "当前主播与音色不匹配，请调整为同类形象后再试"}, status_code=400)
 
     voice_preset["selected_speed"] = speed
     image_path = avatar_option.get("image_path", "")
