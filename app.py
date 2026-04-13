@@ -5,6 +5,7 @@ FastAPI + SSE 实时进度推送
 
 import csv
 from collections import deque
+import hashlib
 import json
 import os
 import re
@@ -244,13 +245,27 @@ class ProgressTracker:
         )
 
     def finish(self, result: dict):
+        if self.status == "cancelled":
+            return
         self.status = "done"
         self.result = result
         self.log("全部完成！", step=self.total_steps)
 
     def fail(self, error: str):
+        if self.status == "cancelled":
+            return
         self.status = "error"
         self.log(f"出错了：{error}")
+
+    def cancel(self, message: str = "任务已停止"):
+        if self.status in ("done", "error", "cancelled"):
+            return
+        self.status = "cancelled"
+        self.log(message)
+
+
+class TaskCancelled(Exception):
+    pass
 
 
 def _make_safe_name(value: str, fallback: str = "task") -> str:
@@ -293,6 +308,27 @@ def _friendly_ai_error_message(exc: Exception, action_label: str) -> tuple[str, 
     if any(token in text for token in ["overloaded_error", "overloaded", "rate limit", "rate_limit", "429", "529", "暂时繁忙"]):
         return f"{action_label}服务当前较忙，请稍后重试", 503
     return f"{action_label}失败，请稍后重试", 500
+
+
+def _is_task_cancel_requested(task_id: str) -> bool:
+    task = tasks.get(task_id) or {}
+    return bool(task.get("cancel_requested"))
+
+
+def _raise_if_task_cancel_requested(task_id: str, message: str = "任务已停止"):
+    if _is_task_cancel_requested(task_id):
+        raise TaskCancelled(message)
+
+
+def _cancel_waiting_omnihuman_jobs(task_id: str) -> int:
+    removed = 0
+    with OMNIHUMAN_QUEUE_CONDITION:
+        before = len(OMNIHUMAN_WAITING_JOBS)
+        OMNIHUMAN_WAITING_JOBS[:] = [item for item in OMNIHUMAN_WAITING_JOBS if item.get("task_id") != task_id]
+        removed = before - len(OMNIHUMAN_WAITING_JOBS)
+        if removed:
+            OMNIHUMAN_QUEUE_CONDITION.notify_all()
+    return removed
 
 
 def _history_id_from_output_dir(output_dir: Optional[str]) -> str:
@@ -417,6 +453,7 @@ def run_pipeline_with_progress(
     tracker = tasks[task_id]["tracker"]
 
     try:
+        _raise_if_task_cancel_requested(task_id)
         from fetch_materials import fetch_all_materials
         from generate_audio import generate_audio
         from generate_digital_human import generate_digital_human_video
@@ -441,10 +478,12 @@ def run_pipeline_with_progress(
 
         image_url = None
         if image_path and os.path.exists(image_path):
+            _raise_if_task_cancel_requested(task_id)
             image_url = upload_file_and_get_url(image_path, key_prefix="full/image")
             tracker.log("数字人主播素材已上传到 TOS")
 
         if script_data is None:
+            _raise_if_task_cancel_requested(task_id)
             tracker.log("正在生成视频文案...", step=1)
             script_data = generate_script(
                 topic,
@@ -464,6 +503,7 @@ def run_pipeline_with_progress(
         audio_segments = []
         total_segments = len(script_data.get("segments", []))
         for index, seg in enumerate(script_data.get("segments", []), start=1):
+            _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续生成后续配音")
             script_text = (seg.get("script") or "").strip()
             if not script_text:
                 continue
@@ -494,6 +534,7 @@ def run_pipeline_with_progress(
             dh_segments = [seg for seg in audio_segments if seg.get("type") == "digital_human"]
             completed = 0
             for index, seg in enumerate(audio_segments):
+                _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续生成后续数字人片段")
                 if seg.get("type") != "digital_human":
                     segments_with_dh.append(seg)
                     continue
@@ -525,8 +566,12 @@ def run_pipeline_with_progress(
 
         tracker.log("正在匹配素材内容...", step=4)
         try:
+            _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续匹配素材")
             final_segments = fetch_all_materials(segments=segments_with_dh, output_dir=output_dir)
+            _raise_if_task_cancel_requested(task_id, "已停止当前任务，素材匹配完成后未继续收尾")
             tracker.log(f"素材匹配完成，共 {sum(1 for seg in final_segments if seg.get('material_paths'))} 组素材")
+        except TaskCancelled:
+            raise
         except Exception as exc:
             tracker.log(f"素材匹配失败：{exc}，已跳过该步骤")
             final_segments = segments_with_dh
@@ -569,6 +614,8 @@ def run_pipeline_with_progress(
         task["result"] = result_data
         _persist_task_result(task)
         tracker.finish(result_data)
+    except TaskCancelled as exc:
+        tracker.cancel(str(exc) or "任务已停止")
     except Exception as exc:
         tracker.fail(str(exc))
         import traceback
@@ -578,11 +625,13 @@ def run_pipeline_with_progress(
 def run_avatar_test_with_progress(task_id: str, image_path: str, audio_path: str, public_base_url: str):
     tracker = tasks[task_id]["tracker"]
     try:
+        _raise_if_task_cancel_requested(task_id)
         from generate_digital_human import generate_digital_human_video
         from tos_uploader import upload_file_and_get_url
 
         output_dir = tasks[task_id]["output_dir"]
         tracker.log("正在上传图片和音频到 TOS...", step=1)
+        _raise_if_task_cancel_requested(task_id)
         image_url = upload_file_and_get_url(image_path, key_prefix="avatar-test/image")
         audio_url = upload_file_and_get_url(audio_path, key_prefix="avatar-test/audio")
         tracker.log("TOS 上传完成")
@@ -640,6 +689,8 @@ def run_avatar_test_with_progress(task_id: str, image_path: str, audio_path: str
         tasks[task_id]["result"] = result_data
         _persist_task_result(tasks[task_id])
         tracker.finish(result_data)
+    except TaskCancelled as exc:
+        tracker.cancel(str(exc) or "任务已停止")
     except Exception as exc:
         tracker.fail(str(exc))
         import traceback
@@ -695,6 +746,7 @@ def _run_omnihuman_job(job_id: str, label: str, runner, tracker: Optional[Progre
     global OMNIHUMAN_RUNNING_JOBS
     task_key = str(job_id).split(':', 1)[0]
     task = tasks.get(task_key, {}) if isinstance(tasks, dict) else {}
+    _raise_if_task_cancel_requested(task_key, "已停止当前任务，未继续进入数字人队列")
     queue_item = {
         "job_id": job_id,
         "task_id": task_key,
@@ -709,6 +761,10 @@ def _run_omnihuman_job(job_id: str, label: str, runner, tracker: Optional[Progre
     with OMNIHUMAN_QUEUE_CONDITION:
         OMNIHUMAN_WAITING_JOBS.append(queue_item)
         while True:
+            if _is_task_cancel_requested(task_key):
+                OMNIHUMAN_WAITING_JOBS[:] = [item for item in OMNIHUMAN_WAITING_JOBS if item.get("job_id") != job_id]
+                OMNIHUMAN_QUEUE_CONDITION.notify_all()
+                raise TaskCancelled("已停止当前任务，未继续等待数字人生成")
             try:
                 ahead = next((idx for idx, item in enumerate(OMNIHUMAN_WAITING_JOBS) if item.get("job_id") == job_id), 0)
             except ValueError:
@@ -728,6 +784,7 @@ def _run_omnihuman_job(job_id: str, label: str, runner, tracker: Optional[Progre
         _push_live_event("omnihuman_running", f"{label}开始生成", task, {"label": label})
         if tracker and waiting_logged:
             tracker.log(f"{label}开始生成")
+        _raise_if_task_cancel_requested(task_key, "已停止当前任务，未继续生成数字人视频")
         return runner()
     finally:
         _push_live_event("omnihuman_finished", f"{label}已结束处理", task, {"label": label})
@@ -1218,6 +1275,50 @@ def _find_live_task_id_for_output_dir(output_dir: str) -> str:
     return ""
 
 
+def _make_produce_submission_key(
+    *,
+    owner_username: str,
+    topic: str,
+    script_data: dict,
+    voice_preset_id: str,
+    avatar_id: str,
+    speed: float,
+    web_search_enabled: bool,
+    target_market: str,
+    department_id: str,
+) -> str:
+    payload = {
+        "owner_username": owner_username or "",
+        "topic": (topic or "").strip(),
+        "script": script_data,
+        "voice_preset_id": voice_preset_id or "",
+        "avatar_id": avatar_id or "",
+        "speed": round(float(speed or 0), 3),
+        "web_search_enabled": bool(web_search_enabled),
+        "target_market": target_market or "",
+        "department_id": department_id or "",
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _find_reusable_running_task(*, owner_username: str, submission_key: str, dedupe_window_seconds: int = 1800) -> Optional[dict]:
+    now_ts = time.time()
+    for task in tasks.values():
+        tracker = task.get("tracker")
+        if task.get("owner_username") != owner_username:
+            continue
+        if task.get("submission_key") != submission_key:
+            continue
+        if not tracker or tracker.status != "running":
+            continue
+        created_at = float(task.get("created_at") or 0)
+        if now_ts - created_at > dedupe_window_seconds:
+            continue
+        return task
+    return None
+
+
 def _persist_task_result(task: dict):
     output_dir = task.get("output_dir")
     result = task.get("result")
@@ -1554,6 +1655,88 @@ def _build_admin_live_status() -> dict:
     }
 
 
+def _build_current_task_payload(user: Optional[dict]) -> Optional[dict]:
+    if not user:
+        return None
+    username = user.get("username", "")
+    current_task = None
+    for task in sorted(tasks.values(), key=lambda item: float(item.get("created_at") or 0), reverse=True):
+        tracker = task.get("tracker")
+        if task.get("owner_username") != username:
+            continue
+        if not tracker or tracker.status != "running":
+            continue
+        current_task = task
+        break
+    if not current_task:
+        return None
+    tracker = current_task.get("tracker")
+    latest_message = tracker.messages[-1]["message"] if tracker and tracker.messages else "处理中"
+    return {
+        "task_id": current_task.get("id", ""),
+        "topic": current_task.get("topic", ""),
+        "mode": current_task.get("mode", "full"),
+        "step": getattr(tracker, "step", 0),
+        "total_steps": getattr(tracker, "total_steps", 0),
+        "status": getattr(tracker, "status", "running"),
+        "latest_message": latest_message,
+        "output_dir": current_task.get("output_dir") or "",
+    }
+
+
+def _build_active_tasks_payload(user: Optional[dict]) -> list[dict]:
+    if not user:
+        return []
+    username = user.get("username", "")
+    queue = _omnihuman_queue_snapshot()
+    waiting_task_ids = {str(item.get("task_id", "")) for item in (queue.get("waiting") or []) if item.get("task_id")}
+    running_task_ids = {str(item.get("task_id", "")) for item in (queue.get("running") or []) if item.get("task_id")}
+    items = []
+    for task in sorted(tasks.values(), key=lambda item: float(item.get("created_at") or 0), reverse=True):
+        tracker = task.get("tracker")
+        if task.get("owner_username") != username:
+            continue
+        if not tracker or tracker.status != "running":
+            continue
+        task_id = str(task.get("id", ""))
+        latest_message = tracker.messages[-1]["message"] if tracker.messages else "处理中"
+        if task.get("cancel_requested"):
+            status_group = "stopping"
+            stage_key = "stopping"
+        elif task_id in waiting_task_ids:
+            status_group = "queued"
+            stage_key = "digital_human_waiting"
+        elif task_id in running_task_ids:
+            status_group = "running"
+            stage_key = "digital_human_running"
+        elif int(getattr(tracker, "step", 0) or 0) <= 1:
+            status_group = "running"
+            stage_key = "script"
+        elif int(getattr(tracker, "step", 0) or 0) == 2:
+            status_group = "running"
+            stage_key = "audio"
+        elif int(getattr(tracker, "step", 0) or 0) == 3:
+            status_group = "running"
+            stage_key = "digital_human_preparing"
+        else:
+            status_group = "running"
+            stage_key = "materials"
+        items.append({
+            "task_id": task_id,
+            "topic": task.get("topic", ""),
+            "mode": task.get("mode", "full"),
+            "step": getattr(tracker, "step", 0),
+            "total_steps": getattr(tracker, "total_steps", 0),
+            "status": getattr(tracker, "status", "running"),
+            "status_group": status_group,
+            "stage_key": stage_key,
+            "latest_message": latest_message,
+            "created_at": float(task.get("created_at") or 0),
+            "output_dir": task.get("output_dir") or "",
+        })
+    return items
+
+
 def _build_admin_stats() -> dict:
     histories = []
     derived_entries = []
@@ -1729,7 +1912,26 @@ async def workbench_options(request: Request):
     user, error = _require_user(request)
     if error:
         return error
-    return {"voice_presets": VOICE_PRESETS, "avatars": _list_avatar_options(), "interface_languages": INTERFACE_LANGUAGES, "departments": DEPARTMENTS, "target_markets": TARGET_MARKETS, "composition_transitions": COMPOSITION_TRANSITIONS, "subtitle_templates": SUBTITLE_TEMPLATES, "current_user": user}
+    return {
+        "voice_presets": VOICE_PRESETS,
+        "avatars": _list_avatar_options(),
+        "interface_languages": INTERFACE_LANGUAGES,
+        "departments": DEPARTMENTS,
+        "target_markets": TARGET_MARKETS,
+        "composition_transitions": COMPOSITION_TRANSITIONS,
+        "subtitle_templates": SUBTITLE_TEMPLATES,
+        "current_user": user,
+        "current_task": _build_current_task_payload(user),
+        "active_tasks": _build_active_tasks_payload(user),
+    }
+
+
+@app.get("/api/tasks/active")
+async def active_tasks(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    return {"items": _build_active_tasks_payload(user)}
 
 
 @app.post("/api/script-preview")
@@ -1788,6 +1990,33 @@ async def produce_video(
         return JSONResponse({"error": "文案数据格式错误"}, status_code=400)
 
     web_search_enabled = _parse_bool_form(use_web_search)
+    submission_key = _make_produce_submission_key(
+        owner_username=user.get("username", ""),
+        topic=topic,
+        script_data=script_data,
+        voice_preset_id=voice_preset_id,
+        avatar_id=avatar_id,
+        speed=speed,
+        web_search_enabled=web_search_enabled,
+        target_market=target_market,
+        department_id=department_id,
+    )
+
+    reusable_task = _find_reusable_running_task(
+        owner_username=user.get("username", ""),
+        submission_key=submission_key,
+    )
+    if reusable_task:
+        tracker = reusable_task.get("tracker")
+        if tracker and tracker.messages:
+            latest_message = tracker.messages[-1].get("message", "任务已在后台执行")
+        else:
+            latest_message = "任务已在后台执行"
+        return {
+            "task_id": reusable_task.get("id", ""),
+            "reused_existing": True,
+            "message": latest_message,
+        }
 
     voice_preset = _get_voice_preset(voice_preset_id, target_market)
     avatar_option = _get_avatar_option(avatar_id)
@@ -1810,6 +2039,9 @@ async def produce_video(
         "result": None,
         "public_base_url": _get_public_base_url(request),
         "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "submission_key": submission_key,
         "workflow_config": {
             "voice_preset_id": voice_preset_id,
             "avatar_id": avatar_id,
@@ -1830,7 +2062,7 @@ async def produce_video(
         daemon=True,
     )
     thread.start()
-    return {"task_id": task_id}
+    return {"task_id": task_id, "reused_existing": False}
 
 
 @app.post("/api/generate")
@@ -1862,6 +2094,8 @@ async def start_generation(request: Request, topic: str = Form(...), image: Opti
         "result": None,
         "public_base_url": _get_public_base_url(request),
         "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
         "cost_entries": [],
         "cost_summary": _empty_cost_summary(),
     }
@@ -1915,6 +2149,8 @@ async def start_avatar_test(request: Request, image: UploadFile = File(...), aud
         "result": None,
         "public_base_url": _get_public_base_url(request),
         "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
     }
     tracker.log("测试任务已创建，准备开始...")
     _push_live_event("task_created", "创建了数字人单段测试", tasks[task_id])
@@ -1966,7 +2202,7 @@ async def task_progress(task_id: str, request: Request):
                 }
                 sent_count += 1
 
-            if tracker.status in ("done", "error"):
+            if tracker.status in ("done", "error", "cancelled"):
                 result_data = {}
                 if tracker.status == "done" and tasks[task_id].get("result"):
                     r = tasks[task_id]["result"]
@@ -1990,6 +2226,46 @@ async def task_progress(task_id: str, request: Request):
             await asyncio.sleep(0.5)
 
     return EventSourceResponse(event_generator())
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    task = tasks.get(task_id)
+    if not task:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    if not _user_can_access_task(user, task):
+        return _forbidden_error()
+
+    tracker = task.get("tracker")
+    if not tracker:
+        return JSONResponse({"error": "任务状态异常"}, status_code=400)
+    if tracker.status == "done":
+        return JSONResponse({"error": "任务已完成，无法停止"}, status_code=400)
+    if tracker.status == "error":
+        return JSONResponse({"error": "任务已失败，无需停止"}, status_code=400)
+    if tracker.status == "cancelled":
+        return {"task_id": task_id, "status": "cancelled", "message": "任务已停止"}
+
+    task["cancel_requested"] = True
+    task["cancel_requested_at"] = time.time()
+    removed_jobs = _cancel_waiting_omnihuman_jobs(task_id)
+
+    if tracker.step <= 0:
+        tracker.step = 1
+    tracker.log("已收到停止请求，系统会尽快停止当前任务")
+    if removed_jobs:
+        tracker.log(f"已从数字人队列移除 {removed_jobs} 个待执行任务")
+    _push_live_event("task_cancel_requested", "任务已请求停止", task, {"removed_waiting_jobs": removed_jobs})
+
+    return {
+        "task_id": task_id,
+        "status": "cancelling",
+        "message": "已收到停止请求，系统会尽快停止当前任务",
+        "removed_waiting_jobs": removed_jobs,
+    }
 
 
 @app.get("/api/tasks/{task_id}/result")
