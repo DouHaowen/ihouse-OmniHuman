@@ -31,6 +31,8 @@ from starlette.middleware.sessions import SessionMiddleware
 
 load_dotenv(override=False)
 
+from source_ingest import analyze_topic_fields, analyze_topic_input
+
 app = FastAPI(title="iHouse 内容工作台")
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "ihouse-content-studio-session"), max_age=60 * 60 * 24 * 30, same_site="lax")
 
@@ -1846,12 +1848,23 @@ def _segment_material_items(segment: dict) -> list[dict]:
     return normalized
 
 
-def _build_script_preview_payload(script_data: dict, topic: str, web_search_enabled: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> dict:
+def _build_script_preview_payload(
+    script_data: dict,
+    topic: str,
+    web_search_enabled: bool = False,
+    target_market: str = "cn",
+    department_id: str = "real_estate",
+    source_info: Optional[dict] = None,
+    input_topic: str = "",
+) -> dict:
     payload = dict(script_data or {})
     payload["topic"] = topic or payload.get("topic", "")
+    payload["input_topic"] = input_topic or payload.get("input_topic", "")
     payload["web_search_enabled"] = bool(web_search_enabled)
     payload["target_market"] = target_market or payload.get("target_market", "cn")
     payload["department_id"] = department_id or payload.get("department_id", "real_estate")
+    if source_info:
+        payload["source"] = source_info
 
     segments = []
     total_duration = 0.0
@@ -2303,19 +2316,29 @@ async def active_tasks(request: Request):
 
 
 @app.post("/api/script-preview")
-async def script_preview(request: Request, topic: str = Form(...), use_web_search: str = Form("false"), target_market: str = Form("cn"), department_id: str = Form("real_estate")):
+async def script_preview(
+    request: Request,
+    topic_text: str = Form(""),
+    source_url: str = Form(""),
+    topic: str = Form(""),
+    use_web_search: str = Form("false"),
+    target_market: str = Form("cn"),
+    department_id: str = Form("real_estate"),
+):
     user, error = _require_user(request)
     if error:
         return error
 
     from generate_script import generate_script
 
-    web_search_enabled = _parse_bool_form(use_web_search)
+    source_info = analyze_topic_fields(topic_text=topic_text, source_url=source_url, fallback_topic=topic)
+    generation_topic = source_info.get("normalized_topic") or topic_text or source_url or topic
+    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") != "text"
     try:
         script_data = _run_script_ai_job(
             job_id=f"preview:{user.get('username', 'guest')}:{time.time_ns()}",
             label="文案生成",
-            runner=lambda: generate_script(topic, enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id),
+            runner=lambda: generate_script(generation_topic, enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id),
         )
         script_usage = (script_data.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
@@ -2323,23 +2346,27 @@ async def script_preview(request: Request, topic: str = Form(...), use_web_searc
         return JSONResponse({"error": message}, status_code=status_code)
     _record_cost_entry(
         event_type="script_generate",
-        amount=_estimate_script_cost(topic, script_data, web_search_enabled=web_search_enabled, usage=script_usage),
+        amount=_estimate_script_cost(generation_topic, script_data, web_search_enabled=web_search_enabled, usage=script_usage),
         provider=COST_RULES["script_generate"]["provider"],
         user=user,
-        topic=topic,
-        meta={"scope": "preview", "web_search_enabled": web_search_enabled, "target_market": target_market, "department_id": department_id, "usage": script_usage},
+        topic=generation_topic,
+        meta={"scope": "preview", "web_search_enabled": web_search_enabled, "target_market": target_market, "department_id": department_id, "usage": script_usage, "source": source_info},
     )
     return {
-        "topic": topic,
+        "topic": generation_topic,
+        "input_topic": topic_text or topic,
         "script": script_data,
-        "preview": _build_script_preview_payload(script_data, topic, web_search_enabled=web_search_enabled, target_market=target_market, department_id=department_id),
+        "preview": _build_script_preview_payload(script_data, generation_topic, web_search_enabled=web_search_enabled, target_market=target_market, department_id=department_id, source_info=source_info, input_topic=topic),
+        "source": source_info,
     }
 
 
 @app.post("/api/produce")
 async def produce_video(
     request: Request,
-    topic: str = Form(...),
+    topic_text: str = Form(""),
+    source_url: str = Form(""),
+    topic: str = Form(""),
     script_json: str = Form(...),
     voice_preset_id: str = Form(...),
     avatar_id: str = Form(...),
@@ -2357,10 +2384,12 @@ async def produce_video(
     except json.JSONDecodeError:
         return JSONResponse({"error": "文案数据格式错误"}, status_code=400)
 
-    web_search_enabled = _parse_bool_form(use_web_search)
+    source_info = analyze_topic_fields(topic_text=topic_text, source_url=source_url, fallback_topic=topic)
+    generation_topic = source_info.get("normalized_topic") or topic_text or source_url or topic
+    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") != "text"
     submission_key = _make_produce_submission_key(
         owner_username=user.get("username", ""),
-        topic=topic,
+        topic=generation_topic,
         script_data=script_data,
         voice_preset_id=voice_preset_id,
         avatar_id=avatar_id,
@@ -2406,7 +2435,7 @@ async def produce_video(
         "owner_display_name": user.get("display_name"),
         "owner_role": user.get("role"),
         "id": task_id,
-        "topic": topic,
+        "topic": generation_topic,
         "image_path": image_path,
         "tracker": tracker,
         "output_dir": None,
@@ -2425,6 +2454,7 @@ async def produce_video(
             "department_id": department_id,
             "compose_transition_id": "fade",
             "subtitle_template_id": "classic",
+            "source": source_info,
         },
         "cost_entries": [],
         "cost_summary": _empty_cost_summary(),
@@ -2432,7 +2462,7 @@ async def produce_video(
     tracker.log("任务已创建，准备开始...")
     thread = threading.Thread(
         target=run_pipeline_with_progress,
-        args=(task_id, topic, image_path, tasks[task_id]["public_base_url"], script_data, voice_preset, avatar_option),
+        args=(task_id, generation_topic, image_path, tasks[task_id]["public_base_url"], script_data, voice_preset, avatar_option),
         daemon=True,
     )
     thread.start()
@@ -2440,10 +2470,18 @@ async def produce_video(
 
 
 @app.post("/api/generate")
-async def start_generation(request: Request, topic: str = Form(...), image: Optional[UploadFile] = File(None)):
+async def start_generation(
+    request: Request,
+    topic_text: str = Form(""),
+    source_url: str = Form(""),
+    topic: str = Form(""),
+    image: Optional[UploadFile] = File(None),
+):
     user, error = _require_user(request)
     if error:
         return error
+    source_info = analyze_topic_fields(topic_text=topic_text, source_url=source_url, fallback_topic=topic)
+    generation_topic = source_info.get("normalized_topic") or topic_text or source_url or topic
     task_id = str(uuid.uuid4())[:8]
     image_path = ""
     if image and image.filename:
@@ -2461,7 +2499,7 @@ async def start_generation(request: Request, topic: str = Form(...), image: Opti
         "owner_display_name": user.get("display_name"),
         "owner_role": user.get("role"),
         "id": task_id,
-        "topic": topic,
+        "topic": generation_topic,
         "image_path": image_path,
         "tracker": tracker,
         "output_dir": None,
@@ -2477,7 +2515,7 @@ async def start_generation(request: Request, topic: str = Form(...), image: Opti
     _push_live_event("task_created", "创建了完整生产任务", tasks[task_id])
     thread = threading.Thread(
         target=run_pipeline_with_progress,
-        args=(task_id, topic, image_path, tasks[task_id]["public_base_url"]),
+        args=(task_id, generation_topic, image_path, tasks[task_id]["public_base_url"]),
         daemon=True,
     )
     thread.start()
@@ -2736,7 +2774,9 @@ async def regenerate_digital_human_segment(task_id: str, segment_index: int, req
 @app.post("/api/script-preview/revise")
 async def revise_script_preview_segment(
     request: Request,
-    topic: str = Form(...),
+    topic_text: str = Form(""),
+    source_url: str = Form(""),
+    topic: str = Form(""),
     script_json: str = Form(...),
     segment_index: int = Form(...),
     instruction: str = Form(...),
@@ -2762,12 +2802,14 @@ async def revise_script_preview_segment(
 
     from generate_script import revise_script_segment
 
-    web_search_enabled = _parse_bool_form(use_web_search)
+    source_info = analyze_topic_fields(topic_text=topic_text, source_url=source_url, fallback_topic=topic)
+    generation_topic = source_info.get("normalized_topic") or topic_text or source_url or topic
+    web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") != "text"
     try:
         revised_segment = _run_script_ai_job(
             job_id=f"revise:{user.get('username', 'guest')}:{time.time_ns()}",
             label="AI 修改",
-            runner=lambda: revise_script_segment(topic, script_data, segment_index - 1, instruction.strip(), enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id),
+            runner=lambda: revise_script_segment(generation_topic, script_data, segment_index - 1, instruction.strip(), enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id),
         )
         revise_usage = (revised_segment.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
