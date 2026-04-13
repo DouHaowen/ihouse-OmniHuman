@@ -751,6 +751,44 @@
       line-height: 1.5;
     }
 
+    .confirm-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 18, 30, 0.46);
+      backdrop-filter: blur(6px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      z-index: 40;
+    }
+
+    .confirm-card {
+      width: min(620px, 100%);
+      border-radius: 28px;
+      border: 1px solid rgba(255,255,255,0.5);
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(246,249,252,0.98));
+      box-shadow: 0 30px 80px rgba(18, 28, 43, 0.18);
+      padding: 24px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .confirm-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .confirm-item {
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.92);
+      padding: 14px 16px;
+      display: grid;
+      gap: 6px;
+    }
+
     .range-row {
       display: flex;
       align-items: center;
@@ -1239,6 +1277,20 @@
       </div>
     </div>
   </div>
+  <div class="confirm-overlay" id="produceConfirmOverlay" style="display:none;">
+    <div class="confirm-card">
+      <div>
+        <div class="section-kicker" id="produceConfirmKicker">Final Check</div>
+        <h3 class="section-title" style="font-size:24px;" id="produceConfirmTitle">开始生产前再确认一次</h3>
+        <p class="section-desc" id="produceConfirmDesc">系统即将按下面这套配置开始一站式生产，确认无误后再继续，可以减少误触和错误成本。</p>
+      </div>
+      <div class="confirm-grid" id="produceConfirmGrid"></div>
+      <div class="actions" style="justify-content:flex-end;">
+        <button class="btn btn-ghost" id="produceConfirmCancelBtn" type="button">返回调整</button>
+        <button class="btn btn-primary" id="produceConfirmSubmitBtn" type="button">确认开始生产</button>
+      </div>
+    </div>
+  </div>
   <div id="mediaLightbox" style="display:none; position:fixed; inset:0; background:rgba(8,12,20,0.82); z-index:9999; padding:40px; align-items:center; justify-content:center;" aria-hidden="true">
     <div style="position:relative; max-width:min(92vw, 1400px); max-height:90vh; width:100%; display:flex; align-items:center; justify-content:center;">
       <button id="lightboxClose" type="button" class="btn btn-secondary" style="position:absolute; top:-14px; right:0; z-index:2;">关闭</button>
@@ -1320,6 +1372,10 @@
       newTaskBtn: document.getElementById('newTaskBtn'),
       historyList: document.getElementById('historyList'),
       activeTaskList: document.getElementById('activeTaskList'),
+      produceConfirmOverlay: document.getElementById('produceConfirmOverlay'),
+      produceConfirmGrid: document.getElementById('produceConfirmGrid'),
+      produceConfirmCancelBtn: document.getElementById('produceConfirmCancelBtn'),
+      produceConfirmSubmitBtn: document.getElementById('produceConfirmSubmitBtn'),
       mediaLightbox: document.getElementById('mediaLightbox'),
       lightboxImage: document.getElementById('lightboxImage'),
       lightboxClose: document.getElementById('lightboxClose'),
@@ -1460,6 +1516,96 @@
       });
     }
 
+    function historyStageLabel(key) {
+      const map = {
+        script: copyText('activeTaskStageScript', '文案处理中'),
+        audio: copyText('activeTaskStageAudio', '配音中'),
+        digital_human: copyText('activeTaskStageDigitalRunning', '数字人生成中'),
+        materials: copyText('activeTaskStageMaterials', '素材匹配中'),
+        compose: copyText('composeVideo', '生成成片'),
+      };
+      return map[key] || copyText('progressRunning', '正在处理');
+    }
+
+    function historyStatusLabel(lifecycle = {}) {
+      const status = lifecycle.status || 'draft';
+      const map = {
+        running: copyText('historyStatusRunning', '进行中'),
+        stopping: copyText('activeTaskGroupStopping', '停止中'),
+        interrupted: copyText('historyStatusInterrupted', '已中断'),
+        ready_compose: copyText('historyStatusReadyCompose', '待生成成片'),
+        completed: copyText('historyStatusCompleted', '已完成'),
+        draft: copyText('historyStatusDraft', '待继续'),
+      };
+      return map[status] || copyText('progressRunning', '正在处理');
+    }
+
+    function historyStatusTone(lifecycle = {}) {
+      const status = lifecycle.status || 'draft';
+      if (status === 'completed') return 'rgba(13,107,99,0.10); color: var(--brand-deep);';
+      if (status === 'ready_compose') return 'rgba(59,130,246,0.10); color: #2f6fed;';
+      if (status === 'running') return 'rgba(187,132,65,0.10); color: var(--accent);';
+      if (status === 'stopping' || status === 'interrupted') return 'rgba(205,77,77,0.10); color: var(--danger);';
+      return 'rgba(122,138,153,0.12); color: var(--muted);';
+    }
+
+    function renderHistoryLifecycle(item) {
+      const order = ['script', 'audio', 'digital_human', 'materials', 'compose'];
+      const currentIndex = order.indexOf(item.lifecycle?.stage_key || 'script');
+      const completed = item.lifecycle?.status === 'completed';
+      return `
+        <div style="display:grid; gap:8px; margin-top:10px;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <span class="tag" style="${historyStatusTone(item.lifecycle || {})}">${escapeHtml(historyStatusLabel(item.lifecycle || {}))}</span>
+            <span style="font-size:12px; color:var(--muted);">${escapeHtml(historyStageLabel(item.lifecycle?.stage_key || 'script'))}</span>
+          </div>
+          <div style="display:grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap:8px;">
+            ${order.map((stepKey, index) => {
+              const done = completed || index < currentIndex;
+              const current = !completed && index === currentIndex;
+              const style = done
+                ? 'background:rgba(13,107,99,0.10); color:var(--brand-deep); border-color:rgba(13,107,99,0.16);'
+                : current
+                  ? 'background:rgba(59,130,246,0.08); color:#2f6fed; border-color:rgba(59,130,246,0.16);'
+                  : 'background:rgba(244,247,250,0.95); color:var(--muted); border-color:var(--line);';
+              return `<div style="border:1px solid; border-radius:14px; padding:8px 10px; font-size:12px; font-weight:800; text-align:center; ${style}">${escapeHtml(historyStageLabel(stepKey).replace('处理中', '').replace('生成中', ''))}</div>`;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function closeProduceConfirm() {
+      if (!els.produceConfirmOverlay) return;
+      els.produceConfirmOverlay.style.display = 'none';
+    }
+
+    function buildProduceConfirmRows() {
+      const market = (state.options?.target_markets || []).find(item => item.id === state.selectedTargetMarket);
+      const voice = currentVoicePresetObject();
+      const avatar = currentAvatarObject();
+      const rows = [
+        { label: copyText('previewLabelMarket', '目标市场'), value: localizedTargetMarketName(state.selectedTargetMarket, market?.name || '-') },
+        { label: copyText('workflowLabelVoice', '本次配音方案'), value: voice ? localizedVoicePreset(voice).name : '-' },
+        { label: copyText('workflowLabelAvatar', '本次主播图片'), value: avatar ? localizedAvatarName(avatar) : '-' },
+        { label: copyText('speedLabel', '语速微调'), value: Number(els.speedRange.value || 1.1).toFixed(2) },
+        { label: copyText('previewLabelWebSearch', '实时联网检索'), value: els.webSearchToggle.checked ? copyText('statusOn', '已开启') : copyText('statusOff', '未开启') },
+      ];
+      return rows;
+    }
+
+    function openProduceConfirm() {
+      if (!els.produceConfirmOverlay || !els.produceConfirmGrid) return;
+      const rows = buildProduceConfirmRows();
+      els.produceConfirmGrid.innerHTML = rows.map(item => `
+        <div class="confirm-item">
+          <div class="label">${escapeHtml(item.label)}</div>
+          <div class="value">${escapeHtml(item.value)}</div>
+        </div>
+      `).join('');
+      els.produceConfirmOverlay.style.display = 'flex';
+    }
+
     async function loadActiveTasks() {
       if (!state.currentUser) return;
       try {
@@ -1521,15 +1667,30 @@
             <div class="history-title">${escapeHtml(item.title || item.topic || item.history_id)}</div>
             <div class="history-topic">${escapeHtml(item.topic || '未记录选题')}</div>
             <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at))} · ${escapeHtml(String(item.segment_count || 0))} 段 · ${escapeHtml(String(item.total_duration || 0))} 秒 · ${escapeHtml(formatEstimatedCost(item.estimated_cost_total || 0))}${state.currentUser?.role === 'admin' ? ` · ${escapeHtml(item.owner_display_name || item.owner_username || '未归属')}` : ''}</div>
+            ${renderHistoryLifecycle(item)}
           </div>
           <div class="history-actions">
-            <button class="btn btn-secondary history-open-btn" type="button" data-history-id="${item.history_id}">打开</button>
+            <button class="btn btn-secondary history-open-btn" type="button" data-history-id="${item.history_id}" data-live-task-id="${item.lifecycle?.live_task_id || ''}">${escapeHtml(item.lifecycle?.live_task_id ? copyText('activeTaskOpen', '继续查看') : copyText('historyOpen', '打开'))}</button>
+            ${item.lifecycle?.can_resume_production ? `<button class="btn btn-secondary history-resume-btn" type="button" data-history-id="${item.history_id}">${escapeHtml(copyText('historyResumeProduction', '继续生产'))}</button>` : ''}
+            ${item.lifecycle?.can_compose ? `<button class="btn btn-secondary history-compose-btn" type="button" data-history-id="${item.history_id}">${escapeHtml(copyText('historyContinueCompose', '继续成片'))}</button>` : ''}
             <button class="btn btn-ghost history-delete-btn" type="button" data-history-id="${item.history_id}">${escapeHtml(copyText('historyDelete', '删除'))}</button>
           </div>
         </div>
       `).join('');
       document.querySelectorAll('.history-open-btn').forEach(btn => {
-        btn.addEventListener('click', () => openHistoryTask(btn.dataset.historyId));
+        btn.addEventListener('click', () => {
+          if (btn.dataset.liveTaskId) {
+            openActiveTask(btn.dataset.liveTaskId);
+            return;
+          }
+          openHistoryTask(btn.dataset.historyId);
+        });
+      });
+      document.querySelectorAll('.history-resume-btn').forEach(btn => {
+        btn.addEventListener('click', () => resumeHistoryProduction(btn.dataset.historyId, btn));
+      });
+      document.querySelectorAll('.history-compose-btn').forEach(btn => {
+        btn.addEventListener('click', () => composeHistoryFromList(btn.dataset.historyId, btn));
       });
       document.querySelectorAll('.history-delete-btn').forEach(btn => {
         btn.addEventListener('click', () => deleteHistoryTask(btn.dataset.historyId));
@@ -1568,6 +1729,62 @@
         await loadHistory();
       } catch (error) {
         alert(error.message || copyText('historyDeleteFailed', '删除历史任务失败。'));
+      }
+    }
+
+    async function composeHistoryFromList(historyId, button) {
+      if (!historyId) return;
+      const originalText = button?.textContent || copyText('historyContinueCompose', '继续成片');
+      if (button) {
+        button.disabled = true;
+        button.textContent = copyText('composingVideo', '正在生成成片...');
+      }
+      try {
+        const res = await fetch(`/api/history/${historyId}/compose`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || copyText('composeVideoFailed', '生成成片失败'));
+        state.currentHistoryId = historyId;
+        renderResult(data.result);
+        await loadHistory();
+        setHeroStatus(copyText('composeVideoDone', '成片已生成'));
+      } catch (error) {
+        setHeroStatus(copyText('composeVideoFailed', '生成成片失败'), true);
+        alert(error.message || copyText('composeVideoFailed', '生成成片失败'));
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
+    }
+
+    async function resumeHistoryProduction(historyId, button) {
+      if (!historyId) return;
+      const originalText = button?.textContent || copyText('historyResumeProduction', '继续生产');
+      if (button) {
+        button.disabled = true;
+        button.textContent = copyText('produceCreating', '正在创建生产任务...');
+      }
+      try {
+        const res = await fetch(`/api/history/${historyId}/resume`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || copyText('produceFailed', '创建任务失败'));
+        state.currentTaskId = data.task_id;
+        state.currentHistoryId = historyId;
+        persistActiveTask(data.task_id);
+        renderProgressShell();
+        setHeroStatus(data.reused_existing
+          ? copyText('produceDuplicateHint', '当前任务已在后台执行，请勿重复点击。')
+          : copyText('historyResuming', '已从历史中继续恢复生产'));
+        subscribeProgress(data.task_id);
+        await loadHistory();
+        await loadActiveTasks();
+      } catch (error) {
+        setHeroStatus(copyText('produceFailed', '创建任务失败'), true);
+        alert(error.message || copyText('produceFailed', '创建任务失败'));
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
       }
     }
 
@@ -1889,6 +2106,10 @@
 
     function localizedAvatarName(avatar) {
       return AVATAR_COPY[state.selectedInterfaceLanguage]?.[avatar.id] || avatar.name || avatar.id || '';
+    }
+
+    function currentAvatarObject() {
+      return (state.options?.avatars || []).find(item => item.id === state.selectedAvatarId) || null;
     }
 
     function currentVoicePresetObject() {
@@ -2796,7 +3017,7 @@
       }
     }
 
-    async function startProduction() {
+    async function performProduction() {
       if (state.productionLocked && state.currentTaskId) {
         setHeroStatus(copyText('produceDuplicateHint', '当前任务已在后台执行，请勿重复点击。'));
         renderProgressShell();
@@ -2815,6 +3036,7 @@
         alert(copyText('needAvatar', '请先选择一张主播图片'));
         return;
       }
+      closeProduceConfirm();
       const topic = els.topicInput.value.trim();
       const formData = new FormData();
       formData.append('topic', topic);
@@ -2849,6 +3071,28 @@
         setHeroStatus(copyText('produceFailed', '创建任务失败'), true);
         alert(error.message || copyText('produceFailed', '创建任务失败'));
       }
+    }
+
+    function startProduction() {
+      if (state.productionLocked && state.currentTaskId) {
+        setHeroStatus(copyText('produceDuplicateHint', '当前任务已在后台执行，请勿重复点击。'));
+        renderProgressShell();
+        subscribeProgress(state.currentTaskId);
+        return;
+      }
+      if (!state.scriptData) {
+        alert(copyText('needScript', '请先生成并确认文案'));
+        return;
+      }
+      if (!state.selectedVoiceId) {
+        alert(copyText('needVoice', '请先选择一个配音方案'));
+        return;
+      }
+      if (!state.selectedAvatarId) {
+        alert(copyText('needAvatar', '请先选择一张主播图片'));
+        return;
+      }
+      openProduceConfirm();
     }
 
     async function stopCurrentTask() {
@@ -3040,6 +3284,8 @@
     els.resetBtn.addEventListener('click', resetWorkspace);
     els.backToScriptBtn.addEventListener('click', () => window.scrollTo({ top: els.scriptPanel.offsetTop - 20, behavior: 'smooth' }));
     els.produceBtn.addEventListener('click', startProduction);
+    els.produceConfirmCancelBtn?.addEventListener('click', closeProduceConfirm);
+    els.produceConfirmSubmitBtn?.addEventListener('click', performProduction);
     els.stopTaskBtn?.addEventListener('click', stopCurrentTask);
     els.newTaskBtn.addEventListener('click', resetWorkspace);
     if (els.composeVideoBtn) els.composeVideoBtn.addEventListener('click', composeFinalVideo);
@@ -3050,6 +3296,9 @@
       updateSelectionSummary();
     });
     els.lightboxClose.addEventListener('click', closeLightbox);
+    els.produceConfirmOverlay?.addEventListener('click', event => {
+      if (event.target === els.produceConfirmOverlay) closeProduceConfirm();
+    });
     els.mediaLightbox.addEventListener('click', event => {
       if (event.target === els.mediaLightbox) closeLightbox();
     });

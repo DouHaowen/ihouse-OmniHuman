@@ -454,6 +454,97 @@ def _sync_live_task_result(output_dir: Optional[str], result: dict):
         tasks[live_task_id]["result"] = result
 
 
+def _segment_has_audio(seg: dict) -> bool:
+    audio_path = str((seg or {}).get("audio_path") or "").strip()
+    audio_url = str((seg or {}).get("audio_url") or "").strip()
+    return bool((audio_path and os.path.exists(audio_path)) or audio_url)
+
+
+def _segment_has_video(seg: dict) -> bool:
+    video_path = str((seg or {}).get("video_path") or "").strip()
+    return bool(video_path and os.path.exists(video_path))
+
+
+def _segment_has_materials(seg: dict) -> bool:
+    items = _segment_material_items(seg or {})
+    return any(item.get("path") and os.path.exists(str(item.get("path"))) for item in items)
+
+
+def _history_stage_from_running_task(task: Optional[dict]) -> tuple[str, str]:
+    if not task:
+        return "running", "script"
+    tracker = task.get("tracker")
+    task_id = str(task.get("id", ""))
+    queue = _omnihuman_queue_snapshot()
+    waiting_task_ids = {str(item.get("task_id", "")) for item in (queue.get("waiting") or []) if item.get("task_id")}
+    running_task_ids = {str(item.get("task_id", "")) for item in (queue.get("running") or []) if item.get("task_id")}
+    if task.get("cancel_requested"):
+        return "stopping", "stopping"
+    if task_id in waiting_task_ids:
+        return "running", "digital_human"
+    if task_id in running_task_ids:
+        return "running", "digital_human"
+    step = int(getattr(tracker, "step", 0) or 0)
+    if step <= 1:
+        return "running", "script"
+    if step == 2:
+        return "running", "audio"
+    if step == 3:
+        return "running", "digital_human"
+    if step == 4:
+        return "running", "materials"
+    return "running", "compose"
+
+
+def _build_history_lifecycle(output_dir: Optional[Path], result: Optional[dict]) -> dict:
+    output_dir_str = str(output_dir or "")
+    live_task_id = _find_live_task_id_for_output_dir(output_dir_str)
+    live_task = tasks.get(live_task_id) if live_task_id else None
+    if live_task and getattr(live_task.get("tracker"), "status", "") == "running":
+        status, stage = _history_stage_from_running_task(live_task)
+        return {
+            "status": status,
+            "stage_key": stage,
+            "can_resume_production": False,
+            "can_compose": False,
+            "live_task_id": live_task_id,
+        }
+
+    segments = list((result or {}).get("segments") or [])
+    has_script = bool((result or {}).get("script") or segments or (result or {}).get("title"))
+    audio_ready = bool(segments) and all(_segment_has_audio(seg) for seg in segments)
+    digital_human_ready = bool(segments) and all(seg.get("type") != "digital_human" or _segment_has_video(seg) for seg in segments)
+    materials_ready = bool(segments) and all(seg.get("type") != "material" or _segment_has_materials(seg) for seg in segments)
+    compose_ready = bool((result or {}).get("final_video_path"))
+
+    if compose_ready:
+        status = "completed"
+        stage_key = "compose"
+    elif materials_ready:
+        status = "ready_compose"
+        stage_key = "compose"
+    elif digital_human_ready:
+        status = "interrupted"
+        stage_key = "materials"
+    elif audio_ready:
+        status = "interrupted"
+        stage_key = "digital_human"
+    elif has_script:
+        status = "interrupted"
+        stage_key = "audio"
+    else:
+        status = "draft"
+        stage_key = "script"
+
+    return {
+        "status": status,
+        "stage_key": stage_key,
+        "can_resume_production": bool(has_script and not materials_ready and not compose_ready),
+        "can_compose": bool(materials_ready and not compose_ready),
+        "live_task_id": "",
+    }
+
+
 def _combine_prompt(avatar_prompt: str, segment_action: str) -> str:
     parts = [part.strip() for part in [avatar_prompt, segment_action] if part and part.strip()]
     return "。".join(parts)
@@ -658,6 +749,215 @@ def run_pipeline_with_progress(
         task["result"] = result_data
         _persist_task_result(task)
         tracker.finish(result_data)
+    except TaskCancelled as exc:
+        tracker.cancel(str(exc) or "任务已停止")
+    except Exception as exc:
+        tracker.fail(str(exc))
+        import traceback
+        traceback.print_exc()
+
+
+def _fetch_materials_for_single_segment(seg: dict, output_dir: str, segment_index: int) -> dict:
+    from fetch_materials import _material_entry, download_file, search_photos, search_videos
+
+    seg_with_materials = dict(seg)
+    display_keyword = seg.get("material_keyword", "Japan")
+    keyword = seg.get("material_search_keyword") or display_keyword or "Japan"
+    material_items = []
+    material_paths = []
+
+    videos = search_videos(keyword, count=1)
+    for j, video in enumerate(videos):
+        filename = f"material_{segment_index:02d}_video_{j}.mp4"
+        output_path = os.path.join(output_dir, "materials", filename)
+        download_file(video["url"], output_path)
+        material_paths.append(output_path)
+        material_items.append(_material_entry(output_path, kind="video"))
+
+    photos = search_photos(keyword, count=2)
+    for j, photo in enumerate(photos):
+        filename = f"material_{segment_index:02d}_photo_{j}.jpg"
+        output_path = os.path.join(output_dir, "materials", filename)
+        download_file(photo["url"], output_path)
+        material_paths.append(output_path)
+        material_items.append(_material_entry(output_path, kind="image"))
+
+    seg_with_materials["material_paths"] = material_paths
+    seg_with_materials["material_items"] = material_items
+    return seg_with_materials
+
+
+def run_resume_pipeline_with_progress(task_id: str):
+    tracker = tasks[task_id]["tracker"]
+    try:
+        _raise_if_task_cancel_requested(task_id)
+        from generate_audio import generate_audio
+        from generate_digital_human import generate_digital_human_video
+        from tos_uploader import upload_file_and_get_url
+
+        task = tasks[task_id]
+        output_dir = task.get("output_dir")
+        if not output_dir:
+            raise RuntimeError("历史任务缺少输出目录")
+        output_path = Path(output_dir)
+        result = _load_result_from_output_dir(output_path)
+        if not result:
+            raise RuntimeError("历史结果不存在，无法继续生产")
+
+        workflow_config = task.get("workflow_config", {}) or result.get("workflow_config", {}) or {}
+        target_market = workflow_config.get("target_market", "cn")
+        department_id = workflow_config.get("department_id", "real_estate")
+        target_market_obj = _get_target_market(target_market)
+        voice_cfg = workflow_config.get("voice_preset", {}) or {}
+        voice_preset = _get_voice_preset(voice_cfg.get("id"), target_market)
+        avatar_cfg = workflow_config.get("avatar", {}) or {}
+        avatar_option = _get_avatar_option(avatar_cfg.get("id"), target_market_id=target_market)
+        tts_voice = voice_preset.get("voice_id")
+        tts_speed = float(voice_cfg.get("selected_speed", voice_preset.get("default_speed", 1.1)))
+        tts_volume = float(voice_cfg.get("selected_volume", voice_preset.get("default_volume", 1.0)))
+        avatar_prompt = avatar_option.get("style_prompt", "") if avatar_option else ""
+
+        script_data = result.get("script") or {}
+        if not script_data:
+            script_path = output_path / "script.json"
+            if script_path.exists():
+                script_data = json.loads(script_path.read_text(encoding="utf-8"))
+        if not script_data or not script_data.get("segments"):
+            raise RuntimeError("历史脚本不存在，无法继续生产")
+
+        tracker.log("已从历史记录恢复任务，准备继续补齐中间结果", step=1)
+
+        base_segments = list(script_data.get("segments") or [])
+        existing_segments = list(result.get("segments") or [])
+        image_path = _get_avatar_image_path_for_task(task)
+
+        tracker.log("正在检查并补齐配音...", step=2)
+        audio_segments = []
+        for index, base_seg in enumerate(base_segments, start=1):
+            _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续生成后续配音")
+            seg = dict(base_seg)
+            if index - 1 < len(existing_segments):
+                seg.update(existing_segments[index - 1] or {})
+            script_text = (seg.get("script") or "").strip()
+            if not script_text:
+                continue
+            seg_type = seg.get("type", "")
+            audio_path = seg.get("audio_path") or os.path.join(output_dir, "audio", f"segment_{index - 1:02d}_{seg_type}.mp3")
+            if audio_path and os.path.exists(audio_path):
+                seg["audio_path"] = audio_path
+                if not seg.get("audio_url"):
+                    seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+            else:
+                tracker.log(f"补生成配音（{index}/{len(base_segments)}）：{script_text[:28]}...")
+                generate_audio(script_text, audio_path, tts_voice, speed=tts_speed, volume=tts_volume)
+                seg["audio_path"] = audio_path
+                seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+                _record_cost_entry(
+                    event_type="tts_generate",
+                    amount=_estimate_tts_cost(script_text, audio_path),
+                    provider=COST_RULES["tts_generate"]["provider"],
+                    task=task,
+                    meta={"segment_index": index, "audio_path": audio_path, "scope": "resume"},
+                )
+            seg["target_market"] = target_market
+            audio_segments.append(seg)
+
+        tracker.log("正在检查并补齐数字人视频...", step=3)
+        segments_with_dh = []
+        pending_dh_count = sum(1 for seg in audio_segments if seg.get("type") == "digital_human" and not _segment_has_video(seg))
+        image_url = None
+        if pending_dh_count and image_path and os.path.exists(image_path):
+            image_url = upload_file_and_get_url(image_path, key_prefix="full/image")
+        completed = 0
+        total_dh = sum(1 for seg in audio_segments if seg.get("type") == "digital_human")
+        for index, seg in enumerate(audio_segments):
+            _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续生成后续数字人片段")
+            if seg.get("type") != "digital_human":
+                segments_with_dh.append(seg)
+                continue
+            completed += 1
+            if _segment_has_video(seg):
+                segments_with_dh.append(seg)
+                continue
+            if not image_url:
+                segments_with_dh.append(seg)
+                continue
+            tracker.log(f"数字人补生成中（{completed}/{total_dh}）")
+            video_output = os.path.join(output_dir, "digital_human", f"dh_{index:02d}.mp4")
+            video_path = _run_omnihuman_job(
+                job_id=f"{task_id}:resume:{index}",
+                label=f"数字人补生成（第{completed}/{total_dh}段）",
+                tracker=tracker,
+                runner=lambda seg=seg, video_output=video_output: generate_digital_human_video(
+                    image_url=image_url,
+                    audio_url=seg.get("audio_url"),
+                    output_path=video_output,
+                    prompt=_combine_prompt(avatar_prompt, seg.get("action", "")),
+                ),
+            )
+            seg_copy = dict(seg)
+            seg_copy["video_path"] = video_path
+            segments_with_dh.append(seg_copy)
+            _record_cost_entry(
+                event_type="digital_human_generate",
+                amount=_estimate_digital_human_cost(_probe_media_duration(video_path) or seg.get("duration", 0)),
+                provider=COST_RULES["digital_human_generate"]["provider"],
+                task=task,
+                meta={"segment_index": index + 1, "video_path": video_path, "scope": "resume"},
+            )
+
+        tracker.log("正在检查并补齐素材...", step=4)
+        final_segments = []
+        material_total = sum(1 for seg in segments_with_dh if seg.get("type") == "material")
+        material_done = 0
+        for index, seg in enumerate(segments_with_dh):
+            _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续匹配后续素材")
+            if seg.get("type") != "material":
+                final_segments.append(seg)
+                continue
+            material_done += 1
+            if _segment_has_materials(seg):
+                final_segments.append(seg)
+                continue
+            tracker.log(f"素材补生成中（{material_done}/{material_total}）")
+            final_segments.append(_fetch_materials_for_single_segment(seg, output_dir, index))
+
+        result["topic"] = task.get("topic") or result.get("topic", "")
+        result["owner_username"] = task.get("owner_username")
+        result["owner_display_name"] = task.get("owner_display_name")
+        result["owner_role"] = task.get("owner_role", "user")
+        result["title"] = script_data.get("title", result.get("title", ""))
+        result["cover_title"] = script_data.get("cover_title", result.get("cover_title", ""))
+        result["total_duration"] = script_data.get("total_duration", result.get("total_duration", 0))
+        result["segment_count"] = len(final_segments)
+        result["script"] = script_data
+        result["segments"] = final_segments
+        result["social_post"] = _get_social_post(script_data, target_market)
+        result["workflow_config"] = {
+            "voice_preset": {
+                "id": voice_preset.get("id"),
+                "name": voice_preset.get("name"),
+                "subtitle": voice_preset.get("subtitle"),
+                "selected_speed": tts_speed,
+                "selected_volume": tts_volume,
+                "language": target_market_obj.get("content_language", ""),
+            },
+            "web_search_enabled": workflow_config.get("web_search_enabled", False),
+            "target_market": target_market,
+            "department_id": department_id,
+            "avatar": {
+                "id": avatar_option.get("id") if avatar_option else None,
+                "image_url": avatar_option.get("image_url") if avatar_option else "",
+            },
+            "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
+            "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+        }
+        result["cost_entries"] = task.get("cost_entries", result.get("cost_entries", []))
+        result["cost_summary"] = task.get("cost_summary", result.get("cost_summary", _empty_cost_summary()))
+
+        task["result"] = result
+        _persist_task_result(task)
+        tracker.finish(result)
     except TaskCancelled as exc:
         tracker.cancel(str(exc) or "任务已停止")
     except Exception as exc:
@@ -1486,6 +1786,7 @@ def _serialize_result_for_ui(output_dir: str, result: dict, topic: str) -> dict:
     payload["segments"] = [_serialize_segment(output_dir, payload["topic"], seg, index) for index, seg in enumerate(payload.get("segments") or [])]
     payload["segment_count"] = int(payload.get("segment_count") or len(payload["segments"]))
     payload["social_post"] = payload.get("social_post") or payload.get("xiaohongshu_post") or payload.get("facebook_post") or ""
+    payload["lifecycle"] = _build_history_lifecycle(Path(output_dir) if output_dir else None, payload)
 
     final_video_url = _history_file_url(output_dir, payload.get("final_video_path", ""))
     if final_video_url:
@@ -1584,6 +1885,7 @@ def _list_history_items(user: Optional[dict], include_all: bool = False) -> list
             continue
         cost_summary = result.get("cost_summary") or _summarize_cost_entries(result.get("cost_entries", []))
         owner = _owner_summary(result)
+        lifecycle = _build_history_lifecycle(output_dir, result)
         items.append({
             "id": output_dir.name,
             "history_id": output_dir.name,
@@ -1595,6 +1897,7 @@ def _list_history_items(user: Optional[dict], include_all: bool = False) -> list
             "created_at": int(output_dir.stat().st_mtime),
             "estimated_cost_total": _round_cost(cost_summary.get("estimated_total", 0.0)),
             "cost_currency": cost_summary.get("currency", COST_CURRENCY),
+            "lifecycle": lifecycle,
             **owner,
         })
     return items
@@ -2679,6 +2982,68 @@ async def compose_history_video_endpoint(history_id: str, request: Request):
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
     _sync_live_task_result(str(output_dir), result)
     return {"ok": True, "result": _serialize_result_for_ui(str(output_dir), result, result.get("topic", ""))}
+
+
+@app.post("/api/history/{history_id}/resume")
+async def resume_history_production_endpoint(history_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    output_dir, result, access_error = _resolve_history_for_user(history_id, user)
+    if access_error:
+        return access_error
+
+    lifecycle = _build_history_lifecycle(output_dir, result)
+    if lifecycle.get("live_task_id"):
+        return {
+            "task_id": lifecycle.get("live_task_id", ""),
+            "reused_existing": True,
+            "message": "这条任务已经在后台继续执行中",
+        }
+    if lifecycle.get("can_compose") and not lifecycle.get("can_resume_production"):
+        return JSONResponse({"error": "这条任务已经完成中间产物，请直接生成成片"}, status_code=400)
+    if not lifecycle.get("can_resume_production"):
+        return JSONResponse({"error": "这条历史任务当前不需要继续生产"}, status_code=400)
+
+    workflow_config = result.get("workflow_config") or {}
+    voice_cfg = workflow_config.get("voice_preset", {}) or {}
+    avatar_cfg = workflow_config.get("avatar", {}) or {}
+    target_market = workflow_config.get("target_market", "cn")
+    task_id = str(uuid.uuid4())[:8]
+    tracker = ProgressTracker(task_id)
+    tasks[task_id] = {
+        "owner_username": user.get("username"),
+        "owner_display_name": user.get("display_name"),
+        "owner_role": user.get("role"),
+        "id": task_id,
+        "topic": result.get("topic", ""),
+        "image_path": "",
+        "tracker": tracker,
+        "output_dir": str(output_dir),
+        "result": result,
+        "public_base_url": _get_public_base_url(request),
+        "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "workflow_config": {
+            "voice_preset_id": voice_cfg.get("id"),
+            "avatar_id": avatar_cfg.get("id"),
+            "speed": voice_cfg.get("selected_speed", 1.1),
+            "web_search_enabled": workflow_config.get("web_search_enabled", False),
+            "target_market": target_market,
+            "department_id": workflow_config.get("department_id", "real_estate"),
+            "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
+            "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+            "voice_preset": voice_cfg,
+            "avatar": avatar_cfg,
+        },
+        "cost_entries": list(result.get("cost_entries", [])),
+        "cost_summary": result.get("cost_summary", _empty_cost_summary()),
+    }
+    tracker.log("已从历史记录恢复任务，准备继续补齐中间结果")
+    thread = threading.Thread(target=run_resume_pipeline_with_progress, args=(task_id,), daemon=True)
+    thread.start()
+    return {"task_id": task_id, "reused_existing": False}
 
 
 @app.get("/api/history/{history_id}/bundle")
