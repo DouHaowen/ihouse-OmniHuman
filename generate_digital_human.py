@@ -118,9 +118,29 @@ def submit_video_task(
     return task_id
 
 
+def _is_retryable_service_error(message: str) -> bool:
+    text = (message or "").lower()
+    retry_tokens = [
+        "50500",
+        "internal error",
+        "serveroverloaded",
+        "concurrent limit",
+        "request has reached api concurrent limit",
+        "rate limit",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "timeout",
+        "timed out",
+    ]
+    return any(token in text for token in retry_tokens)
+
+
 def _is_retryable_submit_error(exc: Exception) -> bool:
     message = str(exc)
-    return (
+    return _is_retryable_service_error(message) or (
         "504 Gateway Time-out" in message
         or "TLB" in message
         or "50430" in message
@@ -137,11 +157,16 @@ def _get_empty_done_retry_limit() -> int:
     return max(0, int(os.getenv("OMNIHUMAN_EMPTY_DONE_RETRY_LIMIT", "8")))
 
 
+def _get_result_retry_limit() -> int:
+    return max(1, int(os.getenv("OMNIHUMAN_RESULT_RETRY_LIMIT", "3")))
+
+
 def poll_task_result(task_id: str, max_wait: int = 600, empty_done_retry_limit: int = 8) -> str:
     """轮询任务状态，等待完成并返回视频 URL。"""
     start_time = time.time()
     visual_service = _get_visual_service()
     empty_done_retries = 0
+    retryable_result_retries = 0
 
     while time.time() - start_time < max_wait:
         result = visual_service.cv_get_result(
@@ -153,9 +178,13 @@ def poll_task_result(task_id: str, max_wait: int = 600, empty_done_retry_limit: 
 
         code = result.get("code")
         if code != 10000:
-            raise Exception(
-                f"查询任务失败: code={code}, message={result.get('message')}, request_id={result.get('request_id')}"
-            )
+            message = f"查询任务失败: code={code}, message={result.get('message')}, request_id={result.get('request_id')}"
+            if _is_retryable_service_error(message) and retryable_result_retries < _get_result_retry_limit():
+                retryable_result_retries += 1
+                print(f"⏳ 查询结果暂时异常，稍后重试 ({retryable_result_retries}/{_get_result_retry_limit()})...")
+                time.sleep(5)
+                continue
+            raise Exception(message)
 
         data = result.get("data", {})
         status = data.get("status")
@@ -178,6 +207,7 @@ def poll_task_result(task_id: str, max_wait: int = 600, empty_done_retry_limit: 
             continue
 
         empty_done_retries = 0
+        retryable_result_retries = 0
 
         if status in ("expired", "not_found"):
             raise Exception(f"任务状态异常: status={status}, response={result}")

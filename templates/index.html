@@ -555,6 +555,11 @@
       background: rgba(24,33,50,0.05);
     }
 
+    .btn-danger {
+      color: var(--danger);
+      background: rgba(205,77,77,0.10);
+    }
+
     .summary-grid,
     .result-kpis,
     .segment-meta,
@@ -808,6 +813,14 @@
 
     .avatar-card.is-disabled .avatar-dot {
       background: rgba(140, 152, 164, 0.4);
+    }
+
+    .avatar-delete-btn {
+      margin-top: 8px;
+      width: 100%;
+      padding: 10px 12px;
+      min-height: 38px;
+      font-size: 12px;
     }
 
     .avatar-name {
@@ -2254,6 +2267,27 @@
       }
     };
 
+    const TOPBAR_COPY = {
+      "zh-CN": {
+        activeTasksBtn: "当前任务",
+        historyBtn: "历史记录",
+        adminDashboardBtn: "管理员看板",
+        logoutBtn: "退出登录",
+      },
+      "zh-TW": {
+        activeTasksBtn: "目前任務",
+        historyBtn: "歷史記錄",
+        adminDashboardBtn: "管理員看板",
+        logoutBtn: "退出登入",
+      },
+      "ja-JP": {
+        activeTasksBtn: "現在のタスク",
+        historyBtn: "履歴",
+        adminDashboardBtn: "管理ダッシュボード",
+        logoutBtn: "ログアウト",
+      }
+    };
+
 
     const COMPOSITION_OPTION_COPY = {
       "zh-CN": {
@@ -2553,6 +2587,11 @@
       if (resultSectionKicker) resultSectionKicker.textContent = dict.resultSectionKicker || resultSectionKicker.textContent;
       if (queueDisclosureLabel) queueDisclosureLabel.textContent = dict.queueDisclosureLabel || queueDisclosureLabel.textContent;
       if (logDisclosureLabel) logDisclosureLabel.textContent = dict.logDisclosureLabel || logDisclosureLabel.textContent;
+      const topbarCopy = TOPBAR_COPY[lang] || TOPBAR_COPY['zh-CN'];
+      if (els.activeTasksDrawerBtn) els.activeTasksDrawerBtn.textContent = topbarCopy.activeTasksBtn || els.activeTasksDrawerBtn.textContent;
+      if (els.historyDrawerBtn) els.historyDrawerBtn.textContent = topbarCopy.historyBtn || els.historyDrawerBtn.textContent;
+      if (els.adminDashboardBtn) els.adminDashboardBtn.textContent = topbarCopy.adminDashboardBtn || els.adminDashboardBtn.textContent;
+      if (els.logoutBtn) els.logoutBtn.textContent = topbarCopy.logoutBtn || els.logoutBtn.textContent;
       if (els.progressTitle) els.progressTitle.textContent = dict.progressTitle || els.progressTitle.textContent;
       if (els.progressDesc) els.progressDesc.textContent = dict.progressDesc || els.progressDesc.textContent;
       if (els.resultSubtitle) els.resultSubtitle.textContent = dict.resultSubtitle || els.resultSubtitle.textContent;
@@ -2780,16 +2819,18 @@
           els.selectionGuardHint.textContent = '';
         }
       }
+      const canManageAvatars = state.currentUser?.role === 'admin';
       els.avatarGrid.innerHTML = avatars.map(item => `
         <article class="avatar-card ${item.id === state.selectedAvatarId ? 'selected' : ''} ${!isAvatarCompatibleWithVoice(item, selectedVoice) ? 'is-disabled' : ''}" data-avatar-id="${item.id}">
           <img class="avatar-thumb" src="${item.image_url}" alt="数字人主播图片">
           <div class="avatar-foot">
-            <div style="display:grid; gap:4px;">
+            <div style="display:grid; gap:4px; width:100%;">
               <div class="avatar-name">${escapeHtml(localizedAvatarName(item))}</div>
               <div style="display:flex; align-items:center; gap:8px;">
                 <span class="avatar-dot"></span>
                 ${item.id === state.selectedAvatarId ? `<span class="tag">${escapeHtml(copyText('avatarSelectedTag', '已选中'))}</span>` : `<span class="tag">${escapeHtml(!isAvatarCompatibleWithVoice(item, selectedVoice) ? copyText('avatarDisabledTag', '不可选择') : copyText('avatarSelectTag', '点击选择'))}</span>`}
               </div>
+              ${canManageAvatars ? `<button type="button" class="btn btn-danger avatar-delete-btn" data-avatar-delete="${item.id}">删除主播</button>` : ''}
             </div>
           </div>
         </article>
@@ -2815,6 +2856,35 @@
           }
           renderAvatarOptions();
           updateSelectionSummary();
+        });
+      });
+      document.querySelectorAll('[data-avatar-delete]').forEach(btn => {
+        btn.addEventListener('click', async event => {
+          event.preventDefault();
+          event.stopPropagation();
+          const avatarId = btn.dataset.avatarDelete;
+          const avatar = avatars.find(item => item.id === avatarId);
+          if (!avatar) return;
+          const label = localizedAvatarName(avatar) || avatar.name || avatar.id;
+          if (!confirm(`确认删除主播「${label}」吗？删除后将从主播库和选择列表中移除。`)) return;
+          btn.disabled = true;
+          const original = btn.textContent;
+          btn.textContent = '删除中...';
+          try {
+            const res = await fetch(`/api/admin/avatars/${encodeURIComponent(avatarId)}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || '删除失败');
+            if (state.selectedAvatarId === avatarId) {
+              state.selectedAvatarId = null;
+            }
+            await loadOptions();
+            setHeroStatus(`已删除主播「${label}」`);
+          } catch (error) {
+            alert(error.message || '删除失败');
+          } finally {
+            btn.disabled = false;
+            btn.textContent = original;
+          }
         });
       });
       updateSelectionSummary();

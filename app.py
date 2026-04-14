@@ -53,6 +53,7 @@ AVATAR_DISPLAY_NAME_MAP = {
     "avatar_host_c.png": "男主播A",
     "avatar_test_new_01.png": "林晨专属",
 }
+AVATAR_OPTION_EXCLUDE_FILENAMES = {"ihouse-logo.webp"}
 AVATAR_RULES = {
     "avatar_test_0cd3d70a.png": {
         "gender": "female",
@@ -328,6 +329,26 @@ def _register_avatar_library_file(filename: str, metadata: dict) -> dict:
         manifest[filename] = _normalize_avatar_manifest_entry(filename, metadata)
         _save_avatar_library_manifest(manifest)
         return manifest[filename]
+
+
+def _delete_avatar_library_file(filename: str) -> dict:
+    safe_name = Path(filename or "").name
+    if not safe_name:
+        raise ValueError("主播文件名不能为空")
+    if safe_name in AVATAR_OPTION_EXCLUDE_FILENAMES or safe_name in {"ihouse-logo.webp"}:
+        raise ValueError("品牌 logo 不能删除")
+    file_path = (ASSETS_DIR / safe_name).resolve()
+    assets_root = ASSETS_DIR.resolve()
+    if not str(file_path).startswith(str(assets_root)):
+        raise ValueError("非法文件路径")
+    if not file_path.exists():
+        raise FileNotFoundError("主播图片不存在")
+    with AVATAR_LIBRARY_LOCK:
+        manifest = _load_avatar_library_manifest()
+        manifest.pop(safe_name, None)
+        _save_avatar_library_manifest(manifest)
+    file_path.unlink(missing_ok=True)
+    return {"filename": safe_name}
 
 
 class ProgressTracker:
@@ -749,6 +770,44 @@ def run_pipeline_with_progress(
             )
         tracker.log(f"全部配音完成，共 {len(audio_segments)} 段")
 
+        checkpoint_result = {
+            "topic": topic,
+            "owner_username": task.get("owner_username"),
+            "owner_display_name": task.get("owner_display_name"),
+            "owner_role": task.get("owner_role", "user"),
+            "title": script_data.get("title", ""),
+            "cover_title": script_data.get("cover_title", ""),
+            "total_duration": script_data.get("total_duration", 0),
+            "segment_count": len(audio_segments),
+            "script": script_data,
+            "segments": audio_segments,
+            "social_post": _get_social_post(script_data, target_market),
+            "workflow_config": {
+                "voice_preset": {
+                    "id": voice_preset.get("id"),
+                    "name": voice_preset.get("name"),
+                    "subtitle": voice_preset.get("subtitle"),
+                    "selected_speed": tts_speed,
+                    "selected_volume": tts_volume,
+                    "language": target_market_obj.get("content_language", ""),
+                },
+                "avatar": {
+                    "id": avatar_option.get("id") if avatar_option else "",
+                    "name": avatar_option.get("name") if avatar_option else "",
+                },
+                "target_market": target_market,
+                "department_id": department_id,
+                "web_search_enabled": workflow_config.get("web_search_enabled", False),
+                "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
+                "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+            },
+            "image_path": image_path,
+            "image_url": image_url,
+            "cost_entries": task.get("cost_entries", []),
+            "cost_summary": task.get("cost_summary", _empty_cost_summary()),
+        }
+        _persist_production_checkpoint(task, checkpoint_result, stage="digital_human")
+
         tracker.log("正在生成数字人视频...", step=3)
         if not image_url:
             tracker.log("未选择数字人主播图，跳过数字人视频生成")
@@ -765,7 +824,8 @@ def run_pipeline_with_progress(
                 completed += 1
                 tracker.log(f"数字人生成中（{completed}/{len(dh_segments)}）")
                 video_output = os.path.join(output_dir, "digital_human", f"dh_{index:02d}.mp4")
-                video_path = _run_omnihuman_job(
+                video_path = _run_omnihuman_job_with_retry(
+                    task_id=task_id,
                     job_id=f"{task_id}:segment:{index}",
                     label=f"数字人生成（第{completed}/{len(dh_segments)}段）",
                     tracker=tracker,
@@ -779,6 +839,9 @@ def run_pipeline_with_progress(
                 seg_copy = dict(seg)
                 seg_copy["video_path"] = video_path
                 segments_with_dh.append(seg_copy)
+                checkpoint_result["segments"] = list(segments_with_dh)
+                checkpoint_result["segment_count"] = len(segments_with_dh)
+                _persist_production_checkpoint(task, checkpoint_result, stage="digital_human")
                 _record_cost_entry(
                     event_type="digital_human_generate",
                     amount=_estimate_digital_human_cost(_probe_media_duration(video_path) or seg.get("duration", 0)),
@@ -958,12 +1021,51 @@ def run_resume_pipeline_with_progress(task_id: str):
             seg["target_market"] = target_market
             audio_segments.append(seg)
 
+        checkpoint_result = {
+            "topic": result.get("topic", task.get("topic", "")),
+            "owner_username": task.get("owner_username"),
+            "owner_display_name": task.get("owner_display_name"),
+            "owner_role": task.get("owner_role", "user"),
+            "title": script_data.get("title", result.get("title", "")),
+            "cover_title": script_data.get("cover_title", result.get("cover_title", "")),
+            "total_duration": script_data.get("total_duration", result.get("total_duration", 0)),
+            "segment_count": len(audio_segments),
+            "script": script_data,
+            "segments": audio_segments,
+            "social_post": _get_social_post(script_data, target_market),
+            "workflow_config": {
+                "voice_preset": {
+                    "id": voice_preset.get("id"),
+                    "name": voice_preset.get("name"),
+                    "subtitle": voice_preset.get("subtitle"),
+                    "selected_speed": tts_speed,
+                    "selected_volume": tts_volume,
+                    "language": target_market_obj.get("content_language", ""),
+                },
+                "avatar": {
+                    "id": avatar_option.get("id") if avatar_option else "",
+                    "name": avatar_option.get("name") if avatar_option else "",
+                },
+                "target_market": target_market,
+                "department_id": department_id,
+                "web_search_enabled": workflow_config.get("web_search_enabled", False),
+                "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
+                "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+            },
+            "image_path": image_path,
+            "image_url": "",
+            "cost_entries": task.get("cost_entries", []),
+            "cost_summary": task.get("cost_summary", _empty_cost_summary()),
+        }
+        _persist_production_checkpoint(task, checkpoint_result, stage="digital_human")
+
         tracker.log("正在检查并补齐数字人视频...", step=3)
         segments_with_dh = []
         pending_dh_count = sum(1 for seg in audio_segments if seg.get("type") == "digital_human" and not _segment_has_video(seg))
         image_url = None
         if pending_dh_count and image_path and os.path.exists(image_path):
             image_url = upload_file_and_get_url(image_path, key_prefix="full/image")
+        checkpoint_result["image_url"] = image_url or ""
         completed = 0
         total_dh = sum(1 for seg in audio_segments if seg.get("type") == "digital_human")
         for index, seg in enumerate(audio_segments):
@@ -980,7 +1082,8 @@ def run_resume_pipeline_with_progress(task_id: str):
                 continue
             tracker.log(f"数字人补生成中（{completed}/{total_dh}）")
             video_output = os.path.join(output_dir, "digital_human", f"dh_{index:02d}.mp4")
-            video_path = _run_omnihuman_job(
+            video_path = _run_omnihuman_job_with_retry(
+                task_id=task_id,
                 job_id=f"{task_id}:resume:{index}",
                 label=f"数字人补生成（第{completed}/{total_dh}段）",
                 tracker=tracker,
@@ -994,6 +1097,9 @@ def run_resume_pipeline_with_progress(task_id: str):
             seg_copy = dict(seg)
             seg_copy["video_path"] = video_path
             segments_with_dh.append(seg_copy)
+            checkpoint_result["segments"] = list(segments_with_dh)
+            checkpoint_result["segment_count"] = len(segments_with_dh)
+            _persist_production_checkpoint(task, checkpoint_result, stage="digital_human")
             _record_cost_entry(
                 event_type="digital_human_generate",
                 amount=_estimate_digital_human_cost(_probe_media_duration(video_path) or seg.get("duration", 0)),
@@ -1079,7 +1185,8 @@ def run_avatar_test_with_progress(task_id: str, image_path: str, audio_path: str
         tracker.log("正在合成数字人视频...", step=2)
         video_dir = os.path.join(output_dir, "digital_human")
         os.makedirs(video_dir, exist_ok=True)
-        video_path = _run_omnihuman_job(
+        video_path = _run_omnihuman_job_with_retry(
+            task_id=task_id,
             job_id=f"{task_id}:avatar-test",
             label="数字人单段测试",
             tracker=tracker,
@@ -1232,6 +1339,85 @@ def _run_omnihuman_job(job_id: str, label: str, runner, tracker: Optional[Progre
             OMNIHUMAN_RUNNING_JOBS = max(0, OMNIHUMAN_RUNNING_JOBS - 1)
             OMNIHUMAN_RUNNING_ITEMS[:] = [item for item in OMNIHUMAN_RUNNING_ITEMS if item.get("job_id") != job_id]
             OMNIHUMAN_QUEUE_CONDITION.notify_all()
+
+
+def _is_retryable_omnihuman_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    retry_tokens = [
+        "50500",
+        "internal error",
+        "serveroverloaded",
+        "concurrent limit",
+        "request has reached api concurrent limit",
+        "rate limit",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "timeout",
+        "timed out",
+        "connection reset",
+        "connection aborted",
+        "temporarily unavailable",
+        "service unavailable",
+    ]
+    return any(token in text for token in retry_tokens)
+
+
+def _run_omnihuman_job_with_retry(
+    *,
+    task_id: str,
+    job_id: str,
+    label: str,
+    tracker: Optional[ProgressTracker],
+    runner,
+    retries: Optional[int] = None,
+    retry_delay_seconds: Optional[int] = None,
+):
+    attempts = max(1, int(retries or os.getenv("OMNIHUMAN_STAGE_RETRIES", "3")))
+    base_delay = max(1, int(retry_delay_seconds or os.getenv("OMNIHUMAN_STAGE_RETRY_DELAY_SECONDS", "5")))
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        attempt_job_id = job_id if attempt == 1 else f"{job_id}:retry:{attempt}"
+        try:
+            if attempt > 1 and tracker:
+                tracker.log(f"{label}重试中（{attempt}/{attempts}）")
+            return _run_omnihuman_job(job_id=attempt_job_id, label=label, tracker=tracker, runner=runner)
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts or not _is_retryable_omnihuman_error(exc):
+                raise
+            wait_seconds = base_delay * attempt
+            retry_message = f"{label}失败，{wait_seconds} 秒后重试（{attempt}/{attempts}）"
+            if tracker:
+                tracker.log(retry_message)
+            _push_live_event(
+                "omnihuman_retry",
+                retry_message,
+                tasks.get(task_id),
+                {
+                    "label": label,
+                    "attempt": attempt,
+                    "max_attempts": attempts,
+                    "error": str(exc),
+                },
+            )
+            time.sleep(wait_seconds)
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"{label}重试失败")
+
+
+def _persist_production_checkpoint(task: dict, result: dict, stage: Optional[str] = None):
+    if stage:
+        task["production_stage"] = stage
+    task["result"] = result
+    _persist_task_result(task)
 
 
 def _push_live_event(event_type: str, message: str, task: Optional[dict] = None, extra: Optional[dict] = None):
@@ -2072,6 +2258,8 @@ def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bo
             continue
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
             continue
+        if path.name in AVATAR_OPTION_EXCLUDE_FILENAMES or path.stem in {"ihouse-logo"}:
+            continue
         if re.fullmatch(r"avatar_test_[0-9a-f]{8}", path.stem) and path.name not in AVATAR_DISPLAY_NAME_MAP:
             continue
         rule = AVATAR_RULES.get(path.name, {})
@@ -2404,6 +2592,23 @@ def _admin_avatar_job_snapshot(job: dict) -> dict:
     }
 
 
+def _admin_avatar_job_manifest_path(job_id: str) -> Path:
+    return OUTPUT_DIR / "admin_avatar_jobs" / job_id / "job.json"
+
+
+def _admin_avatar_persist_job(job: dict) -> None:
+    job_id = str(job.get("job_id", "")).strip()
+    if not job_id:
+        return
+    manifest_path = _admin_avatar_job_manifest_path(job_id)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(job)
+    payload["output_dir"] = str(payload.get("output_dir", ""))
+    payload["reference_path"] = str(payload.get("reference_path", ""))
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+
+
 def _admin_avatar_latest_job() -> Optional[dict]:
     with ADMIN_AVATAR_JOBS_LOCK:
         if not ADMIN_AVATAR_JOBS:
@@ -2419,6 +2624,26 @@ def _admin_avatar_latest_job() -> Optional[dict]:
     for job_dir in jobs_root.iterdir():
         if not job_dir.is_dir():
             continue
+        job_manifest = job_dir / "job.json"
+        if job_manifest.exists():
+            try:
+                payload = json.loads(job_manifest.read_text(encoding="utf-8"))
+                if isinstance(payload, dict) and payload.get("job_id"):
+                    job = dict(payload)
+                    job["output_dir"] = str(job.get("output_dir") or job_dir)
+                    job["candidates"] = [
+                        {
+                            "filename": item.get("filename", ""),
+                            "url": item.get("url") or f"/api/admin/avatar-lab/jobs/{job_dir.name}/download/{Path(item.get('filename', '')).name}",
+                            "prompt": item.get("prompt", ""),
+                        }
+                        for item in (payload.get("candidates") or [])
+                        if Path(item.get("filename", "")).name
+                    ]
+                    candidates.append((float(job.get("updated_at") or job_dir.stat().st_mtime), job))
+                    continue
+            except Exception:
+                pass
         candidates_dir = job_dir / "candidates"
         if not candidates_dir.exists():
             continue
@@ -2460,6 +2685,28 @@ def _admin_avatar_latest_job() -> Optional[dict]:
 
 def _admin_avatar_job_from_disk(job_id: str) -> Optional[dict]:
     job_dir = OUTPUT_DIR / "admin_avatar_jobs" / job_id
+    job_manifest = job_dir / "job.json"
+    if job_manifest.exists():
+        try:
+            payload = json.loads(job_manifest.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("job_id"):
+                job = dict(payload)
+                job["output_dir"] = str(job.get("output_dir") or job_dir)
+                candidates_dir = job_dir / "candidates"
+                job["candidates"] = [
+                    {
+                        "filename": item.get("filename", ""),
+                        "url": item.get("url") or f"/api/admin/avatar-lab/jobs/{job_id}/download/{Path(item.get('filename', '')).name}",
+                        "prompt": item.get("prompt", ""),
+                    }
+                    for item in (job.get("candidates") or [])
+                    if Path(item.get("filename", "")).name and (candidates_dir / Path(item.get("filename", "")).name).exists()
+                ]
+                if not job["candidates"] and job.get("status") == "done":
+                    return None
+                return job
+        except Exception:
+            pass
     candidates_dir = job_dir / "candidates"
     if not candidates_dir.exists():
         return None
@@ -2499,6 +2746,7 @@ def _admin_avatar_job_set(job: dict, **updates) -> dict:
     job["updated_at"] = time.time()
     with ADMIN_AVATAR_JOBS_LOCK:
         ADMIN_AVATAR_JOBS[job["job_id"]] = job
+    _admin_avatar_persist_job(job)
     return job
 
 
@@ -2580,6 +2828,7 @@ async def admin_generate_avatar(request: Request, reference_image: UploadFile = 
     }
     with ADMIN_AVATAR_JOBS_LOCK:
         ADMIN_AVATAR_JOBS[job_id] = job
+    _admin_avatar_persist_job(job)
     thread = threading.Thread(target=_admin_avatar_generation_worker, args=(job_id,), daemon=True)
     thread.start()
     return _admin_avatar_job_snapshot(job)
@@ -2592,7 +2841,7 @@ async def admin_avatar_latest_job_status(request: Request):
         return error
     if not _is_admin(user):
         return _forbidden_error()
-    job = _admin_avatar_latest_job() or _admin_avatar_job_from_disk(next(iter(sorted((OUTPUT_DIR / "admin_avatar_jobs").iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)), None).name if (OUTPUT_DIR / "admin_avatar_jobs").exists() and any((OUTPUT_DIR / "admin_avatar_jobs").iterdir()) else "")
+    job = _admin_avatar_latest_job()
     if not job:
         return JSONResponse({"error": "暂无主播图任务"}, status_code=404)
     return _admin_avatar_job_snapshot(job)
@@ -2642,6 +2891,8 @@ async def admin_avatar_job_import(job_id: str, request: Request, filename: str =
     with ADMIN_AVATAR_JOBS_LOCK:
         job = ADMIN_AVATAR_JOBS.get(job_id)
     if not job:
+        job = _admin_avatar_job_from_disk(job_id)
+    if not job:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
     if job.get("status") != "done":
         return JSONResponse({"error": "主播图还未生成完成"}, status_code=400)
@@ -2675,6 +2926,31 @@ async def admin_avatar_job_import(job_id: str, request: Request, filename: str =
             "source": "admin_generated",
         },
     )
+
+    try:
+        source_path.unlink()
+    except Exception:
+        pass
+
+    remaining_candidates = []
+    for item in job.get("candidates", []):
+        if item.get("filename") == filename:
+            continue
+        item_name = Path(item.get("filename", "")).name
+        if item_name and (Path(job["output_dir"]) / "candidates" / item_name).exists():
+            remaining_candidates.append(
+                {
+                    "filename": item_name,
+                    "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{item_name}",
+                    "prompt": item.get("prompt", ""),
+                }
+            )
+    with ADMIN_AVATAR_JOBS_LOCK:
+        if job_id in ADMIN_AVATAR_JOBS:
+            ADMIN_AVATAR_JOBS[job_id]["candidates"] = remaining_candidates
+            ADMIN_AVATAR_JOBS[job_id]["message"] = "主播候选图已保存到主播库"
+            ADMIN_AVATAR_JOBS[job_id]["updated_at"] = time.time()
+
     return {
         "ok": True,
         "avatar": {
@@ -2688,6 +2964,7 @@ async def admin_avatar_job_import(job_id: str, request: Request, filename: str =
             "style_prompt": metadata.get("style_prompt"),
             "source": metadata.get("source"),
         },
+        "candidates": remaining_candidates,
     }
 
 
@@ -2791,6 +3068,22 @@ async def workbench_options(request: Request):
         "current_task": _build_current_task_payload(user),
         "active_tasks": _build_active_tasks_payload(user),
     }
+
+
+@app.delete("/api/admin/avatars/{filename:path}")
+async def delete_avatar_library_item(request: Request, filename: str):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if user.get("role") != "admin":
+        return _forbidden_error()
+    try:
+        deleted = _delete_avatar_library_file(filename)
+    except FileNotFoundError:
+        return JSONResponse({"error": "主播图片不存在"}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/tasks/active")
@@ -3230,7 +3523,8 @@ async def regenerate_digital_human_segment(task_id: str, segment_index: int, req
         "digital_human",
         f"dh_{segment_index - 1:02d}_regen_{int(time.time())}.mp4",
     )
-    video_path = _run_omnihuman_job(
+    video_path = _run_omnihuman_job_with_retry(
+        task_id=task_id,
         job_id=f"{task_id}:regen:{segment_index}",
         label=f"数字人重生成（第{segment_index}段）",
         runner=lambda: generate_digital_human_video(
@@ -3516,7 +3810,8 @@ async def regenerate_history_segment_digital_human(history_id: str, segment_inde
     video_output = digital_human_dir / f"dh_{segment_index - 1:02d}_regen_{int(time.time())}.mp4"
 
     try:
-        video_path = _run_omnihuman_job(
+        video_path = _run_omnihuman_job_with_retry(
+            task_id=history_id,
             job_id=f"{history_id}:regen:{segment_index}",
             label=f"历史数字人重生成（第{segment_index}段）",
             runner=lambda: generate_digital_human_video(

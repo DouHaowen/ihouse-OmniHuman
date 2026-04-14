@@ -520,6 +520,14 @@
         throw new Error(data.error || '保存主播图失败');
       }
       setAvatarLabStatus(`已保存到主播库：${data.avatar?.name || data.avatar?.id || filename}`, 'success');
+      if (Array.isArray(data.candidates)) {
+        renderAvatarJob({
+          job_id: currentAvatarJobId,
+          status: 'done',
+          message: data.candidates.length ? '主播候选图已更新' : '主播候选图已全部保存到主播库',
+          candidates: data.candidates,
+        });
+      }
     }
 
     async function deleteAvatarCandidate(filename) {
