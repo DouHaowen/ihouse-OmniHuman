@@ -28,6 +28,7 @@ VOLC_SECRET_KEY=你的火山引擎SecretKey
 ANTHROPIC_API_KEY=你的Claude APIKey
 MINIMAX_API_KEY=你的MiniMaxAPIKey
 PEXELS_API_KEY=你的Pexels APIKey
+ARK_API_KEY=你的Ark APIKey
 DIGITAL_HUMAN_IMAGE=./assets/anchor.jpg
 TTS_VOICE=Chinese (Mandarin)_Warm_Bestie
 ```

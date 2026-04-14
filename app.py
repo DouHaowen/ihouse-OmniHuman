@@ -31,6 +31,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 load_dotenv(override=False)
 
+from avatar_generator import AvatarGenerationError, generate_avatar_candidates
 from source_ingest import analyze_topic_fields, analyze_topic_input
 
 app = FastAPI(title="iHouse 内容工作台")
@@ -42,6 +43,10 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 tasks = {}
 ASSETS_DIR = BASE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
+AVATAR_LIBRARY_MANIFEST_PATH = ASSETS_DIR / "avatar_library_manifest.json"
+AVATAR_LIBRARY_LOCK = threading.Lock()
+ADMIN_AVATAR_JOBS: dict[str, dict] = {}
+ADMIN_AVATAR_JOBS_LOCK = threading.Lock()
 
 AVATAR_DISPLAY_NAME_MAP = {
     "avatar_test_0cd3d70a.png": "女主播A",
@@ -248,6 +253,81 @@ AVATAR_STYLE_PROMPTS = [
     "人物以温柔自然的情绪面对镜头，表情轻松，动作柔和，镜头稳定，整体适合生活方式和服务介绍场景",
     "人物自然礼貌地对镜头讲述，表情克制细腻，动作简洁，节奏平稳，适合日语解说场景",
 ]
+
+DEFAULT_CUSTOM_AVATAR_ORDER = 100
+
+
+def _load_avatar_library_manifest() -> dict:
+    if not AVATAR_LIBRARY_MANIFEST_PATH.exists():
+        return {}
+    try:
+        with open(AVATAR_LIBRARY_MANIFEST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_avatar_library_manifest(manifest: dict) -> None:
+    AVATAR_LIBRARY_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(AVATAR_LIBRARY_MANIFEST_PATH, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2, default=str)
+
+
+def _default_preferred_voices_for_gender(gender: str, allowed_target_markets: list[str]) -> dict:
+    if (gender or "").strip().lower() == "male":
+        return {market: "mandarin_male" for market in allowed_target_markets}
+    return {
+        market: (
+            "mandarin_female"
+            if market == "cn"
+            else "taiwan_clone"
+            if market == "tw" and os.getenv("VOICE_TAIWAN_CLONE", "").strip()
+            else "taiwan_female"
+            if market == "tw"
+            else "japanese_female"
+            if market == "jp"
+            else "mandarin_female"
+        )
+        for market in allowed_target_markets
+    }
+
+
+def _normalize_avatar_manifest_entry(filename: str, metadata: dict | None = None) -> dict:
+    metadata = metadata or {}
+    allowed_target_markets = list(metadata.get("allowed_target_markets") or [])
+    gender = (metadata.get("gender") or "").strip().lower()
+    preferred_voice_by_market = dict(metadata.get("preferred_voice_by_market") or {})
+    if not preferred_voice_by_market:
+        preferred_voice_by_market = _default_preferred_voices_for_gender(gender, allowed_target_markets)
+    return {
+        "name": metadata.get("name") or Path(filename).stem,
+        "gender": gender or "female",
+        "allowed_target_markets": allowed_target_markets or ["cn", "tw", "jp"],
+        "preferred_voice_by_market": preferred_voice_by_market,
+        "style_prompt": metadata.get("style_prompt") or AVATAR_STYLE_PROMPTS[0],
+        "created_at": metadata.get("created_at") or time.time(),
+        "source": metadata.get("source") or "manual",
+    }
+
+
+def _slugify_avatar_name(name: str) -> str:
+    slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "_", (name or "").strip()).strip("_")
+    return slug or "avatar"
+
+
+def _build_generated_avatar_filename(name: str, gender: str, index: int = 1) -> str:
+    slug = _slugify_avatar_name(name)
+    stamp = int(time.time())
+    return f"avatar_custom_{slug}_{gender or 'female'}_{stamp}_{index:02d}.png"
+
+
+def _register_avatar_library_file(filename: str, metadata: dict) -> dict:
+    with AVATAR_LIBRARY_LOCK:
+        manifest = _load_avatar_library_manifest()
+        manifest[filename] = _normalize_avatar_manifest_entry(filename, metadata)
+        _save_avatar_library_manifest(manifest)
+        return manifest[filename]
 
 
 class ProgressTracker:
@@ -1981,6 +2061,7 @@ def _resolve_history_for_user(history_id: str, user: Optional[dict]) -> tuple[Op
 
 def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bool = False) -> list[dict]:
     items = []
+    manifest = _load_avatar_library_manifest()
     preferred_order = {
         "avatar_test_0cd3d70a.png": 0,
         "avatar_host_c.png": 1,
@@ -1997,14 +2078,17 @@ def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bo
         allowed_target_markets = list(rule.get("allowed_target_markets") or [])
         if target_market_id and not include_all and allowed_target_markets and target_market_id not in allowed_target_markets:
             continue
+        metadata = dict(manifest.get(path.name) or {})
         items.append({
             "id": path.name,
-            "name": AVATAR_DISPLAY_NAME_MAP.get(path.name, path.stem),
+            "name": metadata.get("name") or AVATAR_DISPLAY_NAME_MAP.get(path.name, path.stem),
             "image_url": f"/public/assets/{path.name}",
             "filename": path.name,
-            "gender": rule.get("gender", ""),
-            "allowed_target_markets": allowed_target_markets,
-            "preferred_voice_by_market": dict(rule.get("preferred_voice_by_market") or {}),
+            "gender": metadata.get("gender") or rule.get("gender", ""),
+            "allowed_target_markets": list(metadata.get("allowed_target_markets") or allowed_target_markets),
+            "preferred_voice_by_market": dict(metadata.get("preferred_voice_by_market") or rule.get("preferred_voice_by_market") or {}),
+            "style_prompt": metadata.get("style_prompt") or rule.get("style_prompt") or AVATAR_STYLE_PROMPTS[0],
+            "source": metadata.get("source") or ("builtin" if path.name in AVATAR_RULES else "custom"),
         })
     return items
 
@@ -2301,6 +2385,371 @@ async def admin_live_status(request: Request):
     if not _is_admin(user):
         return _forbidden_error()
     return _build_admin_live_status()
+
+
+def _admin_avatar_job_snapshot(job: dict) -> dict:
+    return {
+        "job_id": job.get("job_id", ""),
+        "status": job.get("status", "pending"),
+        "message": job.get("message", ""),
+        "error": job.get("error", ""),
+        "avatar_name": job.get("avatar_name", ""),
+        "gender": job.get("gender", ""),
+        "allowed_target_markets": job.get("allowed_target_markets", []),
+        "style_note": job.get("style_note", ""),
+        "reference_url": job.get("reference_url", ""),
+        "candidates": job.get("candidates", []),
+        "created_at": job.get("created_at", 0),
+        "updated_at": job.get("updated_at", 0),
+    }
+
+
+def _admin_avatar_latest_job() -> Optional[dict]:
+    with ADMIN_AVATAR_JOBS_LOCK:
+        if not ADMIN_AVATAR_JOBS:
+            pass
+        else:
+            job = max(ADMIN_AVATAR_JOBS.values(), key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0))
+            return dict(job)
+
+    jobs_root = OUTPUT_DIR / "admin_avatar_jobs"
+    if not jobs_root.exists():
+        return None
+    candidates: list[tuple[float, dict]] = []
+    for job_dir in jobs_root.iterdir():
+        if not job_dir.is_dir():
+            continue
+        candidates_dir = job_dir / "candidates"
+        if not candidates_dir.exists():
+            continue
+        files = sorted(
+            [path for path in candidates_dir.iterdir() if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}],
+            key=lambda item: item.name,
+        )
+        if not files:
+            continue
+        updated_at = max([job_dir.stat().st_mtime] + [path.stat().st_mtime for path in files])
+        job_id = job_dir.name
+        job = {
+            "job_id": job_id,
+            "status": "done",
+            "message": "主播候选图已生成",
+            "error": "",
+            "avatar_name": "",
+            "gender": "",
+            "allowed_target_markets": [],
+            "style_note": "",
+            "reference_url": "",
+            "candidates": [
+                {
+                    "filename": path.name,
+                    "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{path.name}",
+                    "prompt": "",
+                }
+                for path in files
+            ],
+            "created_at": job_dir.stat().st_mtime,
+            "updated_at": updated_at,
+        }
+        candidates.append((updated_at, job))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _admin_avatar_job_from_disk(job_id: str) -> Optional[dict]:
+    job_dir = OUTPUT_DIR / "admin_avatar_jobs" / job_id
+    candidates_dir = job_dir / "candidates"
+    if not candidates_dir.exists():
+        return None
+    files = sorted(
+        [path for path in candidates_dir.iterdir() if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}],
+        key=lambda item: item.name,
+    )
+    if not files:
+        return None
+    updated_at = max([job_dir.stat().st_mtime] + [path.stat().st_mtime for path in files])
+    return {
+        "job_id": job_id,
+        "status": "done",
+        "message": "主播候选图已生成",
+        "error": "",
+        "avatar_name": "",
+        "gender": "",
+        "allowed_target_markets": [],
+        "style_note": "",
+        "reference_url": "",
+        "candidates": [
+            {
+                "filename": path.name,
+                "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{path.name}",
+                "prompt": "",
+            }
+            for path in files
+        ],
+        "created_at": job_dir.stat().st_mtime,
+        "updated_at": updated_at,
+        "output_dir": str(job_dir),
+    }
+
+
+def _admin_avatar_job_set(job: dict, **updates) -> dict:
+    job.update(updates)
+    job["updated_at"] = time.time()
+    with ADMIN_AVATAR_JOBS_LOCK:
+        ADMIN_AVATAR_JOBS[job["job_id"]] = job
+    return job
+
+
+def _admin_avatar_generation_worker(job_id: str) -> None:
+    with ADMIN_AVATAR_JOBS_LOCK:
+        job = ADMIN_AVATAR_JOBS.get(job_id)
+    if not job:
+        return
+    try:
+        _admin_avatar_job_set(job, status="running", message="正在调用 Seedream 生成主播候选图...")
+        candidates_dir = Path(job["output_dir"]) / "candidates"
+        candidates = generate_avatar_candidates(
+            reference_path=job["reference_path"],
+            output_dir=str(candidates_dir),
+            avatar_name=job["avatar_name"],
+            gender=job["gender"],
+            style_note=job.get("style_note", ""),
+            target_markets=job.get("allowed_target_markets", []),
+            count=int(job.get("candidate_count", 3)),
+            size="1440x2560",
+        )
+        normalized = []
+        for item in candidates:
+            normalized.append({
+                "filename": item["filename"],
+                "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{Path(item['path']).name}",
+                "prompt": item.get("prompt", ""),
+            })
+        _admin_avatar_job_set(job, status="done", message="主播候选图已生成", candidates=normalized, error="")
+    except Exception as exc:
+        _admin_avatar_job_set(job, status="error", message="主播图生成失败", error=str(exc))
+
+
+@app.post("/api/admin/avatar-lab/generate")
+async def admin_generate_avatar(request: Request, reference_image: UploadFile = File(...), avatar_name: str = Form("新主播"), gender: str = Form("female"), target_markets: str = Form("cn,tw,jp"), style_note: str = Form(""), candidate_count: int = Form(3)):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    if not reference_image or not reference_image.filename:
+        return JSONResponse({"error": "请上传一张参考人脸图片"}, status_code=400)
+
+    gender = (gender or "female").strip().lower()
+    if gender not in {"female", "male"}:
+        gender = "female"
+    allowed_target_markets = [item.strip() for item in (target_markets or "").split(",") if item.strip()]
+    if gender == "male":
+        allowed_target_markets = [market for market in allowed_target_markets if market == "cn"] or ["cn"]
+    else:
+        allowed_target_markets = [market for market in allowed_target_markets if market in {"cn", "tw", "jp"}] or ["cn", "tw", "jp"]
+
+    job_id = str(uuid.uuid4())[:8]
+    output_dir = OUTPUT_DIR / "admin_avatar_jobs" / job_id
+    upload_dir = output_dir / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(reference_image.filename).suffix or ".jpg"
+    reference_path = upload_dir / f"reference{ext}"
+    with open(reference_path, "wb") as f:
+        f.write(await reference_image.read())
+
+    job = {
+        "job_id": job_id,
+        "status": "pending",
+        "message": "等待开始",
+        "error": "",
+        "avatar_name": avatar_name.strip() or "新主播",
+        "gender": gender,
+        "allowed_target_markets": allowed_target_markets,
+        "style_note": style_note.strip(),
+        "reference_path": str(reference_path),
+        "reference_url": f"/public/tasks/{job_id}/{reference_path.name}",
+        "output_dir": str(output_dir),
+        "candidate_count": max(1, min(int(candidate_count or 3), 6)),
+        "candidates": [],
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "created_by": user.get("username"),
+    }
+    with ADMIN_AVATAR_JOBS_LOCK:
+        ADMIN_AVATAR_JOBS[job_id] = job
+    thread = threading.Thread(target=_admin_avatar_generation_worker, args=(job_id,), daemon=True)
+    thread.start()
+    return _admin_avatar_job_snapshot(job)
+
+
+@app.get("/api/admin/avatar-lab/jobs/latest")
+async def admin_avatar_latest_job_status(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    job = _admin_avatar_latest_job() or _admin_avatar_job_from_disk(next(iter(sorted((OUTPUT_DIR / "admin_avatar_jobs").iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)), None).name if (OUTPUT_DIR / "admin_avatar_jobs").exists() and any((OUTPUT_DIR / "admin_avatar_jobs").iterdir()) else "")
+    if not job:
+        return JSONResponse({"error": "暂无主播图任务"}, status_code=404)
+    return _admin_avatar_job_snapshot(job)
+
+
+@app.get("/api/admin/avatar-lab/jobs/{job_id}")
+async def admin_avatar_job_status(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    with ADMIN_AVATAR_JOBS_LOCK:
+        job = ADMIN_AVATAR_JOBS.get(job_id)
+    if not job:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    return _admin_avatar_job_snapshot(job)
+
+
+@app.get("/api/admin/avatar-lab/jobs/{job_id}/download/{file_path:path}")
+async def admin_avatar_job_download(job_id: str, file_path: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    with ADMIN_AVATAR_JOBS_LOCK:
+        job = ADMIN_AVATAR_JOBS.get(job_id)
+    if not job:
+        job = _admin_avatar_job_from_disk(job_id)
+    if not job:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    output_dir = Path(job.get("output_dir", ""))
+    full_path = (output_dir / "candidates" / file_path).resolve()
+    if not output_dir or not str(full_path).startswith(str(output_dir.resolve())) or not full_path.exists():
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    return FileResponse(str(full_path))
+
+
+@app.post("/api/admin/avatar-lab/jobs/{job_id}/import")
+async def admin_avatar_job_import(job_id: str, request: Request, filename: str = Form(...), display_name: str = Form(""), gender: str = Form("female"), target_markets: str = Form("cn,tw,jp"), style_note: str = Form("")):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    with ADMIN_AVATAR_JOBS_LOCK:
+        job = ADMIN_AVATAR_JOBS.get(job_id)
+    if not job:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+    if job.get("status") != "done":
+        return JSONResponse({"error": "主播图还未生成完成"}, status_code=400)
+
+    candidate = next((item for item in job.get("candidates", []) if item.get("filename") == filename), None)
+    if not candidate:
+        return JSONResponse({"error": "候选图片不存在"}, status_code=404)
+
+    source_path = Path(job["output_dir"]) / "candidates" / filename
+    if not source_path.exists():
+        return JSONResponse({"error": "候选图片文件不存在"}, status_code=404)
+
+    final_name = _build_generated_avatar_filename(display_name or job.get("avatar_name", "新主播"), gender or job.get("gender", "female"), index=1)
+    final_name = f"{Path(final_name).stem}_{job_id[:4]}{Path(final_name).suffix}"
+    final_path = ASSETS_DIR / final_name
+    shutil.copy2(source_path, final_path)
+
+    gender = (gender or job.get("gender") or "female").strip().lower()
+    if gender not in {"female", "male"}:
+        gender = "female"
+    selected_markets = ["cn", "tw", "jp"]
+
+    metadata = _register_avatar_library_file(
+        final_name,
+        {
+            "name": display_name.strip() or job.get("avatar_name") or Path(final_name).stem,
+            "gender": gender,
+            "allowed_target_markets": selected_markets,
+            "preferred_voice_by_market": _default_preferred_voices_for_gender(gender, selected_markets),
+            "style_prompt": style_note.strip() or AVATAR_STYLE_PROMPTS[0],
+            "source": "admin_generated",
+        },
+    )
+    return {
+        "ok": True,
+        "avatar": {
+            "id": final_name,
+            "name": metadata.get("name"),
+            "filename": final_name,
+            "image_url": f"/public/assets/{final_name}",
+            "gender": metadata.get("gender"),
+            "allowed_target_markets": metadata.get("allowed_target_markets"),
+            "preferred_voice_by_market": metadata.get("preferred_voice_by_market"),
+            "style_prompt": metadata.get("style_prompt"),
+            "source": metadata.get("source"),
+        },
+    }
+
+
+@app.delete("/api/admin/avatar-lab/jobs/{job_id}/candidates/{filename}")
+async def admin_avatar_job_delete_candidate(job_id: str, filename: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+
+    safe_filename = Path(filename).name
+    with ADMIN_AVATAR_JOBS_LOCK:
+        job = ADMIN_AVATAR_JOBS.get(job_id)
+    if not job:
+        job = _admin_avatar_job_from_disk(job_id)
+    if not job:
+        return JSONResponse({"error": "任务不存在"}, status_code=404)
+
+    output_dir = Path(job.get("output_dir", ""))
+    candidates_dir = output_dir / "candidates"
+    candidate_path = (candidates_dir / safe_filename).resolve()
+    if not output_dir or not str(candidate_path).startswith(str(candidates_dir.resolve())) or not candidate_path.exists():
+        return JSONResponse({"error": "候选图片不存在"}, status_code=404)
+
+    try:
+        candidate_path.unlink()
+    except Exception as exc:
+        return JSONResponse({"error": f"删除候选图片失败：{exc}"}, status_code=500)
+
+    remaining_candidates = []
+    for item in job.get("candidates", []):
+        if item.get("filename") == safe_filename:
+            continue
+        item_name = Path(item.get("filename", "")).name
+        if item_name and (candidates_dir / item_name).exists():
+            remaining_candidates.append(
+                {
+                    "filename": item_name,
+                    "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{item_name}",
+                    "prompt": item.get("prompt", ""),
+                }
+            )
+
+    if not remaining_candidates:
+        remaining_candidates = [
+            {
+                "filename": path.name,
+                "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{path.name}",
+                "prompt": "",
+            }
+            for path in sorted(candidates_dir.iterdir(), key=lambda item: item.name)
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        ]
+
+    with ADMIN_AVATAR_JOBS_LOCK:
+        if job_id in ADMIN_AVATAR_JOBS:
+            ADMIN_AVATAR_JOBS[job_id]["candidates"] = remaining_candidates
+            ADMIN_AVATAR_JOBS[job_id]["message"] = "主播候选图已更新"
+            ADMIN_AVATAR_JOBS[job_id]["updated_at"] = time.time()
+
+    return {"ok": True, "candidates": remaining_candidates}
 
 
 @app.api_route("/public/assets/{file_path:path}", methods=["GET", "HEAD"])

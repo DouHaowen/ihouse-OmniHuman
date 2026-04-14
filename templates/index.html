@@ -1260,24 +1260,24 @@
             </div>
             <div class="workflow-pills">
               <div class="workflow-pill active" id="workflowPillTopic">
-                <span class="workflow-pill-step">Step 1</span>
-                <strong>输入选题</strong>
-                <span>先确定主题、市场和是否联网检索。</span>
+                <span class="workflow-pill-step" id="workflowPillStep1">Step 1</span>
+                <strong id="workflowPillTitle1">输入选题</strong>
+                <span id="workflowPillDesc1">先确定主题、市场和是否联网检索。</span>
               </div>
               <div class="workflow-pill" id="workflowPillScript">
-                <span class="workflow-pill-step">Step 2</span>
-                <strong>确认脚本</strong>
-                <span>逐段检查内容，只展开正在修改的段落。</span>
+                <span class="workflow-pill-step" id="workflowPillStep2">Step 2</span>
+                <strong id="workflowPillTitle2">确认脚本</strong>
+                <span id="workflowPillDesc2">逐段检查内容，只展开正在修改的段落。</span>
               </div>
               <div class="workflow-pill" id="workflowPillProgress">
-                <span class="workflow-pill-step">Step 3</span>
-                <strong>生产中</strong>
-                <span>默认只看阶段摘要，详细日志按需展开。</span>
+                <span class="workflow-pill-step" id="workflowPillStep3">Step 3</span>
+                <strong id="workflowPillTitle3">生产中</strong>
+                <span id="workflowPillDesc3">默认只看阶段摘要，详细日志按需展开。</span>
               </div>
               <div class="workflow-pill" id="workflowPillResult">
-                <span class="workflow-pill-step">Step 4</span>
-                <strong>查看结果</strong>
-                <span>先看交付结果，再按需查看分段素材和文件。</span>
+                <span class="workflow-pill-step" id="workflowPillStep4">Step 4</span>
+                <strong id="workflowPillTitle4">查看结果</strong>
+                <span id="workflowPillDesc4">先看交付结果，再按需查看分段素材和文件。</span>
               </div>
             </div>
           </section>
@@ -1384,7 +1384,7 @@
             <section class="panel progress-shell" id="progressPanel">
               <div class="panel-header">
                 <div>
-                  <div class="section-kicker">Production</div>
+                  <div class="section-kicker" id="progressSectionKicker">Production</div>
                   <h2 class="section-title" id="progressTitle">内容生产进行中</h2>
                   <p class="section-desc" id="progressDesc">这里会把当前流程拆成阶段，让运营知道系统现在处理到哪一步，而不是只看到一串技术日志。</p>
                 </div>
@@ -1420,7 +1420,7 @@
             <section class="panel result-shell" id="resultPanel">
               <div class="panel-header">
                 <div>
-                  <div class="section-kicker">Result</div>
+                  <div class="section-kicker" id="resultSectionKicker">Result</div>
                   <h2 class="section-title" id="resultTitle">生产完成</h2>
                   <p class="section-desc" id="resultSubtitle">下面是本次任务的完整结果，会按段落把文案、动作词、配音、数字人视频与素材拆开预览。</p>
                 </div>
@@ -1541,7 +1541,11 @@
       historyExpanded: false,
     };
 
-    const progressLabels = ["文案策划", "配音制作", "数字人视频", "素材匹配"];
+    function progressLabelsForLanguage(lang) {
+      if (lang === 'zh-TW') return ['文案企劃', '配音製作', '數位人影片', '素材匹配'];
+      if (lang === 'ja-JP') return ['台本作成', '音声制作', 'デジタルヒューマン', '素材マッチング'];
+      return ['文案策划', '配音制作', '数字人视频', '素材匹配'];
+    }
 
     const els = {
       topicInput: document.getElementById('topicInput'),
@@ -2196,6 +2200,12 @@
     const UI_COPY = {
       "zh-CN": {
         brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "内容生产流程", workflowIntro: "",
+        workflowStep1: "Step 1", workflowStep2: "Step 2", workflowStep3: "Step 3", workflowStep4: "Step 4",
+        workflowPillTitle1: "输入选题", workflowPillDesc1: "先确定主题、市场和是否联网检索。",
+        workflowPillTitle2: "确认脚本", workflowPillDesc2: "逐段检查内容，只展开正在修改的段落。",
+        workflowPillTitle3: "生产中", workflowPillDesc3: "默认只看阶段摘要，详细日志按需展开。",
+        workflowPillTitle4: "查看结果", workflowPillDesc4: "先看交付结果，再按需查看分段素材和文件。",
+        progressSectionKicker: "Production", resultSectionKicker: "Result", queueDisclosureLabel: "查看队列详情", logDisclosureLabel: "查看详细日志", progressSummaryStageLabel: "当前阶段", progressSummaryStatusLabel: "最新状态",
         usageTitle1: "输入选题", usageDesc1: "输入本次视频主题，系统先生成标题、封面标题和分镜脚本。", usageTitle2: "确认脚本", usageDesc2: "逐段检查并修改文案、动作提示词和素材描述。", usageTitle3: "开始生产", usageDesc3: "确认配音方案和主播图片后，一键生成整条视频素材。", usageTitle4: "结果交付", usageDesc4: "按顺序查看配音、数字人、素材、成片和打包文件。",
         workspaceKicker: "Workspace", workspaceTitle: "从一个选题开始创建内容任务", workspaceDesc: "这块是整条视频的主操作舞台。先定选题，再确认文案分镜，然后自由组合音色和主播，最后再让系统完成整段生产。",
         stepTitle1: "01 输入选题", stepDesc1: "先把内容命题说清楚，而不是直接跑整条流程。", stepTitle2: "02 确认脚本", stepDesc2: "先看标题、封面和分镜文案，再决定是否进入下一步制作。", stepTitle3: "03 选择风格", stepDesc3: "音色与主播分开选择，运营自由组合，不做多余系统限制。",
@@ -2204,10 +2214,16 @@
         webSearchTitle: "启用 Claude 实时联网检索", webSearchDesc: "适合最新政策、新闻、机器人动态、法规调整等时效内容。关闭时更省成本，开启后会优先查新信息。",
         previewBtnText: "先生成文案", regenBtnText: "重新生成文案", resetBtnText: "清空当前工作台", sourceExtracting: "正在提取来源内容...", sourceTryingSubtitle: "正在尝试抓取字幕...", sourceTranscribing: "正在转录音频内容...",
         scriptPanelTitle: "先确认脚本，再进入生产", scriptPanelDesc: "数字人段只看动作提示词，素材段只看素材关键词与描述，信息保持清楚，让运营可以快速判断内容节奏。",
-        configPanelTitle: "音色与主播自由组合", configPanelDesc: "配音方案保留业务上的语言和性别差异，主播选择只展示图片本身，不对内容做额外分组判断。", voiceLabel: "配音方案", speedLabel: "语速微调", speedHelper: "当前语速会应用到整条视频的所有配音段落。普通话可以略快，日语和台湾语建议更平稳。", avatarLabel: "选择主播图片", produceBtnText: "开始一站式生产", backToScriptBtnText: "返回查看文案", activeTasksTitle: "后台任务", activeTasksDesc: "这里会显示当前账号仍在后台运行的任务。你可以继续查看任意一条的进度，避免关页后失去现场。", historyTitle: "历史任务", historyDesc: "这里会保留已经落盘的历史结果。服务重启后，旧任务也可以继续打开与下载。", marketVoiceHint: "当前将自动联动对应市场的默认文案语言与配音方案。", segmentTypeDigital: "数字人段", segmentTypeMaterial: "素材段", segmentLabelScript: "段落文案", segmentLabelAction: "数字人动作提示词", segmentLabelMaterialKeyword: "素材关键词", segmentLabelMaterialDesc: "素材描述", segmentLabelAiRewrite: "告诉 AI 怎么改这一段", segmentAiPlaceholder: "例如：这一段太生硬，改得更像主播口播一点；或者：这一段素材更想强调真实新闻案例。", segmentAiButton: "AI 修改这一段", aiEditing: "AI 修改中...", aiEditRunning: "正在 AI 修改指定文案段落", aiEditDone: "该段文案已更新", aiEditFailed: "AI 修改失败", aiEditNeedPrompt: "请先告诉 AI 这一段要怎么改", progressTitle: "内容生产进行中", progressDesc: "这里会把当前流程拆成阶段，让运营知道系统现在处理到哪一步，而不是只看到一串技术日志。", progressWaiting: "等待开始", heroReady: "工作台已就绪", heroRunning: "任务进行中", heroDone: "生产完成", topicPlaceholder: "例如：为什么越来越多台湾家庭开始关注日本置业？\n或者直接粘贴一条新闻链接 / YouTube 链接", topicHelper: "也可以直接贴新闻网址或 YouTube 视频链接，系统会先抓标题和摘要，再继续生成脚本。", noHistory: "暂时还没有历史任务。", activeTasksEmpty: "当前没有后台运行中的任务。", activeTaskGroupRunning: "进行中", activeTaskGroupQueued: "等待数字人", activeTaskGroupStopping: "停止中", activeTaskStageScript: "文案处理中", activeTaskStageAudio: "配音中", activeTaskStageDigitalPreparing: "数字人准备中", activeTaskStageDigitalWaiting: "等待数字人", activeTaskStageDigitalRunning: "数字人生成中", activeTaskStageMaterials: "素材匹配中", activeTaskStageStopping: "已请求停止", activeTaskStep: "步骤 {step}/{total}", activeTaskModeFull: "一站式生产", activeTaskModeTest: "测试任务", activeTaskWatching: "当前查看中", activeTaskOpen: "继续查看", historyLoadError: "历史任务加载失败。", historyDelete: "删除", historyDeleteConfirm: "确定要删除这条历史任务吗？删除后无法恢复。", historyDeleteFailed: "删除历史任务失败。", noAvatar: "当前还没有可用的数字人主播素材，请先在服务器 assets 目录补充图片。", noAvatarHint: "当前没有可选主播。", avatarHint: "当前共 {count} 个主播素材，运营可以自由组合音色与主播。", marketDefaultPrefix: "当前目标市场默认", previewLabelTitle: "视频标题", previewLabelCover: "封面标题", previewLabelDuration: "预计总时长", previewLabelWebSearch: "实时联网检索", previewLabelMarket: "目标市场", previewLabelDepartment: "业务部门", workflowLabelVoice: "本次配音方案", workflowLabelAvatar: "本次主播图片", workflowLabelMarketDepartment: "目标市场 / 部门", workflowLabelWebSearch: "实时联网检索", workflowAvatarSelected: "已选择 1 张主播图片", workflowNotRecorded: "未记录", workflowWebSearchOn: "已开启，优先参考最新信息", workflowWebSearchOff: "未开启，按常规模型生成", statusOn: "已开启", statusOff: "未开启", statusUnset: "未设置", statusNotGenerated: "未生成", statusNone: "暂无", unitSeconds: "秒", unitSegments: "段", voiceSampleFallback: "试听参考", voiceAutoSelected: "已自动选中", avatarSelectedTag: "已选中", avatarSelectTag: "点击选择", progressRunning: "正在处理", progressDone: "已完成", resultReadyTitle: "视频内容已生成", resultSubtitlePrefix: "封面标题：", resultSubtitleSegments: "共 {count} 段", resultKpiTitle: "视频标题", resultKpiDuration: "总时长", resultKpiSegments: "完成段数", resultMaterialBlock: "素材关键词与描述", resultKeywordPrefix: "关键词：", resultSearchPrefix: "检索词：", resultDescPrefix: "描述：", resultAudioLabel: "对应配音", resultVisualLabel: "视觉结果", resultNoAudio: "暂无配音文件", resultNoVideo: "数字人视频暂未生成", resultNoMaterials: "暂无素材图", resultNoFiles: "暂无输出文件。", resultDownloadVideo: "下载数字人视频", resultRegenerateVideo: "重新生成数字人视频", resultDownloadMaterial: "下载素材", resultDeleteMaterial: "删除", resultUploadReplace: "上传替换素材", resultUploadMaterial: "上传素材", resultPickMaterialsFirst: "请先选择要上传的素材图片", resultUploading: "上传中...", resultUploadFailed: "上传素材失败", resultDeleteFailed: "删除素材失败", resultRegenerating: "重新生成中...", resultRegenerateRunning: "正在单独重生成数字人视频", resultRegenerateDone: "数字人视频已重新生成", resultRegenerateFailed: "数字人重生成失败", filesDownload: "下载", newsRefTitle: "新闻来源参考", newsRefDesc: "系统已为这段素材文案匹配可直接打开的参考报道或官网链接", newsRefOpen: "查看参考来源", newsRefSource: "新闻来源", scriptTabSegments: "分镜脚本", scriptTabSocial: "SNS文案", resultTabSegments: "段落预览", resultTabSocial: "SNS文案", resultTabFiles: "输出文件", composeVideo: "一键生成成片", finalVideoLabel: "完整成片", finalCoverLabel: "封面图", finalSubtitleLabel: "字幕文件", downloadFinalVideo: "下载成片", downloadCoverImage: "下载封面", downloadSubtitle: "下载字幕", composingVideo: "正在生成成片...", composeVideoDone: "成片已生成", composeVideoFailed: "生成成片失败", bundleDownload: "一键打包下载", newTaskBtn: "继续创建下一条", lightboxClose: "关闭", previewGenerating: "文案生成中...", previewGenerated: "文案已生成，等待确认", previewFailed: "文案生成失败", needTopic: "请先输入视频选题", needScript: "请先生成并确认文案", needVoice: "请先选择一个配音方案", needAvatar: "请先选择一张主播图片", produceCreating: "正在创建生产任务...", produceQueued: "任务已提交，正在进入生产队列...", produceDuplicateHint: "当前任务已在后台执行，请勿重复点击。", produceFailed: "创建任务失败", resumeTaskFound: "已恢复后台任务进度", resumeTaskDone: "已恢复上次任务结果", stopTaskBtn: "停止任务", stopTaskStopping: "正在停止...", stopTaskQueued: "已收到停止请求，系统会尽快停止当前任务", stopTaskFailed: "停止任务失败", taskCancelled: "任务已停止", taskCancelledDesc: "任务已按要求停止。已生成的中间结果会保留。", taskFailed: "任务失败", taskFailedDesc: "任务执行失败，请查看日志。", initFailed: "初始化失败"
+        configPanelTitle: "音色与主播自由组合", configPanelDesc: "配音方案保留业务上的语言和性别差异，主播选择只展示图片本身，不对内容做额外分组判断。", voiceLabel: "配音方案", speedLabel: "语速微调", speedHelper: "当前语速会应用到整条视频的所有配音段落。普通话可以略快，日语和台湾语建议更平稳。", avatarLabel: "选择主播图片", produceBtnText: "开始一站式生产", backToScriptBtnText: "返回查看文案", activeTasksTitle: "后台任务", activeTasksDesc: "这里会显示当前账号仍在后台运行的任务。你可以继续查看任意一条的进度，避免关页后失去现场。", historyTitle: "历史任务", historyDesc: "这里会保留已经落盘的历史结果。服务重启后，旧任务也可以继续打开与下载。", marketVoiceHint: "当前将自动联动对应市场的默认文案语言与配音方案。", segmentTypeDigital: "数字人段", segmentTypeMaterial: "素材段", segmentLabelScript: "段落文案", segmentLabelAction: "数字人动作提示词", segmentLabelMaterialKeyword: "素材关键词", segmentLabelMaterialDesc: "素材描述", segmentLabelAiRewrite: "告诉 AI 怎么改这一段", segmentAiPlaceholder: "例如：这一段太生硬，改得更像主播口播一点；或者：这一段素材更想强调真实新闻案例。", segmentAiButton: "AI 修改这一段", aiEditing: "AI 修改中...", aiEditRunning: "正在 AI 修改指定文案段落", aiEditDone: "该段文案已更新", aiEditFailed: "AI 修改失败", aiEditNeedPrompt: "请先告诉 AI 这一段要怎么改", progressTitle: "内容生产进行中", progressDesc: "这里会把当前流程拆成阶段，让运营知道系统现在处理到哪一步，而不是只看到一串技术日志。", progressWaiting: "等待开始", heroReady: "工作台已就绪", heroRunning: "任务进行中", heroDone: "生产完成", resultTitle: "生产完成", resultSubtitle: "下面是本次任务的完整结果，会按段落把文案、动作词、配音、数字人视频与素材拆开预览。", topicPlaceholder: "例如：为什么越来越多台湾家庭开始关注日本置业？\n或者直接粘贴一条新闻链接 / YouTube 链接", topicHelper: "也可以直接贴新闻网址或 YouTube 视频链接，系统会先抓标题和摘要，再继续生成脚本。", noHistory: "暂时还没有历史任务。", activeTasksEmpty: "当前没有后台运行中的任务。", activeTaskGroupRunning: "进行中", activeTaskGroupQueued: "等待数字人", activeTaskGroupStopping: "停止中", activeTaskStageScript: "文案处理中", activeTaskStageAudio: "配音中", activeTaskStageDigitalPreparing: "数字人准备中", activeTaskStageDigitalWaiting: "等待数字人", activeTaskStageDigitalRunning: "数字人生成中", activeTaskStageMaterials: "素材匹配中", activeTaskStageStopping: "已请求停止", activeTaskStep: "步骤 {step}/{total}", activeTaskModeFull: "一站式生产", activeTaskModeTest: "测试任务", activeTaskWatching: "当前查看中", activeTaskOpen: "继续查看", historyLoadError: "历史任务加载失败。", historyDelete: "删除", historyDeleteConfirm: "确定要删除这条历史任务吗？删除后无法恢复。", historyDeleteFailed: "删除历史任务失败。", noAvatar: "当前还没有可用的数字人主播素材，请先在服务器 assets 目录补充图片。", noAvatarHint: "当前没有可选主播。", avatarHint: "当前共 {count} 个主播素材，运营可以自由组合音色与主播。", marketDefaultPrefix: "当前目标市场默认", previewLabelTitle: "视频标题", previewLabelCover: "封面标题", previewLabelDuration: "预计总时长", previewLabelWebSearch: "实时联网检索", previewLabelMarket: "目标市场", previewLabelDepartment: "业务部门", workflowLabelVoice: "本次配音方案", workflowLabelAvatar: "本次主播图片", workflowLabelMarketDepartment: "目标市场 / 部门", workflowLabelWebSearch: "实时联网检索", workflowAvatarSelected: "已选择 1 张主播图片", workflowNotRecorded: "未记录", workflowWebSearchOn: "已开启，优先参考最新信息", workflowWebSearchOff: "未开启，按常规模型生成", statusOn: "已开启", statusOff: "未开启", statusUnset: "未设置", statusNotGenerated: "未生成", statusNone: "暂无", unitSeconds: "秒", unitSegments: "段", voiceSampleFallback: "试听参考", voiceAutoSelected: "已自动选中", avatarSelectedTag: "已选中", avatarSelectTag: "点击选择", progressRunning: "正在处理", progressDone: "已完成", resultReadyTitle: "视频内容已生成", resultSubtitlePrefix: "封面标题：", resultSubtitleSegments: "共 {count} 段", resultKpiTitle: "视频标题", resultKpiDuration: "总时长", resultKpiSegments: "完成段数", resultMaterialBlock: "素材关键词与描述", resultKeywordPrefix: "关键词：", resultSearchPrefix: "检索词：", resultDescPrefix: "描述：", resultAudioLabel: "对应配音", resultVisualLabel: "视觉结果", resultNoAudio: "暂无配音文件", resultNoVideo: "数字人视频暂未生成", resultNoMaterials: "暂无素材图", resultNoFiles: "暂无输出文件。", resultDownloadVideo: "下载数字人视频", resultRegenerateVideo: "重新生成数字人视频", resultDownloadMaterial: "下载素材", resultDeleteMaterial: "删除", resultUploadReplace: "上传替换素材", resultUploadMaterial: "上传素材", resultPickMaterialsFirst: "请先选择要上传的素材图片", resultUploading: "上传中...", resultUploadFailed: "上传素材失败", resultDeleteFailed: "删除素材失败", resultRegenerating: "重新生成中...", resultRegenerateRunning: "正在单独重生成数字人视频", resultRegenerateDone: "数字人视频已重新生成", resultRegenerateFailed: "数字人重生成失败", filesDownload: "下载", newsRefTitle: "新闻来源参考", newsRefDesc: "系统已为这段素材文案匹配可直接打开的参考报道或官网链接", newsRefOpen: "查看参考来源", newsRefSource: "新闻来源", scriptTabSegments: "分镜脚本", scriptTabSocial: "SNS文案", resultTabSegments: "段落预览", resultTabSocial: "SNS文案", resultTabFiles: "输出文件", composeVideo: "一键生成成片", finalVideoLabel: "完整成片", finalCoverLabel: "封面图", finalSubtitleLabel: "字幕文件", downloadFinalVideo: "下载成片", downloadCoverImage: "下载封面", downloadSubtitle: "下载字幕", composingVideo: "正在生成成片...", composeVideoDone: "成片已生成", composeVideoFailed: "生成成片失败", bundleDownload: "一键打包下载", newTaskBtn: "继续创建下一条", lightboxClose: "关闭", previewGenerating: "文案生成中...", previewGenerated: "文案已生成，等待确认", previewFailed: "文案生成失败", needTopic: "请先输入视频选题", needScript: "请先生成并确认文案", needVoice: "请先选择一个配音方案", needAvatar: "请先选择一张主播图片", produceCreating: "正在创建生产任务...", produceQueued: "任务已提交，正在进入生产队列...", produceDuplicateHint: "当前任务已在后台执行，请勿重复点击。", produceFailed: "创建任务失败", resumeTaskFound: "已恢复后台任务进度", resumeTaskDone: "已恢复上次任务结果", stopTaskBtn: "停止任务", stopTaskStopping: "正在停止...", stopTaskQueued: "已收到停止请求，系统会尽快停止当前任务", stopTaskFailed: "停止任务失败", taskCancelled: "任务已停止", taskCancelledDesc: "任务已按要求停止。已生成的中间结果会保留。", taskFailed: "任务失败", taskFailedDesc: "任务执行失败，请查看日志。", initFailed: "初始化失败"
       },
       "zh-TW": {
         brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "內容生產流程", workflowIntro: "讓營運同事從選題、腳本、配音到數位人和素材，都在同一頁完成。",
+        workflowStep1: "步驟 1", workflowStep2: "步驟 2", workflowStep3: "步驟 3", workflowStep4: "步驟 4",
+        workflowPillTitle1: "輸入選題", workflowPillDesc1: "先確定主題、市場和是否需要聯網檢索。",
+        workflowPillTitle2: "確認腳本", workflowPillDesc2: "逐段檢查內容，只展開正在修改的段落。",
+        workflowPillTitle3: "生產中", workflowPillDesc3: "預設只看階段摘要，詳細日誌按需展開。",
+        workflowPillTitle4: "查看結果", workflowPillDesc4: "先看交付結果，再按需查看分段素材與檔案。",
+        progressSectionKicker: "Production", resultSectionKicker: "Result", queueDisclosureLabel: "查看佇列詳情", logDisclosureLabel: "查看詳細日誌", progressSummaryStageLabel: "目前階段", progressSummaryStatusLabel: "最新狀態",
         usageTitle1: "輸入選題", usageDesc1: "先生成整條影片腳本，不直接盲跑整條任務。", usageTitle2: "確認腳本", usageDesc2: "逐段修改文案、動作提示詞和素材描述，再決定是否進入生產。", usageTitle3: "選擇風格", usageDesc3: "配音方案和主播圖片分開選擇，依你的工作習慣自由組合。", usageTitle4: "結果複核", usageDesc4: "完成後按段落查看影片、音訊、素材與輸出檔案，不滿意就局部調整。",
         workspaceKicker: "Workspace", workspaceTitle: "從一個選題開始建立內容任務", workspaceDesc: "這裡是整條影片的主操作舞台。先定選題，再確認腳本文案，接著自由組合音色和主播，最後再讓系統完成整段生產。",
         stepTitle1: "01 輸入選題", stepDesc1: "先把內容命題說清楚，而不是直接跑整條流程。", stepTitle2: "02 確認腳本", stepDesc2: "先看標題、封面和分鏡文案，再決定是否進入下一步製作。", stepTitle3: "03 選擇風格", stepDesc3: "音色與主播分開選擇，營運可自由組合。",
@@ -2216,10 +2232,15 @@
         webSearchTitle: "啟用 Claude 即時聯網檢索", webSearchDesc: "適合最新政策、新聞、機器人動態與法規調整等時效內容。關閉時更省成本，開啟後會優先查新資訊。",
         previewBtnText: "先生成文案", regenBtnText: "重新生成文案", resetBtnText: "清空目前工作台", sourceExtracting: "正在提取來源內容...", sourceTryingSubtitle: "正在嘗試抓取字幕...", sourceTranscribing: "正在轉錄音訊內容...",
         scriptPanelTitle: "先確認腳本，再進入生產", scriptPanelDesc: "數位人段只看動作提示詞，素材段只看素材關鍵詞與描述，讓營運可以快速判斷內容節奏。",
-        configPanelTitle: "音色與主播自由組合", configPanelDesc: "配音方案保留業務上的語言和性別差異，主播選擇只展示圖片本身。", voiceLabel: "配音方案", speedLabel: "語速微調", speedHelper: "目前語速會套用到整條影片的所有配音段落。普通話可以略快，日語和台灣語建議更平穩。", avatarLabel: "選擇主播圖片", produceBtnText: "開始一站式生產", backToScriptBtnText: "返回查看文案", activeTasksTitle: "背景任務", activeTasksDesc: "這裡會顯示目前帳號仍在背景執行的任務。你可以繼續查看任何一條的進度，避免關頁後失去現場。", historyTitle: "歷史任務", historyDesc: "這裡會保留已經落盤的歷史結果。服務重啟後，舊任務也可以繼續打開與下載。", marketVoiceHint: "目前會自動連動對應市場的預設文案語言與配音方案。", segmentTypeDigital: "數位人段", segmentTypeMaterial: "素材段", segmentLabelScript: "段落文案", segmentLabelAction: "數位人動作提示詞", segmentLabelMaterialKeyword: "素材關鍵詞", segmentLabelMaterialDesc: "素材描述", segmentLabelAiRewrite: "告訴 AI 怎麼改這一段", segmentAiPlaceholder: "例如：這一段太生硬，改得更像主播口播一點；或者：這一段素材更想強調真實新聞案例。", segmentAiButton: "AI 修改這一段", aiEditing: "AI 修改中...", aiEditRunning: "正在 AI 修改指定文案段落", aiEditDone: "這段文案已更新", aiEditFailed: "AI 修改失敗", aiEditNeedPrompt: "請先告訴 AI 這一段要怎麼改", progressTitle: "內容生產進行中", progressDesc: "這裡會把目前流程拆成階段，讓營運知道系統現在處理到哪一步，而不是只看到一串技術日誌。", progressWaiting: "等待開始", heroReady: "工作台已就緒", heroRunning: "任務進行中", heroDone: "生產完成", topicPlaceholder: "例如：為什麼越來越多台灣家庭開始關注日本置業？\n或者：日本買房後最容易忽略的三個持有成本", noHistory: "暫時還沒有歷史任務。", activeTasksEmpty: "目前沒有背景執行中的任務。", activeTaskGroupRunning: "進行中", activeTaskGroupQueued: "等待數位人", activeTaskGroupStopping: "停止中", activeTaskStageScript: "文案處理中", activeTaskStageAudio: "配音中", activeTaskStageDigitalPreparing: "數位人準備中", activeTaskStageDigitalWaiting: "等待數位人", activeTaskStageDigitalRunning: "數位人生成中", activeTaskStageMaterials: "素材匹配中", activeTaskStageStopping: "已請求停止", activeTaskStep: "步驟 {step}/{total}", activeTaskModeFull: "一站式生產", activeTaskModeTest: "測試任務", activeTaskWatching: "目前查看中", activeTaskOpen: "繼續查看", historyLoadError: "歷史任務載入失敗。", historyDelete: "刪除", historyDeleteConfirm: "確定要刪除這筆歷史任務嗎？刪除後無法恢復。", historyDeleteFailed: "刪除歷史任務失敗。", noAvatar: "目前還沒有可用的數位人主播素材，請先在伺服器 assets 目錄補上圖片。", noAvatarHint: "目前沒有可選主播。", avatarHint: "目前共 {count} 個主播素材，營運可以自由組合音色與主播。", marketDefaultPrefix: "目前目標市場預設", previewLabelTitle: "影片標題", previewLabelCover: "封面標題", previewLabelDuration: "預計總時長", previewLabelWebSearch: "即時聯網檢索", previewLabelMarket: "目標市場", previewLabelDepartment: "業務部門", workflowLabelVoice: "本次配音方案", workflowLabelAvatar: "本次主播圖片", workflowLabelMarketDepartment: "目標市場 / 部門", workflowLabelWebSearch: "即時聯網檢索", workflowAvatarSelected: "已選擇 1 張主播圖片", workflowNotRecorded: "未記錄", workflowWebSearchOn: "已開啟，優先參考最新資訊", workflowWebSearchOff: "未開啟，按一般模型生成", statusOn: "已開啟", statusOff: "未開啟", statusUnset: "未設定", statusNotGenerated: "未生成", statusNone: "暫無", unitSeconds: "秒", unitSegments: "段", voiceSampleFallback: "試聽參考", voiceAutoSelected: "已自動選取", avatarSelectedTag: "已選中", avatarSelectTag: "點擊選擇", progressRunning: "處理中", progressDone: "已完成", resultReadyTitle: "影片內容已生成", resultSubtitlePrefix: "封面標題：", resultSubtitleSegments: "共 {count} 段", resultKpiTitle: "影片標題", resultKpiDuration: "總時長", resultKpiSegments: "完成段數", resultMaterialBlock: "素材關鍵詞與描述", resultKeywordPrefix: "關鍵詞：", resultSearchPrefix: "檢索詞：", resultDescPrefix: "描述：", resultAudioLabel: "對應配音", resultVisualLabel: "視覺結果", resultNoAudio: "暫無配音檔", resultNoVideo: "數位人影片尚未生成", resultNoMaterials: "暫無素材圖", resultNoFiles: "暫無輸出檔案。", resultDownloadVideo: "下載數位人影片", resultRegenerateVideo: "重新生成數位人影片", resultDownloadMaterial: "下載素材", resultDeleteMaterial: "刪除", resultUploadReplace: "上傳替換素材", resultUploadMaterial: "上傳素材", resultPickMaterialsFirst: "請先選擇要上傳的素材圖片", resultUploading: "上傳中...", resultUploadFailed: "上傳素材失敗", resultDeleteFailed: "刪除素材失敗", resultRegenerating: "重新生成中...", resultRegenerateRunning: "正在單獨重生成數位人影片", resultRegenerateDone: "數位人影片已重新生成", resultRegenerateFailed: "數位人重生成失敗", filesDownload: "下載", newsRefTitle: "新聞來源參考", newsRefDesc: "系統已為這段素材文案匹配可直接打開的參考報導或官網連結", newsRefOpen: "查看參考來源", newsRefSource: "新聞來源", scriptTabSegments: "分鏡腳本", scriptTabSocial: "SNS文案", resultTabSegments: "段落預覽", resultTabSocial: "SNS文案", resultTabFiles: "輸出檔案", composeVideo: "一鍵生成成片", finalVideoLabel: "完整成片", finalCoverLabel: "封面圖", finalSubtitleLabel: "字幕檔", downloadFinalVideo: "下載成片", downloadCoverImage: "下載封面", downloadSubtitle: "下載字幕", composingVideo: "正在生成成片...", composeVideoDone: "成片已生成", composeVideoFailed: "生成成片失敗", bundleDownload: "一鍵打包下載", newTaskBtn: "繼續建立下一條", lightboxClose: "關閉", previewGenerating: "文案生成中...", previewGenerated: "文案已生成，等待確認", previewFailed: "文案生成失敗", needTopic: "請先輸入影片選題", needScript: "請先生成並確認文案", needVoice: "請先選擇一個配音方案", needAvatar: "請先選擇一張主播圖片", produceCreating: "正在建立生產任務...", produceQueued: "任務已送出，正在進入生產佇列...", produceDuplicateHint: "當前任務已在背景執行，請勿重複點擊。", produceFailed: "建立任務失敗", resumeTaskFound: "已恢復背景任務進度", resumeTaskDone: "已恢復上次任務結果", stopTaskBtn: "停止任務", stopTaskStopping: "正在停止...", stopTaskQueued: "已收到停止請求，系統會盡快停止目前任務", stopTaskFailed: "停止任務失敗", taskCancelled: "任務已停止", taskCancelledDesc: "任務已依要求停止。已生成的中間結果會保留。", taskFailed: "任務失敗", taskFailedDesc: "任務執行失敗，請查看日誌。", initFailed: "初始化失敗"
+        configPanelTitle: "音色與主播自由組合", configPanelDesc: "配音方案保留業務上的語言和性別差異，主播選擇只展示圖片本身。", voiceLabel: "配音方案", speedLabel: "語速微調", speedHelper: "目前語速會套用到整條影片的所有配音段落。普通話可以略快，日語和台灣語建議更平穩。", avatarLabel: "選擇主播圖片", produceBtnText: "開始一站式生產", backToScriptBtnText: "返回查看文案", activeTasksTitle: "背景任務", activeTasksDesc: "這裡會顯示目前帳號仍在背景執行的任務。你可以繼續查看任何一條的進度，避免關頁後失去現場。", historyTitle: "歷史任務", historyDesc: "這裡會保留已經落盤的歷史結果。服務重啟後，舊任務也可以繼續打開與下載。", marketVoiceHint: "目前會自動連動對應市場的預設文案語言與配音方案。", segmentTypeDigital: "數位人段", segmentTypeMaterial: "素材段", segmentLabelScript: "段落文案", segmentLabelAction: "數位人動作提示詞", segmentLabelMaterialKeyword: "素材關鍵詞", segmentLabelMaterialDesc: "素材描述", segmentLabelAiRewrite: "告訴 AI 怎麼改這一段", segmentAiPlaceholder: "例如：這一段太生硬，改得更像主播口播一點；或者：這一段素材更想強調真實新聞案例。", segmentAiButton: "AI 修改這一段", aiEditing: "AI 修改中...", aiEditRunning: "正在 AI 修改指定文案段落", aiEditDone: "這段文案已更新", aiEditFailed: "AI 修改失敗", aiEditNeedPrompt: "請先告訴 AI 這一段要怎麼改", progressTitle: "內容生產進行中", progressDesc: "這裡會把目前流程拆成階段，讓營運知道系統現在處理到哪一步，而不是只看到一串技術日誌。", progressWaiting: "等待開始", heroReady: "工作台已就緒", heroRunning: "任務進行中", heroDone: "生產完成", resultTitle: "生產完成", resultSubtitle: "下面是本次任務的完整結果，會按段落把文案、動作詞、配音、數位人影片與素材拆開預覽。", topicPlaceholder: "例如：為什麼越來越多台灣家庭開始關注日本置業？\n或者直接貼上一條新聞連結 / YouTube 連結", noHistory: "暫時還沒有歷史任務。", activeTasksEmpty: "目前沒有背景執行中的任務。", activeTaskGroupRunning: "進行中", activeTaskGroupQueued: "等待數位人", activeTaskGroupStopping: "停止中", activeTaskStageScript: "文案處理中", activeTaskStageAudio: "配音中", activeTaskStageDigitalPreparing: "數位人準備中", activeTaskStageDigitalWaiting: "等待數位人", activeTaskStageDigitalRunning: "數位人生成中", activeTaskStageMaterials: "素材匹配中", activeTaskStageStopping: "已請求停止", activeTaskStep: "步驟 {step}/{total}", activeTaskModeFull: "一站式生產", activeTaskModeTest: "測試任務", activeTaskWatching: "目前查看中", activeTaskOpen: "繼續查看", historyLoadError: "歷史任務載入失敗。", historyDelete: "刪除", historyDeleteConfirm: "確定要刪除這筆歷史任務嗎？刪除後無法恢復。", historyDeleteFailed: "刪除歷史任務失敗。", noAvatar: "目前還沒有可用的數位人主播素材，請先在伺服器 assets 目錄補上圖片。", noAvatarHint: "目前沒有可選主播。", avatarHint: "目前共 {count} 個主播素材，營運可以自由組合音色與主播。", marketDefaultPrefix: "目前目標市場預設", previewLabelTitle: "影片標題", previewLabelCover: "封面標題", previewLabelDuration: "預計總時長", previewLabelWebSearch: "即時聯網檢索", previewLabelMarket: "目標市場", previewLabelDepartment: "業務部門", workflowLabelVoice: "本次配音方案", workflowLabelAvatar: "本次主播圖片", workflowLabelMarketDepartment: "目標市場 / 部門", workflowLabelWebSearch: "即時聯網檢索", workflowAvatarSelected: "已選擇 1 張主播圖片", workflowNotRecorded: "未記錄", workflowWebSearchOn: "已開啟，優先參考最新資訊", workflowWebSearchOff: "未開啟，按一般模型生成", statusOn: "已開啟", statusOff: "未開啟", statusUnset: "未設定", statusNotGenerated: "未生成", statusNone: "暫無", unitSeconds: "秒", unitSegments: "段", voiceSampleFallback: "試聽參考", voiceAutoSelected: "已自動選取", avatarSelectedTag: "已選中", avatarSelectTag: "點擊選擇", progressRunning: "處理中", progressDone: "已完成", resultReadyTitle: "影片內容已生成", resultSubtitlePrefix: "封面標題：", resultSubtitleSegments: "共 {count} 段", resultKpiTitle: "影片標題", resultKpiDuration: "總時長", resultKpiSegments: "完成段數", resultMaterialBlock: "素材關鍵詞與描述", resultKeywordPrefix: "關鍵詞：", resultSearchPrefix: "檢索詞：", resultDescPrefix: "描述：", resultAudioLabel: "對應配音", resultVisualLabel: "視覺結果", resultNoAudio: "暫無配音檔", resultNoVideo: "數位人影片尚未生成", resultNoMaterials: "暫無素材圖", resultNoFiles: "暫無輸出檔案。", resultDownloadVideo: "下載數位人影片", resultRegenerateVideo: "重新生成數位人影片", resultDownloadMaterial: "下載素材", resultDeleteMaterial: "刪除", resultUploadReplace: "上傳替換素材", resultUploadMaterial: "上傳素材", resultPickMaterialsFirst: "請先選擇要上傳的素材圖片", resultUploading: "上傳中...", resultUploadFailed: "上傳素材失敗", resultDeleteFailed: "刪除素材失敗", resultRegenerating: "重新生成中...", resultRegenerateRunning: "正在單獨重生成數位人影片", resultRegenerateDone: "數位人影片已重新生成", resultRegenerateFailed: "數位人重生成失敗", filesDownload: "下載", newsRefTitle: "新聞來源參考", newsRefDesc: "系統已為這段素材文案匹配可直接打開的參考報導或官網連結", newsRefOpen: "查看參考來源", newsRefSource: "新聞來源", scriptTabSegments: "分鏡腳本", scriptTabSocial: "SNS文案", resultTabSegments: "段落預覽", resultTabSocial: "SNS文案", resultTabFiles: "輸出檔案", composeVideo: "一鍵生成成片", finalVideoLabel: "完整成片", finalCoverLabel: "封面圖", finalSubtitleLabel: "字幕檔", downloadFinalVideo: "下載成片", downloadCoverImage: "下載封面", downloadSubtitle: "下載字幕", composingVideo: "正在生成成片...", composeVideoDone: "成片已生成", composeVideoFailed: "生成成片失敗", bundleDownload: "一鍵打包下載", newTaskBtn: "繼續建立下一條", lightboxClose: "關閉", previewGenerating: "文案生成中...", previewGenerated: "文案已生成，等待確認", previewFailed: "文案生成失敗", needTopic: "請先輸入影片選題", needScript: "請先生成並確認文案", needVoice: "請先選擇一個配音方案", needAvatar: "請先選擇一張主播圖片", produceCreating: "正在建立生產任務...", produceQueued: "任務已送出，正在進入生產佇列...", produceDuplicateHint: "當前任務已在背景執行，請勿重複點擊。", produceFailed: "建立任務失敗", resumeTaskFound: "已恢復背景任務進度", resumeTaskDone: "已恢復上次任務結果", stopTaskBtn: "停止任務", stopTaskStopping: "正在停止...", stopTaskQueued: "已收到停止請求，系統會盡快停止目前任務", stopTaskFailed: "停止任務失敗", taskCancelled: "任務已停止", taskCancelledDesc: "任務已依要求停止。已生成的中間結果會保留。", taskFailed: "任務失敗", taskFailedDesc: "任務執行失敗，請查看日誌。", initFailed: "初始化失敗"
       },
       "ja-JP": {
         brandSubtitle: "Video Workflow Studio", workflowEyebrow: "iHouse Workflow", workflowTitle: "制作フロー", workflowIntro: "企画、台本、音声、デジタルヒューマン、素材確認までを1ページで進められます。",
+        workflowStep1: "ステップ 1", workflowStep2: "ステップ 2", workflowStep3: "ステップ 3", workflowStep4: "ステップ 4",
+        workflowPillTitle1: "テーマ入力", workflowPillDesc1: "テーマ、市場、検索有無を先に決めます。",
+        workflowPillTitle2: "台本確認", workflowPillDesc2: "各段落を確認し、編集中の部分だけ開きます。",
+        workflowPillTitle3: "制作中", workflowPillDesc3: "まずは要約だけ見て、詳細ログは必要時に展開します。",
+        workflowPillTitle4: "結果確認", workflowPillDesc4: "納品結果を先に見て、必要な素材やファイルだけ確認します。",
         usageTitle1: "テーマ入力", usageDesc1: "まず動画全体の台本を生成し、いきなり本番処理は行いません。", usageTitle2: "台本確認", usageDesc2: "各セグメントの文案、動き、素材説明を確認してから制作に進みます。", usageTitle3: "設定選択", usageDesc3: "音声プランとアバター画像を分けて選び、自由に組み合わせます。", usageTitle4: "結果確認", usageDesc4: "完成後は各段落ごとに動画・音声・素材・出力ファイルを確認し、必要なら部分修正します。",
         workspaceKicker: "Workspace", workspaceTitle: "テーマから制作タスクを開始", workspaceDesc: "最初にテーマを決め、次に台本を確認し、その後で音声とアバターを組み合わせて動画全体を制作します。",
         stepTitle1: "01 テーマ入力", stepDesc1: "最初に内容の軸を明確にします。", stepTitle2: "02 台本確認", stepDesc2: "タイトル、カバー文、各セグメントを確認してから次へ進みます。", stepTitle3: "03 スタイル選択", stepDesc3: "音声とアバターを分けて選択し、自由に組み合わせます。",
@@ -2227,6 +2248,8 @@
         topInterfaceLanguageLabel: "画面言語", departmentLabel: "部門", targetMarketLabel: "対象市場", topicInputLabel: "動画テーマ", topicHelper: "この枠にはテーマを書くことも、リンクを貼ることもできます。システムが自動で判定します。", sourcePanelTitle: "認識したソース", sourceTypeNews: "ニュースリンク", sourceTypeYoutube: "YouTube動画", sourceTypeWeb: "ウェブソース", sourceLanguageLabel: "元の言語", sourceMethodLabel: "抽出方法", sourceMethodSubtitle: "字幕取得", sourceMethodWhisper: "Whisper文字起こし", sourceMethodPageSummary: "ページ要約", sourceFullTextToggle: "全文を見る", sourceFullTextHide: "全文を閉じる",
         webSearchTitle: "Claude リアルタイム検索を有効化", webSearchDesc: "最新ニュース、政策、ロボット動向、法改正など時事性の高い内容に向いています。",
         previewBtnText: "台本を生成", regenBtnText: "再生成", resetBtnText: "リセット", sourceExtracting: "ソース内容を抽出しています...", sourceTryingSubtitle: "字幕の取得を試しています...", sourceTranscribing: "音声を文字起こししています...",
+        topicPlaceholder: "例えば：なぜ台湾の家庭は日本の不動産に注目し始めているのか？\nまたはニュースリンク / YouTubeリンクを直接貼り付けてください",
+        progressSectionKicker: "Production", resultSectionKicker: "Result", queueDisclosureLabel: "キュー詳細を見る", logDisclosureLabel: "詳細ログを見る", progressSummaryStageLabel: "現在の段階", progressSummaryStatusLabel: "最新ステータス",
         scriptPanelTitle: "台本を確認してから制作へ", scriptPanelDesc: "デジタルヒューマン段は動作指示のみ、素材段はキーワードと説明のみを表示します。",
       }
     };
@@ -2498,8 +2521,43 @@
         const node = document.getElementById(id);
         if (node) node.textContent = value;
       });
+      const workflowPillStep1 = document.getElementById('workflowPillStep1');
+      const workflowPillStep2 = document.getElementById('workflowPillStep2');
+      const workflowPillStep3 = document.getElementById('workflowPillStep3');
+      const workflowPillStep4 = document.getElementById('workflowPillStep4');
+      const workflowPillTitle1 = document.getElementById('workflowPillTitle1');
+      const workflowPillTitle2 = document.getElementById('workflowPillTitle2');
+      const workflowPillTitle3 = document.getElementById('workflowPillTitle3');
+      const workflowPillTitle4 = document.getElementById('workflowPillTitle4');
+      const workflowPillDesc1 = document.getElementById('workflowPillDesc1');
+      const workflowPillDesc2 = document.getElementById('workflowPillDesc2');
+      const workflowPillDesc3 = document.getElementById('workflowPillDesc3');
+      const workflowPillDesc4 = document.getElementById('workflowPillDesc4');
+      if (workflowPillStep1) workflowPillStep1.textContent = dict.workflowStep1 || 'Step 1';
+      if (workflowPillStep2) workflowPillStep2.textContent = dict.workflowStep2 || 'Step 2';
+      if (workflowPillStep3) workflowPillStep3.textContent = dict.workflowStep3 || 'Step 3';
+      if (workflowPillStep4) workflowPillStep4.textContent = dict.workflowStep4 || 'Step 4';
+      if (workflowPillTitle1) workflowPillTitle1.textContent = dict.workflowPillTitle1 || workflowPillTitle1.textContent;
+      if (workflowPillTitle2) workflowPillTitle2.textContent = dict.workflowPillTitle2 || workflowPillTitle2.textContent;
+      if (workflowPillTitle3) workflowPillTitle3.textContent = dict.workflowPillTitle3 || workflowPillTitle3.textContent;
+      if (workflowPillTitle4) workflowPillTitle4.textContent = dict.workflowPillTitle4 || workflowPillTitle4.textContent;
+      if (workflowPillDesc1) workflowPillDesc1.textContent = dict.workflowPillDesc1 || workflowPillDesc1.textContent;
+      if (workflowPillDesc2) workflowPillDesc2.textContent = dict.workflowPillDesc2 || workflowPillDesc2.textContent;
+      if (workflowPillDesc3) workflowPillDesc3.textContent = dict.workflowPillDesc3 || workflowPillDesc3.textContent;
+      if (workflowPillDesc4) workflowPillDesc4.textContent = dict.workflowPillDesc4 || workflowPillDesc4.textContent;
+      const progressSectionKicker = document.getElementById('progressSectionKicker');
+      const resultSectionKicker = document.getElementById('resultSectionKicker');
+      const queueDisclosureLabel = document.getElementById('queueDisclosureLabel');
+      const logDisclosureLabel = document.getElementById('logDisclosureLabel');
+      if (progressSectionKicker) progressSectionKicker.textContent = dict.progressSectionKicker || progressSectionKicker.textContent;
+      if (resultSectionKicker) resultSectionKicker.textContent = dict.resultSectionKicker || resultSectionKicker.textContent;
+      if (queueDisclosureLabel) queueDisclosureLabel.textContent = dict.queueDisclosureLabel || queueDisclosureLabel.textContent;
+      if (logDisclosureLabel) logDisclosureLabel.textContent = dict.logDisclosureLabel || logDisclosureLabel.textContent;
+      if (els.progressTitle) els.progressTitle.textContent = dict.progressTitle || els.progressTitle.textContent;
+      if (els.progressDesc) els.progressDesc.textContent = dict.progressDesc || els.progressDesc.textContent;
+      if (els.resultSubtitle) els.resultSubtitle.textContent = dict.resultSubtitle || els.resultSubtitle.textContent;
       els.topicInput.placeholder = dict.topicPlaceholder || "例如：为什么越来越多台湾家庭开始关注日本置业？";
-      document.documentElement.lang = lang === 'ja-JP' ? 'ja' : 'zh-CN';
+      document.documentElement.lang = lang === 'ja-JP' ? 'ja' : (lang === 'zh-TW' ? 'zh-TW' : 'zh-CN');
       const scriptTabSegments = document.getElementById('scriptTabSegments');
       const scriptTabSocial = document.getElementById('scriptTabSocial');
       const resultTabSegments = document.getElementById('resultTabSegments');
@@ -3008,6 +3066,7 @@
     function renderProgressShell() {
       els.progressPanel.classList.add('active');
       els.resultPanel.classList.remove('active');
+      const progressLabels = progressLabelsForLanguage(state.selectedInterfaceLanguage);
       els.progressSteps.innerHTML = progressLabels.map((label, index) => `
         <div class="progress-item" id="progressStep${index + 1}">
           <div class="progress-dot"></div>
@@ -3022,11 +3081,11 @@
       if (els.progressSummary) {
         els.progressSummary.innerHTML = `
           <div class="insight-card">
-            <div class="label">当前阶段</div>
+            <div class="label">${escapeHtml(copyText('progressSummaryStageLabel', '当前阶段'))}</div>
             <div class="value">${escapeHtml(copyText('progressRunning', '正在处理'))}</div>
           </div>
           <div class="insight-card">
-            <div class="label">最新状态</div>
+            <div class="label">${escapeHtml(copyText('progressSummaryStatusLabel', '最新状态'))}</div>
             <div class="value">${escapeHtml(copyText('produceQueued', '任务已提交，正在进入生产队列...'))}</div>
           </div>
         `;
@@ -3058,6 +3117,7 @@
     }
 
     function updateProgress(step, message) {
+      const progressLabels = progressLabelsForLanguage(state.selectedInterfaceLanguage);
       progressLabels.forEach((label, index) => {
         const node = document.getElementById(`progressStep${index + 1}`);
         if (!node) return;
@@ -3071,11 +3131,11 @@
         const stageLabel = progressLabels[Math.max(0, Number(step || 1) - 1)] || copyText('progressRunning', '正在处理');
         els.progressSummary.innerHTML = `
           <div class="insight-card">
-            <div class="label">当前阶段</div>
+            <div class="label">${escapeHtml(copyText('progressSummaryStageLabel', '当前阶段'))}</div>
             <div class="value">${escapeHtml(stageLabel)}</div>
           </div>
           <div class="insight-card">
-            <div class="label">最新状态</div>
+            <div class="label">${escapeHtml(copyText('progressSummaryStatusLabel', '最新状态'))}</div>
             <div class="value">${escapeHtml(message || copyText('progressRunning', '正在处理'))}</div>
           </div>
         `;
