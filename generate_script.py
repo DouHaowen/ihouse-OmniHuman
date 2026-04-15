@@ -13,7 +13,7 @@ import anthropic
 import requests
 from dotenv import load_dotenv
 
-load_dotenv(override=False)
+load_dotenv(override=True)
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -269,6 +269,10 @@ def _get_openai_fallback_model() -> str:
     return (os.getenv("OPENAI_FALLBACK_MODEL") or "gpt-5-mini").strip()
 
 
+def _get_openai_compat_fallback_model() -> str:
+    return (os.getenv("OPENAI_COMPAT_FALLBACK_MODEL") or "gpt-5-mini").strip()
+
+
 def _is_retryable_anthropic_error(exc: Exception) -> bool:
     status_code = getattr(exc, "status_code", None)
     text = str(exc).lower()
@@ -283,6 +287,16 @@ def _is_anthropic_overloaded_error(exc: Exception) -> bool:
     return status_code == 529 or "overloaded_error" in text or "overloaded" in text
 
 
+def _is_anthropic_billing_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "credit balance is too low" in text
+        or "purchase credits" in text
+        or "plans & billing" in text
+        or "billing" in text and "anthropic" in text
+    )
+
+
 def _create_message_with_retry(**kwargs):
     attempts = max(1, int(os.getenv("ANTHROPIC_RETRY_ATTEMPTS", "6")))
     base_delay = max(1.0, float(os.getenv("ANTHROPIC_RETRY_BASE_DELAY_SECONDS", "3")))
@@ -292,8 +306,9 @@ def _create_message_with_retry(**kwargs):
             return client.messages.create(**kwargs)
         except Exception as exc:
             last_error = exc
-            if _is_anthropic_overloaded_error(exc) and _get_openai_api_key():
-                raise UpstreamBusyError("Claude 当前过载，切换到 OpenAI 备用模型") from exc
+            if (_is_anthropic_overloaded_error(exc) or _is_anthropic_billing_error(exc)) and _get_openai_api_key():
+                fallback_reason = "Claude 当前过载" if _is_anthropic_overloaded_error(exc) else "Claude 账户余额不足"
+                raise UpstreamBusyError(f"{fallback_reason}，切换到 OpenAI 备用模型") from exc
             if not _is_retryable_anthropic_error(exc) or attempt >= attempts:
                 break
             time.sleep(base_delay * attempt)
@@ -336,11 +351,52 @@ def _extract_openai_text(payload: dict) -> str:
     return text
 
 
+def _extract_openai_responses_text(payload: dict) -> str:
+    output_text = (payload.get("output_text") or "").strip()
+    if output_text:
+        return output_text
+
+    texts = []
+    for item in payload.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, dict):
+                continue
+            if content.get("type") in {"output_text", "text"} and content.get("text"):
+                texts.append(str(content.get("text")).strip())
+    merged = "\n".join(part for part in texts if part).strip()
+    if not merged:
+        raise ValueError("OpenAI Responses API 未返回可解析的文本内容")
+    return merged
+
+
 def _extract_usage_from_openai_payload(payload: dict) -> dict:
     usage_obj = payload.get("usage") or {}
     return {
         "input_tokens": int(usage_obj.get("prompt_tokens", 0) or 0),
         "output_tokens": int(usage_obj.get("completion_tokens", 0) or 0),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "web_search_calls": 0,
+    }
+
+
+def _extract_usage_from_openai_responses_payload(payload: dict) -> dict:
+    usage_obj = payload.get("usage") or {}
+    input_tokens = 0
+    output_tokens = 0
+    if isinstance(usage_obj.get("input_tokens"), int):
+        input_tokens = int(usage_obj.get("input_tokens", 0) or 0)
+    elif isinstance((usage_obj.get("input_tokens_details") or {}).get("total_tokens"), int):
+        input_tokens = int((usage_obj.get("input_tokens_details") or {}).get("total_tokens", 0) or 0)
+    if isinstance(usage_obj.get("output_tokens"), int):
+        output_tokens = int(usage_obj.get("output_tokens", 0) or 0)
+    elif isinstance((usage_obj.get("output_tokens_details") or {}).get("total_tokens"), int):
+        output_tokens = int((usage_obj.get("output_tokens_details") or {}).get("total_tokens", 0) or 0)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
         "web_search_calls": 0,
@@ -390,11 +446,31 @@ def _repair_schema_with_openai(raw_payload: dict, max_tokens: int, target_market
 原始 JSON：
 {json.dumps(raw_payload, ensure_ascii=False, indent=2)}
 """
+    data, repair_usage = _request_json_from_openai(
+        repair_prompt,
+        max_tokens=max_tokens,
+        target_market=target_market,
+        department_id=department_id,
+    )
+    if not _has_expected_script_shape(data):
+        raise ValueError("OpenAI schema repair 后仍未返回符合要求的脚本结构")
+    return data, repair_usage
+
+
+def _request_json_from_openai_chat(
+    *,
+    api_key: str,
+    model_name: str,
+    user_prompt: str,
+    max_tokens: int,
+    target_market: str,
+    department_id: str,
+) -> tuple[dict, dict]:
     payload = {
-        "model": _get_openai_fallback_model(),
+        "model": model_name,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)},
-            {"role": "user", "content": repair_prompt},
+            {"role": "user", "content": user_prompt},
         ],
         "max_completion_tokens": max_tokens,
     }
@@ -412,9 +488,47 @@ def _repair_schema_with_openai(raw_payload: dict, max_tokens: int, target_market
     body = response.json()
     raw = _extract_openai_text(body)
     data, repair_usage = _parse_json_response(raw)
-    if not _has_expected_script_shape(data):
-        raise ValueError("OpenAI schema repair 后仍未返回符合要求的脚本结构")
-    return data, _merge_usage(_extract_usage_from_openai_payload(body), repair_usage)
+    usage = _merge_usage(_extract_usage_from_openai_payload(body), repair_usage)
+    return data, usage
+
+
+def _request_json_from_openai_responses(
+    *,
+    api_key: str,
+    model_name: str,
+    user_prompt: str,
+    max_tokens: int,
+    target_market: str,
+    department_id: str,
+) -> tuple[dict, dict]:
+    payload = {
+        "model": model_name,
+        "input": user_prompt,
+        "instructions": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id),
+        "max_output_tokens": max_tokens,
+        "reasoning": {"effort": "minimal"},
+        "text": {
+            "format": {
+                "type": "json_object"
+            }
+        },
+    }
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=180,
+    )
+    if response.status_code >= 400:
+        raise requests.HTTPError(response.text[:500], response=response)
+    body = response.json()
+    raw = _extract_openai_responses_text(body)
+    data, repair_usage = _parse_json_response(raw)
+    usage = _merge_usage(_extract_usage_from_openai_responses_payload(body), repair_usage)
+    return data, usage
 
 
 def _request_json_from_openai(user_prompt: str, max_tokens: int, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
@@ -422,46 +536,56 @@ def _request_json_from_openai(user_prompt: str, max_tokens: int, target_market: 
     if not api_key:
         raise OpenAIFallbackUnavailableError("未配置 OPENAI_API_KEY")
 
-    payload = {
-        "model": _get_openai_fallback_model(),
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_completion_tokens": max_tokens,
-    }
+    models_to_try = []
+    primary_model = _get_openai_fallback_model()
+    compat_model = _get_openai_compat_fallback_model()
+    for model_name in [primary_model, compat_model]:
+        if model_name and model_name not in models_to_try:
+            models_to_try.append(model_name)
     attempts = max(1, int(os.getenv("OPENAI_RETRY_ATTEMPTS", "3")))
     base_delay = max(1.0, float(os.getenv("OPENAI_RETRY_BASE_DELAY_SECONDS", "2")))
     last_error = None
-    for attempt in range(1, attempts + 1):
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=180,
-            )
-            if response.status_code >= 400:
-                raise requests.HTTPError(response.text[:500], response=response)
-            body = response.json()
-            raw = _extract_openai_text(body)
-            data, repair_usage = _parse_json_response(raw)
-            usage = _merge_usage(_extract_usage_from_openai_payload(body), repair_usage)
-            if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
-                data, schema_usage = _repair_schema_with_openai(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
-                usage = _merge_usage(usage, schema_usage)
-            return data, usage
-        except Exception as exc:
-            last_error = exc
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code not in {408, 409, 429, 500, 502, 503, 504} and "timeout" not in str(exc).lower():
-                break
-            if attempt >= attempts:
-                break
-            time.sleep(base_delay * attempt)
+    for model_name in models_to_try:
+        for attempt in range(1, attempts + 1):
+            try:
+                if model_name.lower().startswith("gpt-5"):
+                    data, usage = _request_json_from_openai_responses(
+                        api_key=api_key,
+                        model_name=model_name,
+                        user_prompt=user_prompt,
+                        max_tokens=max_tokens,
+                        target_market=target_market,
+                        department_id=department_id,
+                    )
+                else:
+                    data, usage = _request_json_from_openai_chat(
+                        api_key=api_key,
+                        model_name=model_name,
+                        user_prompt=user_prompt,
+                        max_tokens=max_tokens,
+                        target_market=target_market,
+                        department_id=department_id,
+                    )
+                if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
+                    data, schema_usage = _repair_schema_with_openai(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+                    usage = _merge_usage(usage, schema_usage)
+                return data, usage
+            except Exception as exc:
+                last_error = exc
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                error_text = str(exc).lower()
+                should_try_next_model = (
+                    "openai 未返回可解析的文本内容" in str(exc)
+                    or "responses api 未返回可解析的文本内容" in error_text
+                    or "finish_reason" in error_text
+                )
+                if should_try_next_model:
+                    break
+                if status_code not in {408, 409, 429, 500, 502, 503, 504} and "timeout" not in error_text:
+                    break
+                if attempt >= attempts:
+                    break
+                time.sleep(base_delay * attempt)
     if last_error:
         raise last_error
     raise ValueError("OpenAI fallback 请求失败")

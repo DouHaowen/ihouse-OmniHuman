@@ -51,7 +51,8 @@ ADMIN_AVATAR_JOBS_LOCK = threading.Lock()
 AVATAR_DISPLAY_NAME_MAP = {
     "avatar_test_0cd3d70a.png": "女主播A",
     "avatar_host_c.png": "男主播A",
-    "avatar_test_new_01.png": "林晨专属",
+    "avatar_test_new_01.png": "男主播B",
+    "avatar_custom_林晨专属_male_manual.png": "林晨专属",
 }
 AVATAR_OPTION_EXCLUDE_FILENAMES = {"ihouse-logo.webp"}
 AVATAR_RULES = {
@@ -72,6 +73,13 @@ AVATAR_RULES = {
         },
     },
     "avatar_test_new_01.png": {
+        "gender": "male",
+        "allowed_target_markets": ["cn"],
+        "preferred_voice_by_market": {
+            "cn": "mandarin_male",
+        },
+    },
+    "avatar_custom_林晨专属_male_manual.png": {
         "gender": "male",
         "allowed_target_markets": ["cn"],
         "preferred_voice_by_market": {
