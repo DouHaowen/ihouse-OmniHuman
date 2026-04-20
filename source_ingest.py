@@ -1,5 +1,6 @@
 import html
 import json
+import os
 import re
 import tempfile
 from dataclasses import dataclass
@@ -31,6 +32,50 @@ YOUTUBE_HOSTS = {
     "youtu.be",
 }
 
+BILIBILI_HOSTS = {
+    "bilibili.com",
+    "www.bilibili.com",
+    "m.bilibili.com",
+    "b23.tv",
+}
+
+DOUYIN_HOSTS = {
+    "douyin.com",
+    "www.douyin.com",
+    "v.douyin.com",
+    "iesdouyin.com",
+    "www.iesdouyin.com",
+}
+
+XIAOHONGSHU_HOSTS = {
+    "xiaohongshu.com",
+    "www.xiaohongshu.com",
+    "m.xiaohongshu.com",
+    "xhslink.com",
+    "www.xhslink.com",
+}
+
+VIDEO_PLATFORM_CONFIGS = {
+    "bilibili": {
+        "hosts": BILIBILI_HOSTS,
+        "label": "B站视频",
+        "prefix": "B站来源",
+        "cookies_env": "BILIBILI_COOKIES_FILE",
+    },
+    "douyin": {
+        "hosts": DOUYIN_HOSTS,
+        "label": "抖音视频",
+        "prefix": "抖音来源",
+        "cookies_env": "DOUYIN_COOKIES_FILE",
+    },
+    "xiaohongshu": {
+        "hosts": XIAOHONGSHU_HOSTS,
+        "label": "小红书视频",
+        "prefix": "小红书来源",
+        "cookies_env": "XHS_COOKIES_FILE",
+    },
+}
+
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
@@ -41,6 +86,21 @@ YOUTUBE_COOKIES = {
 }
 
 _whisper_model_cache: dict[str, object] = {}
+
+
+def _host_matches(host: str, hosts: set[str]) -> bool:
+    host = (host or "").lower().split(":")[0]
+    return any(host == item or host.endswith(f".{item}") for item in hosts)
+
+
+def _video_platform_for_url(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    if _host_matches(host, YOUTUBE_HOSTS):
+        return "youtube"
+    for platform, config in VIDEO_PLATFORM_CONFIGS.items():
+        if _host_matches(host, config["hosts"]):
+            return platform
+    return ""
 
 
 @dataclass
@@ -137,10 +197,11 @@ def _split_input_text(raw_text: str) -> tuple[str, str]:
 
 
 def _fetch_html(url: str) -> str:
+    host = urlparse(url).netloc.lower()
     response = requests.get(
         url,
         headers=DEFAULT_HEADERS,
-        cookies=YOUTUBE_COOKIES if "youtube.com" in urlparse(url).netloc.lower() or "youtu.be" in urlparse(url).netloc.lower() else None,
+        cookies=YOUTUBE_COOKIES if _host_matches(host, YOUTUBE_HOSTS) else None,
         timeout=20,
         allow_redirects=True,
     )
@@ -206,14 +267,15 @@ def _pick_caption_track(caption_tracks: list[dict]) -> dict:
     return caption_tracks[0]
 
 
-def _fetch_youtube_transcript(caption_url: str) -> str:
+def _fetch_caption_text(caption_url: str, cookies: dict | None = None) -> str:
     if not caption_url:
         return ""
-    caption_url = _replace_query_params(caption_url, fmt="json3")
+    if "youtube.com" in urlparse(caption_url).netloc.lower() or "googlevideo.com" in urlparse(caption_url).netloc.lower():
+        caption_url = _replace_query_params(caption_url, fmt="json3")
     response = requests.get(
         caption_url,
         headers=DEFAULT_HEADERS,
-        cookies=YOUTUBE_COOKIES,
+        cookies=cookies,
         timeout=15,
         allow_redirects=True,
     )
@@ -228,11 +290,32 @@ def _fetch_youtube_transcript(caption_url: str) -> str:
         except Exception:
             payload = {}
         chunks = []
-        for event in payload.get("events") or []:
-            for seg in event.get("segs") or []:
+        events = payload.get("events") or payload.get("body") or []
+        if isinstance(events, dict):
+            events = events.get("events") or []
+        for event in events:
+            segments = event.get("segs") or event.get("content") or []
+            if isinstance(segments, str):
+                segments = [{"utf8": segments}]
+            for seg in segments:
                 piece = _clean_text(seg.get("utf8", ""))
+                if not piece:
+                    piece = _clean_text(seg.get("text", ""))
                 if piece:
                     chunks.append(piece)
+        return _clean_text(" ".join(chunks))
+
+    if raw_text.lstrip().startswith("WEBVTT") or "\n-->" in raw_text:
+        chunks = []
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("WEBVTT") or "-->" in line:
+                continue
+            if re.fullmatch(r"\d+", line):
+                continue
+            if line.startswith(("NOTE", "STYLE", "REGION")):
+                continue
+            chunks.append(_strip_tags(line))
         return _clean_text(" ".join(chunks))
 
     try:
@@ -247,6 +330,10 @@ def _fetch_youtube_transcript(caption_url: str) -> str:
             chunks.append(piece)
     transcript = " ".join(chunks)
     return _clean_text(transcript)
+
+
+def _fetch_youtube_transcript(caption_url: str) -> str:
+    return _fetch_caption_text(caption_url, cookies=YOUTUBE_COOKIES)
 
 
 def _fetch_best_youtube_transcript(caption_tracks: list[dict]) -> tuple[str, str]:
@@ -266,11 +353,29 @@ def _fetch_best_youtube_transcript(caption_tracks: list[dict]) -> tuple[str, str
     return "", ""
 
 
-def _yt_dlp_extract_info(url: str) -> dict:
+def _yt_dlp_options(*, skip_download: bool = True, platform: str = "") -> dict:
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    if skip_download:
+        opts["skip_download"] = True
+    cookies_env = ""
+    if platform in VIDEO_PLATFORM_CONFIGS:
+        cookies_env = VIDEO_PLATFORM_CONFIGS[platform].get("cookies_env", "")
+    cookie_file = os.getenv(cookies_env or "", "").strip() if cookies_env else ""
+    cookie_file = cookie_file or os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if cookie_file and Path(cookie_file).exists():
+        opts["cookiefile"] = cookie_file
+    return opts
+
+
+def _yt_dlp_extract_info(url: str, platform: str = "") -> dict:
     if yt_dlp is None:
         return {}
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}) as ydl:
+        with yt_dlp.YoutubeDL(_yt_dlp_options(skip_download=True, platform=platform)) as ydl:
             return ydl.extract_info(url, download=False) or {}
     except Exception:
         return {}
@@ -296,18 +401,16 @@ def _pick_yt_dlp_caption(info: dict) -> tuple[str, str]:
     return "", ""
 
 
-def _download_youtube_audio(url: str) -> Path | None:
+def _download_platform_audio(url: str, platform: str = "youtube") -> Path | None:
     if yt_dlp is None:
         return None
-    work_dir = Path(tempfile.mkdtemp(prefix="yt-audio-"))
+    work_dir = Path(tempfile.mkdtemp(prefix=f"{platform}-audio-"))
     outtmpl = str(work_dir / "audio.%(ext)s")
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
+    opts = _yt_dlp_options(skip_download=False, platform=platform)
+    opts.update({
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
-        "noplaylist": True,
-    }
+    })
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -320,6 +423,10 @@ def _download_youtube_audio(url: str) -> Path | None:
     except Exception:
         return None
     return None
+
+
+def _download_youtube_audio(url: str) -> Path | None:
+    return _download_platform_audio(url, platform="youtube")
 
 
 def _transcribe_audio(audio_path: Path) -> tuple[str, str]:
@@ -345,6 +452,109 @@ def _summarize_transcript(transcript: str, limit: int = 360) -> tuple[str, str]:
     summary = cleaned[:limit].rsplit(" ", 1)[0] if len(cleaned) > limit else cleaned
     excerpt = cleaned[: min(len(cleaned), 1200)]
     return _clean_text(summary), _clean_text(excerpt)
+
+
+def _metadata_from_ytdlp_info(info: dict) -> tuple[str, str, str]:
+    title = _clean_text(info.get("title", ""))
+    source_name = _clean_text(
+        info.get("uploader", "")
+        or info.get("channel", "")
+        or info.get("creator", "")
+        or info.get("artist", "")
+    )
+    description = _clean_text(info.get("description", "") or info.get("summary", ""))
+    return title, source_name, description
+
+
+def _summarize_video_platform(url: str, platform: str) -> SourceAnalysis:
+    config = VIDEO_PLATFORM_CONFIGS.get(platform, {})
+    platform_label = config.get("label", "视频")
+    title = ""
+    source_name = ""
+    summary = ""
+    excerpt = ""
+    error = ""
+    transcript = ""
+    transcript_language = ""
+    extraction_method = ""
+    html_text = ""
+
+    try:
+        info = _yt_dlp_extract_info(url, platform=platform)
+        if info:
+            title, source_name, summary = _metadata_from_ytdlp_info(info)
+            subtitle_url, subtitle_lang = _pick_yt_dlp_caption(info)
+            if subtitle_url:
+                try:
+                    transcript = _fetch_caption_text(subtitle_url)
+                    transcript_language = subtitle_lang
+                    if transcript:
+                        extraction_method = f"{platform}_subtitle"
+                except Exception as exc:
+                    error = str(exc)
+
+        if not transcript:
+            audio_path = _download_platform_audio(url, platform=platform)
+            if audio_path:
+                transcript, transcript_language = _transcribe_audio(audio_path)
+                if transcript:
+                    extraction_method = "whisper_audio"
+                try:
+                    audio_path.unlink(missing_ok=True)
+                    if audio_path.parent.name.startswith(f"{platform}-audio-"):
+                        audio_path.parent.rmdir()
+                except Exception:
+                    pass
+
+        if not title or not summary or not excerpt:
+            try:
+                html_text = _fetch_html(url)
+                title = title or _extract_title(html_text)
+                source_name = source_name or _extract_meta(html_text, ["og:site_name"]) or platform_label
+                summary = summary or _extract_meta(html_text, ["og:description", "description"])
+                excerpt = " ".join(_extract_paragraphs(html_text, limit=4))
+            except Exception as exc:
+                if not error:
+                    error = str(exc)
+
+        transcript_summary, transcript_excerpt = _summarize_transcript(transcript)
+        if transcript_summary:
+            summary = transcript_summary
+        if transcript_excerpt:
+            excerpt = transcript_excerpt
+        summary = _clean_text(summary)
+        excerpt = _clean_text(excerpt or summary)
+        if not summary:
+            summary = f"{platform_label}公开摘要较少，建议结合标题与页面信息提炼脚本角度。"
+        if transcript_language and transcript_language not in {source_name, title}:
+            source_name = f"{source_name or platform_label} · 字幕 {transcript_language}"
+    except Exception as exc:
+        if not error:
+            error = str(exc)
+
+    if (summary or excerpt) and error and transcript:
+        error = ""
+
+    return SourceAnalysis(
+        kind=platform,
+        url=url,
+        title=title or platform_label,
+        source_name=source_name or platform_label,
+        source_language=transcript_language,
+        extraction_method=extraction_method or ("page_summary" if summary else ""),
+        summary=summary,
+        excerpt=excerpt,
+        normalized_topic=_build_generation_topic(
+            kind=platform,
+            url=url,
+            title=title or platform_label,
+            source_name=source_name or platform_label,
+            summary=summary,
+            excerpt=excerpt,
+            user_note="",
+        ),
+        error=error,
+    )
 
 
 def _summarize_youtube(url: str) -> SourceAnalysis:
@@ -376,7 +586,7 @@ def _summarize_youtube(url: str) -> SourceAnalysis:
         error = str(exc)
 
     try:
-        ytdlp_info = _yt_dlp_extract_info(url)
+        ytdlp_info = _yt_dlp_extract_info(url, platform="youtube")
         if ytdlp_info:
             title = title or _clean_text(ytdlp_info.get("title", ""))
             source_name = source_name or _clean_text(ytdlp_info.get("uploader", "") or ytdlp_info.get("channel", ""))
@@ -504,6 +714,8 @@ def _build_generation_topic(*, kind: str, url: str, title: str, source_name: str
     lines = []
     if kind == "youtube":
         lines.append("【YouTube来源】")
+    elif kind in VIDEO_PLATFORM_CONFIGS:
+        lines.append(f"【{VIDEO_PLATFORM_CONFIGS[kind].get('prefix', '视频来源')}】")
     elif kind == "news":
         lines.append("【新闻来源】")
     else:
@@ -528,9 +740,22 @@ def _analyze_source_url(raw_source_url: str, user_note: str = "") -> SourceAnaly
     if not source_url:
         source_url = _clean_text(raw_source_url)
     combined_note = _clean_text(" ".join(part for part in [user_note, extra_note] if part))
-    host = urlparse(source_url).netloc.lower()
-    if host in YOUTUBE_HOSTS:
+    platform = _video_platform_for_url(source_url)
+    if platform == "youtube":
         source = _summarize_youtube(source_url)
+        source.user_note = combined_note
+        source.normalized_topic = _build_generation_topic(
+            kind=source.kind,
+            url=source.url,
+            title=source.title,
+            source_name=source.source_name,
+            summary=source.summary,
+            excerpt=source.excerpt,
+            user_note=combined_note,
+        )
+        return source
+    if platform in VIDEO_PLATFORM_CONFIGS:
+        source = _summarize_video_platform(source_url, platform)
         source.user_note = combined_note
         source.normalized_topic = _build_generation_topic(
             kind=source.kind,
