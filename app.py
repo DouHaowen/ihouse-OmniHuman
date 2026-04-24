@@ -19,7 +19,7 @@ import zipfile
 from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
 from dotenv import load_dotenv
@@ -32,6 +32,13 @@ from starlette.middleware.sessions import SessionMiddleware
 load_dotenv(override=False)
 
 from avatar_generator import AvatarGenerationError, generate_avatar_candidates
+from material_library import (
+    MATERIAL_LIBRARY_DIR,
+    delete_material_library_item,
+    list_material_library_items,
+    register_material_file,
+    update_material_library_item,
+)
 from source_ingest import analyze_topic_fields, analyze_topic_input
 
 app = FastAPI(title="iHouse 内容工作台")
@@ -45,14 +52,17 @@ ASSETS_DIR = BASE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
 AVATAR_LIBRARY_MANIFEST_PATH = ASSETS_DIR / "avatar_library_manifest.json"
 AVATAR_LIBRARY_LOCK = threading.Lock()
+MATERIAL_LIBRARY_PUBLIC_DIR = MATERIAL_LIBRARY_DIR
 ADMIN_AVATAR_JOBS: dict[str, dict] = {}
 ADMIN_AVATAR_JOBS_LOCK = threading.Lock()
 
 AVATAR_DISPLAY_NAME_MAP = {
     "avatar_test_0cd3d70a.png": "女主播A",
     "avatar_host_c.png": "男主播A",
+    "avatar_host_d.png": "女主播C",
+    "avatar_ultraman.png": "奥特曼",
     "avatar_test_new_01.png": "男主播B",
-    "avatar_custom_林晨专属_male_manual.png": "林晨专属",
+    "avatar_custom_林晨专属_male_manual.png": "男主播B",
 }
 AVATAR_OPTION_EXCLUDE_FILENAMES = {"ihouse-logo.webp"}
 AVATAR_RULES = {
@@ -70,6 +80,24 @@ AVATAR_RULES = {
         "allowed_target_markets": ["cn"],
         "preferred_voice_by_market": {
             "cn": "mandarin_male",
+        },
+    },
+    "avatar_host_d.png": {
+        "gender": "female",
+        "allowed_target_markets": ["cn", "tw", "jp"],
+        "preferred_voice_by_market": {
+            "cn": "mandarin_female",
+            "tw": "taiwan_clone",
+            "jp": "japanese_female",
+        },
+    },
+    "avatar_ultraman.png": {
+        "gender": "male",
+        "allowed_target_markets": ["cn", "tw", "jp"],
+        "preferred_voice_by_market": {
+            "cn": "mandarin_male",
+            "tw": "taiwan_clone",
+            "jp": "japanese_female",
         },
     },
     "avatar_test_new_01.png": {
@@ -417,6 +445,20 @@ def _delete_avatar_library_file(filename: str) -> dict:
         _save_avatar_library_manifest(manifest)
     file_path.unlink(missing_ok=True)
     return {"filename": safe_name}
+
+
+def _material_library_item_payload(item: dict, current_user: Optional[dict] = None) -> dict:
+    payload = dict(item or {})
+    payload["url"] = f"/public/material-library/{quote(str(payload.get('filename') or ''))}"
+    payload["can_review"] = bool(current_user and _is_admin(current_user))
+    payload["can_delete"] = bool(
+        current_user
+        and (
+            _is_admin(current_user)
+            or str(payload.get("uploader_username") or "") == str(current_user.get("username") or "")
+        )
+    )
+    return payload
 
 
 class ProgressTracker:
@@ -951,6 +993,7 @@ def run_pipeline_with_progress(
             seg_with_audio["audio_path"] = audio_path
             seg_with_audio["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
             seg_with_audio["target_market"] = target_market
+            seg_with_audio["department_id"] = department_id
             audio_segments.append(seg_with_audio)
             _record_cost_entry(
                 event_type="tts_generate",
@@ -1118,33 +1161,15 @@ def run_pipeline_with_progress(
 
 
 def _fetch_materials_for_single_segment(seg: dict, output_dir: str, segment_index: int) -> dict:
-    from fetch_materials import _material_entry, download_file, search_photos, search_videos
+    from fetch_materials import fetch_materials_for_segment
 
-    seg_with_materials = dict(seg)
-    display_keyword = seg.get("material_keyword", "Japan")
-    keyword = seg.get("material_search_keyword") or display_keyword or "Japan"
-    material_items = []
-    material_paths = []
-
-    videos = search_videos(keyword, count=1)
-    for j, video in enumerate(videos):
-        filename = f"material_{segment_index:02d}_video_{j}.mp4"
-        output_path = os.path.join(output_dir, "materials", filename)
-        download_file(video["url"], output_path)
-        material_paths.append(output_path)
-        material_items.append(_material_entry(output_path, kind="video"))
-
-    photos = search_photos(keyword, count=2)
-    for j, photo in enumerate(photos):
-        filename = f"material_{segment_index:02d}_photo_{j}.jpg"
-        output_path = os.path.join(output_dir, "materials", filename)
-        download_file(photo["url"], output_path)
-        material_paths.append(output_path)
-        material_items.append(_material_entry(output_path, kind="image"))
-
-    seg_with_materials["material_paths"] = material_paths
-    seg_with_materials["material_items"] = material_items
-    return seg_with_materials
+    return fetch_materials_for_segment(
+        seg,
+        output_dir,
+        segment_index,
+        target_market=str(seg.get("target_market") or ""),
+        department_id=str(seg.get("department_id") or ""),
+    )
 
 
 def run_resume_pipeline_with_progress(task_id: str):
@@ -1228,6 +1253,7 @@ def run_resume_pipeline_with_progress(task_id: str):
                     meta={"segment_index": index, "audio_path": audio_path, "scope": "resume"},
                 )
             seg["target_market"] = target_market
+            seg["department_id"] = department_id
             audio_segments.append(seg)
 
         checkpoint_result = {
@@ -2502,7 +2528,10 @@ def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bo
     preferred_order = {
         "avatar_test_0cd3d70a.png": 0,
         "avatar_host_c.png": 1,
-        "avatar_test_new_01.png": 2,
+        "avatar_host_d.png": 2,
+        "avatar_ultraman.png": 3,
+        "avatar_test_new_01.png": 4,
+        "avatar_custom_林晨专属_male_manual.png": 5,
     }
     for path in sorted(ASSETS_DIR.iterdir() if ASSETS_DIR.exists() else [], key=lambda p: (preferred_order.get(p.name, 999), p.name)):
         if not path.is_file():
@@ -3300,6 +3329,15 @@ async def public_asset(file_path: str):
     return FileResponse(str(full_path))
 
 
+@app.api_route("/public/material-library/{file_path:path}", methods=["GET", "HEAD"])
+async def public_material_library_file(file_path: str):
+    safe_name = Path(file_path or "").name
+    full_path = (MATERIAL_LIBRARY_PUBLIC_DIR / safe_name).resolve()
+    if not str(full_path).startswith(str(MATERIAL_LIBRARY_PUBLIC_DIR.resolve())) or not full_path.exists():
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    return FileResponse(str(full_path))
+
+
 @app.api_route("/public/tasks/{task_id}/{file_path:path}", methods=["GET", "HEAD"])
 async def public_task_file(task_id: str, file_path: str):
     if task_id not in tasks:
@@ -3333,6 +3371,108 @@ async def workbench_options(request: Request):
         "current_task": _build_current_task_payload(user),
         "active_tasks": _build_active_tasks_payload(user),
     }
+
+
+@app.get("/api/material-library")
+async def material_library_items(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    approved = [_material_library_item_payload(item, user) for item in list_material_library_items(status="approved")]
+    pending = []
+    if _is_admin(user):
+        pending = [_material_library_item_payload(item, user) for item in list_material_library_items(status="pending")]
+    return {"items": approved, "pending_items": pending}
+
+
+@app.post("/api/material-library/upload")
+async def upload_material_library_items(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    notes: str = Form(""),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+    upload_dir = OUTPUT_DIR / "material_library_uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    created = []
+    for index, upload in enumerate(files or [], start=1):
+        original_name = Path(upload.filename or "").name
+        suffix = Path(original_name).suffix.lower()
+        temp_path = upload_dir / f"{uuid.uuid4().hex[:12]}_{index}{suffix}"
+        with temp_path.open("wb") as f:
+            shutil.copyfileobj(upload.file, f)
+        try:
+            item = register_material_file(
+                temp_path=str(temp_path),
+                original_filename=original_name,
+                title=Path(original_name).stem,
+                notes=notes,
+                uploader_username=user.get("username", ""),
+                uploader_display_name=user.get("display_name", ""),
+                source="manual_upload",
+            )
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        created.append(_material_library_item_payload(item, user))
+    return {"ok": True, "items": created}
+
+
+@app.post("/api/material-library/{item_id}/review")
+async def review_material_library_item(
+    item_id: str,
+    request: Request,
+    status: str = Form(...),
+    title: str = Form(""),
+    notes: str = Form(""),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以审核素材")
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status not in {"approved", "rejected"}:
+        return JSONResponse({"error": "审核状态非法"}, status_code=400)
+    try:
+        existing = next((item for item in list_material_library_items() if str(item.get("id")) == str(item_id)), None)
+        if not existing:
+            return JSONResponse({"error": "素材不存在"}, status_code=404)
+        final_title = title.strip() or existing.get("title") or Path(str(existing.get("original_filename") or existing.get("filename") or "素材")).stem
+        updated = update_material_library_item(
+            item_id,
+            {
+                "status": normalized_status,
+                "title": final_title,
+                "notes": notes.strip(),
+                "reviewed_at": time.time(),
+                "reviewed_by_username": user.get("username", ""),
+                "reviewed_by_display_name": user.get("display_name", ""),
+            },
+        )
+    except FileNotFoundError:
+        return JSONResponse({"error": "素材不存在"}, status_code=404)
+    return {"ok": True, "item": _material_library_item_payload(updated, user)}
+
+
+@app.delete("/api/material-library/{item_id}")
+async def delete_material_library_item_endpoint(item_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    try:
+        items = list_material_library_items()
+        existing = next((item for item in items if str(item.get("id")) == str(item_id)), None)
+        if not existing:
+            return JSONResponse({"error": "素材不存在"}, status_code=404)
+        if not (_is_admin(user) or str(existing.get("uploader_username") or "") == str(user.get("username") or "")):
+            return _forbidden_error("只能删除自己上传的素材")
+        deleted = delete_material_library_item(item_id)
+    except FileNotFoundError:
+        return JSONResponse({"error": "素材不存在"}, status_code=404)
+    return {"ok": True, "deleted": _material_library_item_payload(deleted, user)}
 
 
 @app.delete("/api/admin/avatars/{filename:path}")

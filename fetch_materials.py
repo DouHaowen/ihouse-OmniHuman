@@ -6,6 +6,7 @@
 import os
 import requests
 from dotenv import load_dotenv
+from material_library import copy_material_to_output, search_material_library
 
 load_dotenv(override=False)
 
@@ -132,32 +133,42 @@ def download_file(url: str, output_path: str) -> str:
     return output_path
 
 
-def fetch_all_materials(segments: list, output_dir: str) -> list:
-    """
-    批量搜索并下载所有素材段落的图片/视频
-    """
-    results = []
-    
-    for i, seg in enumerate(segments):
-        if seg.get("type") != "material":
-            results.append(seg)
-            continue
-        
-        display_keyword = seg.get("material_keyword", "Japan")
-        keyword = seg.get("material_search_keyword") or display_keyword or "Japan"
-        print(f"🔎 搜索素材：{display_keyword}｜检索词：{keyword}")
-        
-        seg_with_materials = seg.copy()
-        
-        material_items = []
-        material_paths = []
+def fetch_materials_for_segment(seg: dict, output_dir: str, segment_index: int, *, target_market: str = "", department_id: str = "") -> dict:
+    seg_with_materials = seg.copy()
+    display_keyword = seg.get("material_keyword", "Japan")
+    keyword = seg.get("material_search_keyword") or display_keyword or "Japan"
+    print(f"🔎 搜索素材：{display_keyword}｜检索词：{keyword}")
 
-        # 优先抓一条视频素材，成片时可直接裁成对应段落长度
+    material_items = []
+    material_paths = []
+
+    library_items = search_material_library(
+        seg,
+        target_market=target_market or str(seg.get("target_market") or ""),
+        department_id=department_id or str(seg.get("department_id") or ""),
+        limit_videos=1,
+        limit_images=2,
+    )
+    library_video_count = 0
+    library_image_count = 0
+    for item in library_items:
+        copied_path = copy_material_to_output(item, output_dir, segment_index, len(material_items))
+        material_paths.append(copied_path)
+        entry = _material_entry(copied_path, kind=item.get("kind"), source="library")
+        entry["library_id"] = item.get("id", "")
+        entry["title"] = item.get("title", "")
+        material_items.append(entry)
+        if item.get("kind") == "video":
+            library_video_count += 1
+        else:
+            library_image_count += 1
+        print(f"  ✅ 已命中本地素材库：{os.path.basename(copied_path)}")
+
+    if library_video_count < 1:
         try:
-            videos = search_videos(keyword, count=1)
+            videos = search_videos(keyword, count=1 - library_video_count)
             for j, video in enumerate(videos):
-                ext = "mp4"
-                filename = f"material_{i:02d}_video_{j}.{ext}"
+                filename = f"material_{segment_index:02d}_video_{j}.mp4"
                 output_path = os.path.join(output_dir, "materials", filename)
                 download_file(video["url"], output_path)
                 material_paths.append(output_path)
@@ -166,12 +177,11 @@ def fetch_all_materials(segments: list, output_dir: str) -> list:
         except Exception as e:
             print(f"  ⚠️ 视频素材搜索失败：{e}")
 
-        # 再补图片素材，供人工替换或成片兜底
+    if library_image_count < 2:
         try:
-            photos = search_photos(keyword, count=2)
+            photos = search_photos(keyword, count=2 - library_image_count)
             for j, photo in enumerate(photos):
-                ext = "jpg"
-                filename = f"material_{i:02d}_photo_{j}.{ext}"
+                filename = f"material_{segment_index:02d}_photo_{j}.jpg"
                 output_path = os.path.join(output_dir, "materials", filename)
                 download_file(photo["url"], output_path)
                 material_paths.append(output_path)
@@ -180,9 +190,29 @@ def fetch_all_materials(segments: list, output_dir: str) -> list:
         except Exception as e:
             print(f"  ⚠️ 图片素材搜索失败：{e}")
 
-        seg_with_materials["material_paths"] = material_paths
-        seg_with_materials["material_items"] = material_items
+    seg_with_materials["material_paths"] = material_paths
+    seg_with_materials["material_items"] = material_items
+    return seg_with_materials
 
-        results.append(seg_with_materials)
-    
+
+def fetch_all_materials(segments: list, output_dir: str) -> list:
+    """
+    批量搜索并下载所有素材段落的图片/视频
+    """
+    results = []
+
+    for i, seg in enumerate(segments):
+        if seg.get("type") != "material":
+            results.append(seg)
+            continue
+        results.append(
+            fetch_materials_for_segment(
+                seg,
+                output_dir,
+                i,
+                target_market=str(seg.get("target_market") or ""),
+                department_id=str(seg.get("department_id") or ""),
+            )
+        )
+
     return results

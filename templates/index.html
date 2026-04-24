@@ -1254,6 +1254,7 @@
           </div>
           <button class="btn btn-secondary" id="activeTasksDrawerBtn" type="button" style="min-height:42px;">当前任务</button>
           <button class="btn btn-secondary" id="historyDrawerBtn" type="button" style="min-height:42px;">历史记录</button>
+          <button class="btn btn-secondary" id="materialLibraryDrawerBtn" type="button" style="min-height:42px;">素材库</button>
           <div class="user-chip" id="sessionUser" style="display:none;"></div>
           <a class="btn btn-secondary" id="adminDashboardBtn" href="/admin/dashboard" style="display:none; min-height:42px; text-decoration:none;">管理员看板</a>
           <a class="btn btn-ghost" id="logoutBtn" href="/logout" style="display:none; min-height:42px; text-decoration:none;">退出登录</a>
@@ -1537,6 +1538,37 @@
       </div>
     </div>
   </div>
+  <div class="drawer-overlay" id="materialLibraryDrawer" aria-hidden="true">
+    <div class="drawer-panel">
+      <div class="drawer-head">
+        <div>
+          <div class="section-kicker">Library</div>
+          <h3 class="section-title" style="font-size:22px;">素材库</h3>
+          <div class="helper" style="margin-top:8px;">这里可以上传公司自己的地产、科技、新闻素材。生产时会优先命中本地素材库，不够再回退外部素材站。</div>
+        </div>
+        <button class="btn btn-ghost drawer-close-btn" type="button" data-drawer-close="materialLibraryDrawer">关闭</button>
+      </div>
+      <div class="drawer-body" style="display:grid; gap:16px;">
+        <div class="panel" style="padding:16px;">
+          <div class="field">
+            <label for="materialLibraryFiles">选择文件</label>
+            <input id="materialLibraryFiles" class="select-input" type="file" accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.m4v,.webm" multiple>
+          </div>
+          <div class="field">
+            <label for="materialLibraryNotes">备注</label>
+            <textarea id="materialLibraryNotes" placeholder="可选。比如：这个是东京街景，适合日本买房或城市配套类内容。"></textarea>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" id="materialLibraryUploadBtn" type="button">上传到素材库</button>
+            <button class="btn btn-secondary" id="materialLibraryRefreshBtn" type="button">刷新列表</button>
+          </div>
+          <div class="helper" id="materialLibraryStatus">员工上传只需要传文件和可选备注。管理员审核通过后，素材才会进入正式素材库并参与生产。</div>
+        </div>
+        <div class="file-board" id="materialLibraryPendingList" style="display:none;"></div>
+        <div class="file-board" id="materialLibraryList"></div>
+      </div>
+    </div>
+  </div>
 
 <script>
     const state = {
@@ -1567,6 +1599,7 @@
       expandedPreviewSegment: 1,
       activeTasksExpanded: false,
       historyExpanded: false,
+      materialLibraryItems: [],
     };
 
     function progressLabelsForLanguage(lang) {
@@ -1649,8 +1682,17 @@
       adminDashboardBtn: document.getElementById('adminDashboardBtn'),
       activeTasksDrawerBtn: document.getElementById('activeTasksDrawerBtn'),
       historyDrawerBtn: document.getElementById('historyDrawerBtn'),
+      materialLibraryDrawerBtn: document.getElementById('materialLibraryDrawerBtn'),
       activeTasksDrawer: document.getElementById('activeTasksDrawer'),
       historyDrawer: document.getElementById('historyDrawer'),
+      materialLibraryDrawer: document.getElementById('materialLibraryDrawer'),
+      materialLibraryNotes: document.getElementById('materialLibraryNotes'),
+      materialLibraryFiles: document.getElementById('materialLibraryFiles'),
+      materialLibraryUploadBtn: document.getElementById('materialLibraryUploadBtn'),
+      materialLibraryRefreshBtn: document.getElementById('materialLibraryRefreshBtn'),
+      materialLibraryStatus: document.getElementById('materialLibraryStatus'),
+      materialLibraryPendingList: document.getElementById('materialLibraryPendingList'),
+      materialLibraryList: document.getElementById('materialLibraryList'),
     };
 
     function escapeHtml(value = '') {
@@ -1668,7 +1710,7 @@
     }
 
     function openDrawer(drawerId) {
-      [els.activeTasksDrawer, els.historyDrawer].forEach(node => {
+      [els.activeTasksDrawer, els.historyDrawer, els.materialLibraryDrawer].forEach(node => {
         if (!node) return;
         const open = node.id === drawerId;
         node.classList.toggle('open', open);
@@ -1677,7 +1719,7 @@
     }
 
     function closeDrawers() {
-      [els.activeTasksDrawer, els.historyDrawer].forEach(node => {
+      [els.activeTasksDrawer, els.historyDrawer, els.materialLibraryDrawer].forEach(node => {
         if (!node) return;
         node.classList.remove('open');
         node.setAttribute('aria-hidden', 'true');
@@ -2048,6 +2090,198 @@
       }
     }
 
+    function renderMaterialLibrary(items = []) {
+      state.materialLibraryItems = Array.isArray(items) ? items : [];
+      if (!els.materialLibraryList) return;
+      if (!state.materialLibraryItems.length) {
+        els.materialLibraryList.innerHTML = `<div class="empty-box">素材库还没有内容，先上传一些公司内部素材吧。</div>`;
+        return;
+      }
+      els.materialLibraryList.innerHTML = state.materialLibraryItems.map(item => {
+        const tags = Array.isArray(item.tags) ? item.tags : [];
+        const markets = Array.isArray(item.target_markets) ? item.target_markets.join(', ') : '';
+        const departments = Array.isArray(item.department_ids) ? item.department_ids.join(', ') : '';
+        const media = item.kind === 'video'
+          ? `<video src="${item.url}" muted playsinline controls style="width:100%; max-height:220px; border-radius:18px; background:#000;"></video>`
+          : `<img src="${item.url}" alt="${escapeHtml(item.title || item.filename || 'material')}" style="width:100%; max-height:220px; object-fit:cover; border-radius:18px; background:#fff;">`;
+        return `
+          <div class="history-item">
+            <div class="history-main" style="display:grid; gap:12px;">
+              ${media}
+              <div class="history-title">${escapeHtml(item.title || item.filename || '未命名素材')}</div>
+              <div class="history-topic">${escapeHtml(item.kind === 'video' ? '视频素材' : '图片素材')}</div>
+              <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at || 0))} · ${escapeHtml(item.uploader_display_name || item.uploader_username || '未记录上传人')}${markets ? ` · 市场 ${escapeHtml(markets)}` : ''}${departments ? ` · 部门 ${escapeHtml(departments)}` : ''}</div>
+              ${tags.length ? `<div style="display:flex; gap:8px; flex-wrap:wrap;">${tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
+              ${item.notes ? `<div class="helper">${escapeHtml(item.notes)}</div>` : ''}
+            </div>
+            <div class="history-actions">
+              <a class="btn btn-secondary" href="${item.url}" target="_blank" rel="noreferrer" style="text-decoration:none;">查看</a>
+              ${item.can_delete ? `<button class="btn btn-ghost material-library-delete-btn" type="button" data-material-id="${item.id}">删除</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+      document.querySelectorAll('.material-library-delete-btn').forEach(btn => {
+        btn.addEventListener('click', () => deleteMaterialLibraryItem(btn.dataset.materialId));
+      });
+    }
+
+    function renderMaterialLibraryPending(items = []) {
+      const rows = Array.isArray(items) ? items : [];
+      if (!els.materialLibraryPendingList) return;
+      if (!state.currentUser || state.currentUser.role !== 'admin') {
+        els.materialLibraryPendingList.style.display = 'none';
+        els.materialLibraryPendingList.innerHTML = '';
+        return;
+      }
+      els.materialLibraryPendingList.style.display = 'grid';
+      if (!rows.length) {
+        els.materialLibraryPendingList.innerHTML = `<div class="empty-box">当前没有待审核素材。</div>`;
+        return;
+      }
+      els.materialLibraryPendingList.innerHTML = rows.map(item => {
+        const media = item.kind === 'video'
+          ? `<video src="${item.url}" muted playsinline controls style="width:100%; max-height:220px; border-radius:18px; background:#000;"></video>`
+          : `<img src="${item.url}" alt="${escapeHtml(item.title || item.filename || 'material')}" style="width:100%; max-height:220px; object-fit:cover; border-radius:18px; background:#fff;">`;
+        return `
+          <div class="history-item" style="display:grid; gap:14px;">
+            <div class="history-main" style="display:grid; gap:12px;">
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <div class="history-title">待审核素材</div>
+                <span class="tag" style="background:rgba(187,132,65,0.10); color:var(--accent);">待审核</span>
+              </div>
+              ${media}
+              <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at || 0))} · ${escapeHtml(item.uploader_display_name || item.uploader_username || '未记录上传人')}</div>
+              <div class="field" style="margin:0;">
+                <label>标题</label>
+                <input class="select-input material-review-title" data-material-id="${item.id}" type="text" value="${escapeHtml(item.title || item.filename || '')}">
+              </div>
+              <div class="field" style="margin:0;">
+                <label>备注</label>
+                <textarea class="material-review-notes" data-material-id="${item.id}" placeholder="管理员补充说明">${escapeHtml(item.notes || '')}</textarea>
+              </div>
+            </div>
+            <div class="history-actions">
+              <button class="btn btn-primary material-review-approve-btn" type="button" data-material-id="${item.id}">审核通过</button>
+              <button class="btn btn-ghost material-review-reject-btn" type="button" data-material-id="${item.id}">拒绝</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      document.querySelectorAll('.material-review-approve-btn').forEach(btn => {
+        btn.addEventListener('click', () => reviewMaterialLibraryItem(btn.dataset.materialId, 'approved', btn));
+      });
+      document.querySelectorAll('.material-review-reject-btn').forEach(btn => {
+        btn.addEventListener('click', () => reviewMaterialLibraryItem(btn.dataset.materialId, 'rejected', btn));
+      });
+    }
+
+    async function loadMaterialLibrary() {
+      if (!state.currentUser) return;
+      try {
+        const res = await fetch('/api/material-library');
+        if (res.status === 401) return;
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '素材库加载失败');
+        renderMaterialLibrary(data.items || []);
+        renderMaterialLibraryPending(data.pending_items || []);
+        if (els.materialLibraryStatus) {
+          const pendingCount = (data.pending_items || []).length;
+          els.materialLibraryStatus.textContent = `素材库当前共有 ${(data.items || []).length} 条已审核素材${state.currentUser?.role === 'admin' ? `，待审核 ${pendingCount} 条` : ''}。生产时只会使用已审核素材。`;
+        }
+      } catch (error) {
+        if (els.materialLibraryList) {
+          els.materialLibraryList.innerHTML = `<div class="empty-box">${escapeHtml(error.message || '素材库加载失败')}</div>`;
+        }
+        if (els.materialLibraryPendingList) {
+          els.materialLibraryPendingList.innerHTML = '';
+        }
+      }
+    }
+
+    async function uploadMaterialLibraryItems() {
+      const files = Array.from(els.materialLibraryFiles?.files || []);
+      if (!files.length) {
+        alert('请先选择要上传的素材文件');
+        return;
+      }
+      const formData = new FormData();
+      files.forEach(file => formData.append('files', file));
+      formData.append('notes', els.materialLibraryNotes?.value.trim() || '');
+      const originalText = els.materialLibraryUploadBtn?.textContent || '上传到素材库';
+      if (els.materialLibraryUploadBtn) {
+        els.materialLibraryUploadBtn.disabled = true;
+        els.materialLibraryUploadBtn.textContent = '上传中...';
+      }
+      if (els.materialLibraryStatus) {
+        els.materialLibraryStatus.textContent = `正在上传 ${files.length} 个文件到素材库...`;
+      }
+      try {
+        const res = await fetch('/api/material-library/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '素材上传失败');
+        if (els.materialLibraryNotes) els.materialLibraryNotes.value = '';
+        if (els.materialLibraryFiles) els.materialLibraryFiles.value = '';
+        if (els.materialLibraryStatus) {
+          els.materialLibraryStatus.textContent = `已上传 ${String((data.items || []).length)} 条素材，等待管理员审核`;
+        }
+        await loadMaterialLibrary();
+      } catch (error) {
+        if (els.materialLibraryStatus) {
+          els.materialLibraryStatus.textContent = error.message || '素材上传失败';
+        }
+        alert(error.message || '素材上传失败');
+      } finally {
+        if (els.materialLibraryUploadBtn) {
+          els.materialLibraryUploadBtn.disabled = false;
+          els.materialLibraryUploadBtn.textContent = originalText;
+        }
+      }
+    }
+
+    async function reviewMaterialLibraryItem(itemId, status, button) {
+      if (!itemId) return;
+      const title = document.querySelector(`.material-review-title[data-material-id="${itemId}"]`)?.value.trim() || '';
+      const notes = document.querySelector(`.material-review-notes[data-material-id="${itemId}"]`)?.value.trim() || '';
+      const formData = new FormData();
+      formData.append('status', status);
+      formData.append('title', title);
+      formData.append('notes', notes);
+      const originalText = button?.textContent || (status === 'approved' ? '审核通过' : '拒绝');
+      if (button) {
+        button.disabled = true;
+        button.textContent = '处理中...';
+      }
+      try {
+        const res = await fetch(`/api/material-library/${itemId}/review`, { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '素材审核失败');
+        await loadMaterialLibrary();
+      } catch (error) {
+        alert(error.message || '素材审核失败');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
+    }
+
+    async function deleteMaterialLibraryItem(itemId) {
+      if (!itemId) return;
+      if (!window.confirm('确定要删除这条素材吗？')) {
+        return;
+      }
+      try {
+        const res = await fetch(`/api/material-library/${itemId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '素材删除失败');
+        await loadMaterialLibrary();
+      } catch (error) {
+        alert(error.message || '素材删除失败');
+      }
+    }
+
     async function deleteHistoryTask(historyId) {
       if (!historyId) return;
       if (!window.confirm(copyText('historyDeleteConfirm', '确定要删除这条历史任务吗？删除后无法恢复。'))) {
@@ -2222,17 +2456,29 @@
       'zh-CN': {
         'avatar_test_0cd3d70a.png': '女主播A',
         'avatar_host_c.png': '男主播A',
-        'avatar_test_new_01.png': '林晨专属',
+        'avatar_host_d.png': '女主播C',
+        'avatar_ultraman.png': '奥特曼',
+        'avatar_test_new_01.png': '男主播B',
+        'avatar_custom_林晨专属_male_manual.png': '男主播B',
+        'avatar_custom_新主播_female_1776156852_01_664d.png': '男主播B',
       },
       'zh-TW': {
         'avatar_test_0cd3d70a.png': '女主播A',
         'avatar_host_c.png': '男主播A',
-        'avatar_test_new_01.png': '林晨專屬',
+        'avatar_host_d.png': '女主播C',
+        'avatar_ultraman.png': '奧特曼',
+        'avatar_test_new_01.png': '男主播B',
+        'avatar_custom_林晨专属_male_manual.png': '男主播B',
+        'avatar_custom_新主播_female_1776156852_01_664d.png': '男主播B',
       },
       'ja-JP': {
         'avatar_test_0cd3d70a.png': '女性ホストA',
         'avatar_host_c.png': '男性ホストA',
-        'avatar_test_new_01.png': '林晨専用',
+        'avatar_host_d.png': '女性ホストC',
+        'avatar_ultraman.png': 'ウルトラマン',
+        'avatar_test_new_01.png': '男性ホストB',
+        'avatar_custom_林晨专属_male_manual.png': '男性ホストB',
+        'avatar_custom_新主播_female_1776156852_01_664d.png': '男性ホストB',
       },
     };
 
@@ -2297,18 +2543,21 @@
       "zh-CN": {
         activeTasksBtn: "当前任务",
         historyBtn: "历史记录",
+        materialLibraryBtn: "素材库",
         adminDashboardBtn: "管理员看板",
         logoutBtn: "退出登录",
       },
       "zh-TW": {
         activeTasksBtn: "目前任務",
         historyBtn: "歷史記錄",
+        materialLibraryBtn: "素材庫",
         adminDashboardBtn: "管理員看板",
         logoutBtn: "退出登入",
       },
       "ja-JP": {
         activeTasksBtn: "現在のタスク",
         historyBtn: "履歴",
+        materialLibraryBtn: "素材ライブラリ",
         adminDashboardBtn: "管理ダッシュボード",
         logoutBtn: "ログアウト",
       }
@@ -2423,6 +2672,7 @@
       renderActiveTasks(state.options?.active_tasks || []);
       startActiveTasksPolling();
       await loadHistory();
+      await loadMaterialLibrary();
       await restoreActiveTaskState();
     }
 
@@ -2443,6 +2693,7 @@
       renderActiveTasks(state.options?.active_tasks || []);
       startActiveTasksPolling();
       await loadHistory();
+      await loadMaterialLibrary();
       await loadCostSummary();
       await restoreActiveTaskState();
       setAuthVisible(false);
@@ -2530,8 +2781,8 @@
           maleLocksFemale: '目前選擇的是男聲，女性主播圖片已停用。',
           autoSwitchedAvatar: '系統已自動切換到較匹配的主播圖片。',
           avatarMatchedVoice: '已依這位主播自動帶出較匹配的音色。',
-          twOnlyAvatar: '台灣市場僅保留 女主播A + みん音色。',
-          jpOnlyAvatar: '日本市場預設使用 女主播A + 自然日語女聲。',
+          twOnlyAvatar: '台灣市場僅保留女性主播，男主播圖片會自動停用。',
+          jpOnlyAvatar: '日本市場僅保留女性主播，男主播圖片會自動停用。',
         };
       }
       if (state.selectedInterfaceLanguage === 'ja-JP') {
@@ -2540,8 +2791,8 @@
           maleLocksFemale: '現在は男性音声が選択されているため、女性ホスト画像は選択できません。',
           autoSwitchedAvatar: 'より適したホスト画像に自動で切り替えました。',
           avatarMatchedVoice: 'このホストに合わせて推奨音声へ自動切り替えしました。',
-          twOnlyAvatar: '台湾市場では 女性ホストA + みん音色 のみ表示されます。',
-          jpOnlyAvatar: '日本市場では 女性ホストA + 自然な日本語女性音声 を既定で使います。',
+          twOnlyAvatar: '台湾市場では女性ホストのみ表示され、男性ホストは自動で無効になります。',
+          jpOnlyAvatar: '日本市場では女性ホストのみ表示され、男性ホストは自動で無効になります。',
         };
       }
       return {
@@ -2549,8 +2800,8 @@
         maleLocksFemale: '当前选择的是男声，女主播图片已禁选。',
         autoSwitchedAvatar: '系统已自动切换到更匹配的主播图片。',
         avatarMatchedVoice: '已根据这位主播自动带出更匹配的音色。',
-        twOnlyAvatar: '台湾市场仅保留 女主播A + みん音色。',
-        jpOnlyAvatar: '日本市场默认使用 女主播A + 自然日语女声。',
+        twOnlyAvatar: '台湾市场仅保留女主播，男主播图片会自动禁用。',
+        jpOnlyAvatar: '日本市场仅保留女主播，男主播图片会自动禁用。',
       };
     }
 
@@ -2616,6 +2867,7 @@
       const topbarCopy = TOPBAR_COPY[lang] || TOPBAR_COPY['zh-CN'];
       if (els.activeTasksDrawerBtn) els.activeTasksDrawerBtn.textContent = topbarCopy.activeTasksBtn || els.activeTasksDrawerBtn.textContent;
       if (els.historyDrawerBtn) els.historyDrawerBtn.textContent = topbarCopy.historyBtn || els.historyDrawerBtn.textContent;
+      if (els.materialLibraryDrawerBtn) els.materialLibraryDrawerBtn.textContent = topbarCopy.materialLibraryBtn || els.materialLibraryDrawerBtn.textContent;
       if (els.adminDashboardBtn) els.adminDashboardBtn.textContent = topbarCopy.adminDashboardBtn || els.adminDashboardBtn.textContent;
       if (els.logoutBtn) els.logoutBtn.textContent = topbarCopy.logoutBtn || els.logoutBtn.textContent;
       if (els.progressTitle) els.progressTitle.textContent = dict.progressTitle || els.progressTitle.textContent;
@@ -3766,8 +4018,16 @@
         await loadCostSummary();
         setHeroStatus(copyText('previewGenerated', '文案已生成，等待确认'));
       } catch (error) {
+        const isNetworkFetchError = error instanceof TypeError && /failed to fetch/i.test(error.message || '');
+        const errorMessage = isNetworkFetchError
+          ? ({
+              'zh-CN': '网络请求已中断，请刷新页面后重试。若刚改过线上代码，可能是容器重启时本次请求被打断。',
+              'zh-TW': '網路請求已中斷，請重新整理頁面後再試一次。若剛更新過線上程式，可能是容器重啟時中斷了這次請求。',
+              'ja-JP': '通信が中断されました。画面を再読み込みして、もう一度お試しください。直前に本番更新があった場合、コンテナ再起動で今回のリクエストが切れた可能性があります。'
+            }[state.selectedInterfaceLanguage] || '网络请求已中断，请刷新页面后重试。')
+          : (error.message || copyText('previewFailed', '文案生成失败'));
         setHeroStatus(copyText('previewFailed', '文案生成失败'), true);
-        alert(error.message || copyText('previewFailed', '文案生成失败'));
+        alert(errorMessage);
       } finally {
         stopStatusTicker();
         els.previewBtn.disabled = false;
@@ -4072,6 +4332,12 @@
     els.newTaskBtn.addEventListener('click', resetWorkspace);
     els.activeTasksDrawerBtn?.addEventListener('click', () => openDrawer('activeTasksDrawer'));
     els.historyDrawerBtn?.addEventListener('click', () => openDrawer('historyDrawer'));
+    els.materialLibraryDrawerBtn?.addEventListener('click', async () => {
+      openDrawer('materialLibraryDrawer');
+      await loadMaterialLibrary();
+    });
+    els.materialLibraryUploadBtn?.addEventListener('click', uploadMaterialLibraryItems);
+    els.materialLibraryRefreshBtn?.addEventListener('click', loadMaterialLibrary);
     if (els.composeVideoBtn) els.composeVideoBtn.addEventListener('click', composeFinalVideo);
     els.loginForm.addEventListener('submit', handleLogin);
     els.logoutBtn.addEventListener('click', handleLogout);
@@ -4089,7 +4355,7 @@
     document.querySelectorAll('.drawer-close-btn').forEach(btn => {
       btn.addEventListener('click', () => closeDrawers());
     });
-    [els.activeTasksDrawer, els.historyDrawer].forEach(drawer => {
+    [els.activeTasksDrawer, els.historyDrawer, els.materialLibraryDrawer].forEach(drawer => {
       drawer?.addEventListener('click', event => {
         if (event.target === drawer) closeDrawers();
       });
