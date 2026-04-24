@@ -1386,6 +1386,12 @@
                     <div class="helper" id="selectionGuardHint" style="color:var(--accent);"></div>
                   </div>
 
+                  <div class="field" id="digitalHumanEngineField" style="display:none;">
+                    <label><span id="digitalHumanEngineLabel">数字人生成方式</span></label>
+                    <div class="preset-grid" id="digitalHumanEngineGrid"></div>
+                    <div class="helper" id="digitalHumanEngineHint">管理员测试功能：员工账号暂不开放本地 Hunyuan。</div>
+                  </div>
+
                   <div class="actions">
                     <button class="btn btn-primary" id="produceBtn" type="button"><span id="produceBtnText">开始一站式生产</span></button>
                     <button class="btn btn-ghost" id="backToScriptBtn" type="button"><span id="backToScriptBtnText">返回查看文案</span></button>
@@ -1403,6 +1409,7 @@
                 </div>
                   <div class="actions" style="justify-content:flex-end;">
                     <div class="topbar-status" id="progressStatus"><span class="spinner"></span> 正在处理</div>
+                    <button class="btn btn-primary" id="retryTaskBtn" type="button" style="display:none;">重试继续生成</button>
                     <button class="btn btn-ghost" id="stopTaskBtn" type="button" style="display:none;">停止任务</button>
                   </div>
               </div>
@@ -1533,8 +1540,10 @@
       previewData: null,
       selectedVoiceId: null,
       selectedAvatarId: null,
+      selectedDigitalHumanEngine: 'volc_omnihuman',
       currentTaskId: null,
       currentHistoryId: null,
+      lastFailedTaskId: null,
       eventSource: null,
       resultData: null,
       historyItems: [],
@@ -1582,6 +1591,9 @@
       voicePresetGrid: document.getElementById('voicePresetGrid'),
       avatarGrid: document.getElementById('avatarGrid'),
       avatarHint: document.getElementById('avatarHint'),
+      digitalHumanEngineField: document.getElementById('digitalHumanEngineField'),
+      digitalHumanEngineGrid: document.getElementById('digitalHumanEngineGrid'),
+      digitalHumanEngineHint: document.getElementById('digitalHumanEngineHint'),
       selectionGuardHint: document.getElementById('selectionGuardHint'),
       marketVoiceHint: document.getElementById('marketVoiceHint'),
       speedRange: document.getElementById('speedRange'),
@@ -1602,6 +1614,7 @@
       fileList: document.getElementById('fileList'),
       bundleDownloadBtn: document.getElementById('bundleDownloadBtn'),
       composeVideoBtn: document.getElementById('composeVideoBtn'),
+      retryTaskBtn: document.getElementById('retryTaskBtn'),
       stopTaskBtn: document.getElementById('stopTaskBtn'),
       workflowPillTopic: document.getElementById('workflowPillTopic'),
       workflowPillScript: document.getElementById('workflowPillScript'),
@@ -1880,10 +1893,12 @@
       const market = (state.options?.target_markets || []).find(item => item.id === state.selectedTargetMarket);
       const voice = currentVoicePresetObject();
       const avatar = currentAvatarObject();
+      const digitalHumanEngine = currentDigitalHumanEngineObject();
       const rows = [
         { label: copyText('previewLabelMarket', '目标市场'), value: localizedTargetMarketName(state.selectedTargetMarket, market?.name || '-') },
         { label: copyText('workflowLabelVoice', '本次配音方案'), value: voice ? localizedVoicePreset(voice).name : '-' },
         { label: copyText('workflowLabelAvatar', '本次主播图片'), value: avatar ? localizedAvatarName(avatar) : '-' },
+        { label: copyText('workflowLabelDigitalHumanEngine', '数字人生成方式'), value: digitalHumanEngine?.name || '火山 OmniHuman' },
         { label: copyText('speedLabel', '语速微调'), value: Number(els.speedRange.value || 1.1).toFixed(2) },
         { label: copyText('previewLabelWebSearch', '实时联网检索'), value: els.webSearchToggle.checked ? copyText('statusOn', '已开启') : copyText('statusOff', '未开启') },
       ];
@@ -2683,8 +2698,11 @@
       syncVoicePresetToMarket(true);
       state.selectedComposeTransitionId = state.options?.composition_transitions?.[0]?.id || 'fade';
       state.selectedSubtitleTemplateId = state.options?.subtitle_templates?.[0]?.id || 'classic';
+      const engines = state.options?.digital_human_engines || [];
+      state.selectedDigitalHumanEngine = (engines.find(item => item.default)?.id || engines[0]?.id || 'volc_omnihuman');
       renderVoicePresets();
       renderAvatarOptions();
+      renderDigitalHumanEngines();
       updateSelectionSummary();
     }
 
@@ -2764,7 +2782,7 @@
         </article>
       `}).join('');
 
-      document.querySelectorAll('.preset-card').forEach(card => {
+      els.voicePresetGrid.querySelectorAll('.preset-card').forEach(card => {
         card.addEventListener('click', () => {
           const selected = presets.find(item => item.id === card.dataset.voiceId);
           if (selected?.enabled === false) return;
@@ -2890,6 +2908,49 @@
       updateSelectionSummary();
     }
 
+    function currentDigitalHumanEngineObject() {
+      const engines = state.options?.digital_human_engines || [];
+      return engines.find(item => item.id === state.selectedDigitalHumanEngine) || engines.find(item => item.default) || engines[0] || null;
+    }
+
+    function renderDigitalHumanEngines() {
+      const engines = state.options?.digital_human_engines || [];
+      const isAdmin = state.currentUser?.role === 'admin';
+      if (!els.digitalHumanEngineField || !els.digitalHumanEngineGrid) return;
+      if (!isAdmin || engines.length <= 1) {
+        state.selectedDigitalHumanEngine = engines[0]?.id || 'volc_omnihuman';
+        els.digitalHumanEngineField.style.display = 'none';
+        els.digitalHumanEngineGrid.innerHTML = '';
+        return;
+      }
+      if (!engines.some(item => item.id === state.selectedDigitalHumanEngine)) {
+        state.selectedDigitalHumanEngine = engines.find(item => item.default)?.id || engines[0]?.id || 'volc_omnihuman';
+      }
+      els.digitalHumanEngineField.style.display = 'grid';
+      if (els.digitalHumanEngineHint) {
+        els.digitalHumanEngineHint.textContent = '仅管理员测试：Hunyuan 会走 5090 后台队列，同一时间只跑 1 个，生成很慢但可恢复轮询。';
+      }
+      els.digitalHumanEngineGrid.innerHTML = engines.map(engine => `
+        <article class="preset-card ${engine.id === state.selectedDigitalHumanEngine ? 'selected' : ''}" data-digital-human-engine="${engine.id}">
+          <div class="preset-head">
+            <div>
+              <div class="preset-name">${escapeHtml(engine.name || engine.id)}</div>
+              <div class="preset-subtitle">${engine.id === 'hunyuan_local' ? '本地 5090 测试' : '生产默认'}</div>
+            </div>
+            ${engine.default ? `<span class="tag">${escapeHtml(copyText('statusDefault', '默认'))}</span>` : ''}
+          </div>
+          <div class="preset-body">${escapeHtml(engine.description || '')}</div>
+        </article>
+      `).join('');
+      els.digitalHumanEngineGrid.querySelectorAll('[data-digital-human-engine]').forEach(card => {
+        card.addEventListener('click', () => {
+          state.selectedDigitalHumanEngine = card.dataset.digitalHumanEngine || 'volc_omnihuman';
+          renderDigitalHumanEngines();
+          setHeroStatus(`数字人生成方式：${currentDigitalHumanEngineObject()?.name || '火山 OmniHuman'}`);
+        });
+      });
+    }
+
     function openLightbox(src) {
       if (!src) return;
       els.lightboxImage.src = src;
@@ -2945,6 +3006,7 @@
         renderInterfaceOptions();
         renderVoicePresets();
         renderAvatarOptions();
+        renderDigitalHumanEngines();
         renderScriptPreview(data.preview);
         await loadCostSummary();
         setHeroStatus(currentCopy().aiEditDone || '该段文案已更新');
@@ -3175,6 +3237,7 @@
       setHeroStatus(currentCopy().heroRunning || '任务进行中');
       setProductionLock(true, copyText('produceQueued', '任务已提交，正在进入生产队列...'));
       setStopButtonState(!!state.currentTaskId, false, copyText('stopTaskBtn', '停止任务'));
+      setRetryButtonState(false);
     }
 
     function setProductionLock(locked, buttonText = '') {
@@ -3191,6 +3254,37 @@
       els.stopTaskBtn.style.display = visible ? 'inline-flex' : 'none';
       els.stopTaskBtn.disabled = !!disabled;
       els.stopTaskBtn.textContent = text || copyText('stopTaskBtn', '停止任务');
+    }
+
+    function setRetryButtonState(visible, disabled = false, text = '') {
+      if (!els.retryTaskBtn) return;
+      els.retryTaskBtn.style.display = visible ? 'inline-flex' : 'none';
+      els.retryTaskBtn.disabled = !!disabled;
+      els.retryTaskBtn.textContent = text || copyText('retryTaskBtn', '重试继续生成');
+    }
+
+    async function retryFailedTask() {
+      const taskId = state.lastFailedTaskId || state.currentTaskId;
+      if (!taskId) {
+        alert(copyText('retryTaskMissing', '没有找到可重试的失败任务。'));
+        return;
+      }
+      setRetryButtonState(true, true, copyText('retryTaskRunning', '正在恢复...'));
+      try {
+        const res = await fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || copyText('retryTaskFailed', '重试任务失败'));
+        state.currentTaskId = data.task_id;
+        state.lastFailedTaskId = null;
+        persistActiveTask(data.task_id);
+        renderProgressShell();
+        updateProgress(1, data.message || copyText('retryTaskStarted', '已从失败位置继续生成'));
+        subscribeProgress(data.task_id);
+        loadActiveTasks();
+      } catch (error) {
+        setRetryButtonState(true, false, copyText('retryTaskBtn', '重试继续生成'));
+        alert(error.message || copyText('retryTaskFailed', '重试任务失败'));
+      }
     }
 
     function updateProgress(step, message) {
@@ -3308,6 +3402,9 @@
       const webSearchEnabled = !!result.workflow_config?.web_search_enabled;
       const targetMarket = (state.options?.target_markets || []).find(item => item.id === result.workflow_config?.target_market);
       const department = (state.options?.departments || []).find(item => item.id === result.workflow_config?.department_id);
+      const engineId = result.workflow_config?.digital_human_engine || 'volc_omnihuman';
+      const engineOption = (state.options?.digital_human_engines || []).find(item => item.id === engineId);
+      const engineName = result.workflow_config?.digital_human_engine_name || engineOption?.name || '火山 OmniHuman';
       const byType = result.cost_summary?.by_type || {};
       els.workflowSummary.innerHTML = `
         <div class="insight-card">
@@ -3321,6 +3418,10 @@
         <div class="insight-card">
           <div class="label">${escapeHtml(currentCopy().workflowLabelMarketDepartment || '目标市场 / 部门')}</div>
           <div class="value">${escapeHtml(`${localizedTargetMarketName(result.workflow_config?.target_market, targetMarket?.name || copyText('workflowNotRecorded', '未记录'))}｜${localizedDepartmentName(result.workflow_config?.department_id, department?.name || copyText('workflowNotRecorded', '未记录'))}`)}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(currentCopy().workflowLabelDigitalHumanEngine || '数字人生成方式')}</div>
+          <div class="value">${escapeHtml(engineName)}</div>
         </div>
         <div class="insight-card">
           <div class="label">${escapeHtml(currentCopy().workflowLabelWebSearch || '实时联网检索')}</div>
@@ -3629,6 +3730,7 @@
       formData.append('department_id', state.selectedDepartmentId);
       formData.append('voice_preset_id', state.selectedVoiceId);
       formData.append('avatar_id', state.selectedAvatarId);
+      formData.append('digital_human_engine', state.selectedDigitalHumanEngine || 'volc_omnihuman');
       formData.append('speed', els.speedRange.value);
       setProductionLock(true, copyText('produceCreating', '正在创建生产任务...'));
       setHeroStatus(copyText('produceQueued', '任务已提交，正在进入生产队列...'));
@@ -3753,9 +3855,12 @@
           clearPersistedActiveTask();
           setProductionLock(false);
           setStopButtonState(false);
+          state.lastFailedTaskId = taskId;
           els.progressStatus.textContent = copyText('taskFailed', '任务失败');
+          setRetryButtonState(!!data.result?.can_retry, false, copyText('retryTaskBtn', '重试继续生成'));
           setHeroStatus(copyText('taskFailed', '任务失败'), true);
-          alert(copyText('taskFailedDesc', '任务执行失败，请查看日志。'));
+          const retryHint = data.result?.can_retry ? `\n${copyText('taskFailedRetryHint', '可以点击“重试继续生成”，系统会从已保存的中间结果继续。')}` : '';
+          alert(`${copyText('taskFailedDesc', '任务执行失败，请查看日志。')}${retryHint}`);
           loadActiveTasks();
         }
       });
@@ -3776,6 +3881,7 @@
       state.activeTasksExpanded = false;
       state.historyExpanded = false;
       state.currentTaskId = null;
+      state.lastFailedTaskId = null;
       state.currentHistoryId = null;
       state.resultData = null;
       els.topicInput.value = '';
@@ -3783,6 +3889,8 @@
       renderInterfaceOptions();
       syncVoicePresetToMarket(true);
       renderVoicePresets();
+      renderAvatarOptions();
+      renderDigitalHumanEngines();
       els.scriptPanel.style.display = 'none';
       els.configPanel.style.display = 'none';
       els.progressPanel.classList.remove('active');
@@ -3797,6 +3905,7 @@
       }
       setStopButtonState(false);
       setProductionLock(false);
+      setRetryButtonState(false);
       renderActiveTasks(state.activeTasks || []);
       if (els.composeSettingsPanel) {
         els.composeSettingsPanel.innerHTML = '';
@@ -3851,6 +3960,7 @@
       renderInterfaceOptions();
       renderVoicePresets();
       renderAvatarOptions();
+      renderDigitalHumanEngines();
       if (state.previewData) renderScriptPreview(state.previewData);
       if (state.resultData) renderResult(state.resultData);
       renderHistory(state.historyItems || []);
@@ -3863,6 +3973,7 @@
       renderInterfaceOptions();
       renderVoicePresets();
       renderAvatarOptions();
+      renderDigitalHumanEngines();
       if (state.previewData) renderScriptPreview(state.previewData);
       if (state.resultData) renderResult(state.resultData);
       renderHistory(state.historyItems || []);
@@ -3875,6 +3986,7 @@
     els.produceBtn.addEventListener('click', startProduction);
     els.produceConfirmCancelBtn?.addEventListener('click', closeProduceConfirm);
     els.produceConfirmSubmitBtn?.addEventListener('click', performProduction);
+    els.retryTaskBtn?.addEventListener('click', retryFailedTask);
     els.stopTaskBtn?.addEventListener('click', stopCurrentTask);
     els.newTaskBtn.addEventListener('click', resetWorkspace);
     els.activeTasksDrawerBtn?.addEventListener('click', () => openDrawer('activeTasksDrawer'));

@@ -37,9 +37,9 @@ def _get_client() -> tos.TosClientV2:
         sk=sk,
         endpoint=endpoint,
         region=region,
-        connection_time=int(_env("TOS_CONNECTION_TIMEOUT", "30")),
-        socket_timeout=int(_env("TOS_SOCKET_TIMEOUT", "180")),
-        request_timeout=int(_env("TOS_REQUEST_TIMEOUT", "180")),
+        connection_time=int(_env("TOS_CONNECTION_TIMEOUT", "60")),
+        socket_timeout=int(_env("TOS_SOCKET_TIMEOUT", "300")),
+        request_timeout=int(_env("TOS_REQUEST_TIMEOUT", "300")),
         max_retry_count=int(_env("TOS_MAX_RETRY_COUNT", "3")),
     )
 
@@ -66,6 +66,14 @@ def _is_retryable_tos_error(exc: Exception) -> bool:
         "broken pipe",
     ]
     return any(token in text for token in retry_tokens)
+
+
+def _object_exists(client: tos.TosClientV2, bucket: str, object_key: str) -> bool:
+    try:
+        client.head_object(bucket=bucket, key=object_key)
+        return True
+    except Exception:
+        return False
 
 
 def _prepare_upload_file(local_path: str) -> tuple[str, Callable | None]:
@@ -111,7 +119,7 @@ def upload_file_and_get_url(local_path: str, key_prefix: str = "avatar-tests", e
     content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
 
     bucket = _get_bucket()
-    attempts = max(1, int(_env("TOS_UPLOAD_ATTEMPTS", "5") or 5))
+    attempts = max(1, int(_env("TOS_UPLOAD_ATTEMPTS", "8") or 8))
     base_delay = max(1.0, float(_env("TOS_UPLOAD_RETRY_BASE_DELAY_SECONDS", "3") or 3))
     try:
         last_error = None
@@ -135,6 +143,15 @@ def upload_file_and_get_url(local_path: str, key_prefix: str = "avatar-tests", e
                 return signed.signed_url
             except Exception as exc:
                 last_error = exc
+                if _is_retryable_tos_error(exc) and _object_exists(client, bucket, object_key):
+                    signed = client.pre_signed_url(
+                        http_method=tos.HttpMethodType.Http_Method_Get,
+                        bucket=bucket,
+                        key=object_key,
+                        expires=expires,
+                    )
+                    print(f"✅ TOS 上传回包超时，但对象已存在，继续使用：{file_path.name}")
+                    return signed.signed_url
                 if attempt >= attempts or not _is_retryable_tos_error(exc):
                     raise
                 wait_seconds = base_delay * attempt

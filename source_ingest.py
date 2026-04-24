@@ -381,6 +381,12 @@ def _yt_dlp_extract_info(url: str, platform: str = "") -> dict:
         return {}
 
 
+def _platform_cookie_hint(platform: str) -> str:
+    label = VIDEO_PLATFORM_CONFIGS.get(platform, {}).get("label", "视频平台")
+    env_name = VIDEO_PLATFORM_CONFIGS.get(platform, {}).get("cookies_env", "YTDLP_COOKIES_FILE")
+    return f"{label}没有提取到真实视频内容，可能需要配置最新 cookies（{env_name} 或 YTDLP_COOKIES_FILE），或换一个可公开解析的链接。"
+
+
 def _pick_yt_dlp_caption(info: dict) -> tuple[str, str]:
     if not info:
         return "", ""
@@ -524,8 +530,12 @@ def _summarize_video_platform(url: str, platform: str) -> SourceAnalysis:
             excerpt = transcript_excerpt
         summary = _clean_text(summary)
         excerpt = _clean_text(excerpt or summary)
-        if not summary:
-            summary = f"{platform_label}公开摘要较少，建议结合标题与页面信息提炼脚本角度。"
+        if not transcript:
+            extraction_method = extraction_method or "page_summary"
+            if not error:
+                error = _platform_cookie_hint(platform)
+        if not summary and not transcript:
+            summary = ""
         if transcript_language and transcript_language not in {source_name, title}:
             source_name = f"{source_name or platform_label} · 字幕 {transcript_language}"
     except Exception as exc:

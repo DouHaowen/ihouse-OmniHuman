@@ -7,8 +7,10 @@ OmniHuman 数字人生成模块
 
 import os
 import time
+from http.client import IncompleteRead
 
 import requests
+from requests.exceptions import ChunkedEncodingError
 from dotenv import load_dotenv
 
 load_dotenv(override=False)
@@ -39,6 +41,7 @@ def _download_file(url: str, output_path: str):
     last_error = None
 
     for attempt in range(1, attempts + 1):
+        tmp_output_path = f"{output_path}.part"
         try:
             response = requests.get(url, stream=True, timeout=timeout)
             if response.status_code in retryable_statuses:
@@ -49,27 +52,52 @@ def _download_file(url: str, output_path: str):
                 )
             response.raise_for_status()
 
-            with open(output_path, "wb") as f:
+            expected_size = int(response.headers.get("Content-Length") or 0)
+            downloaded_size = 0
+            with open(tmp_output_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
+                        downloaded_size += len(chunk)
                         f.write(chunk)
+            if expected_size and downloaded_size < expected_size:
+                raise ChunkedEncodingError(
+                    f"结果视频下载不完整: {downloaded_size}/{expected_size} bytes"
+                )
+            os.replace(tmp_output_path, output_path)
             return
         except requests.RequestException as exc:
             last_error = exc
+            try:
+                if os.path.exists(tmp_output_path):
+                    os.remove(tmp_output_path)
+            except OSError:
+                pass
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             retryable = status_code in retryable_statuses or isinstance(
                 exc,
                 (
                     requests.Timeout,
                     requests.ConnectionError,
+                    ChunkedEncodingError,
                 ),
-            )
+            ) or "incompleteread" in str(exc).lower()
             if not retryable or attempt >= attempts:
                 raise
             print(
                 f"⏳ 结果视频暂时还不可下载，{retry_delay} 秒后重试 ({attempt}/{attempts - 1})..."
                 + (f" status={status_code}" if status_code else "")
             )
+            time.sleep(retry_delay)
+        except IncompleteRead as exc:
+            last_error = exc
+            try:
+                if os.path.exists(tmp_output_path):
+                    os.remove(tmp_output_path)
+            except OSError:
+                pass
+            if attempt >= attempts:
+                raise
+            print(f"⏳ 结果视频下载中断，{retry_delay} 秒后重试 ({attempt}/{attempts - 1})...")
             time.sleep(retry_delay)
 
     raise last_error

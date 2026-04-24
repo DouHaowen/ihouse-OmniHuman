@@ -624,7 +624,7 @@
             <div class="feed-name">${escapeHtml(item.topic || '未命名任务')}</div>
             <div class="badge">${escapeHtml(item.owner_display_name || item.owner_username || '未知账号')}</div>
           </div>
-          <div class="meta">${escapeHtml(item.mode_label || '任务')} · 第 ${escapeHtml(String(item.step || 0))}/${escapeHtml(String(item.total_steps || 0))} 步</div>
+          <div class="meta">${escapeHtml(item.mode_label || '任务')} · 第 ${escapeHtml(String(item.step || 0))}/${escapeHtml(String(item.total_steps || 0))} 步 · 引擎：${escapeHtml(item.digital_human_engine_name || '火山 OmniHuman')}</div>
           <div class="meta">${escapeHtml(item.latest_message || '处理中')}</div>
         </div>
       `).join('') : `<div class="empty">当前没有进行中的任务。</div>`;
