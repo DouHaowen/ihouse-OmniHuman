@@ -17,6 +17,14 @@ load_dotenv(override=True)
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
+SCRIPT_MODEL_CLAUDE = "claude"
+SCRIPT_MODEL_GLM = "glm_5_1"
+SCRIPT_MODEL_CHATGPT = "chatgpt"
+
+MAX_DIGITAL_HUMAN_TOTAL_SECONDS = 35
+TARGET_DIGITAL_HUMAN_TOTAL_SECONDS = 30
+MAX_DIGITAL_HUMAN_SEGMENTS = 3
+
 
 class UpstreamBusyError(Exception):
     pass
@@ -59,15 +67,17 @@ SYSTEM_PROMPT = """你是一个专业的AI短视频内容制作助手，服务�
 规则：
 1. 数字人每段严格≤15秒
 2. 总视频60~120秒
-3. 数字人和素材段落交替出现
-4. 开头和结尾必须是数字人段落
-5. social_post 只输出一份，必须面向当前目标市场，语气适合社交媒体发布
-6. 所有数字必须是整数
-7. digital_human 的 action 只能描述主播坐在台前即可完成的动作与表情，例如点头、微笑、自然眨眼、轻微摆头、表情认真、语气坚定等
-8. digital_human 的 action 严禁出现任何凭空道具、场景、背景元素或夸张肢体动作，例如不能写手持计算器、指向图表、站起身、走动、在街头、在客厅等
-9. material_desc 只描述素材画面本身应该出现什么内容，不要描述数字人主播，也不要写镜头外的设定
-10. material_keyword 要跟随目标市场语言输出，给运营直接阅读
-11. material_search_keyword 必须使用简洁准确的英文关键词，专门给素材库检索使用"""
+3. 不要再强制数字人和素材交替出现，要根据内容功能智能判断：观点表达、开场抓人、转折总结更适合 digital_human；政策说明、数据案例、时间线、流程步骤、画面展示更适合 material
+4. 开头和结尾必须是数字人段落，中间固定保留 1 段短过渡型数字人，所以整条视频固定为 3 段数字人
+5. 中间那段数字人不要承担复杂信息，只用于承上启下、让主播短暂露面，时长尽量控制在 6~10 秒，文案要短，不讲长数据、长流程和复杂案例
+6. 数字人总时长目标约 30 秒，硬上限 35 秒；其余内容优先用素材承接，以降低数字人频率和成本
+7. social_post 只输出一份，必须面向当前目标市场，语气适合社交媒体发布
+8. 所有数字必须是整数
+9. digital_human 的 action 只能描述主播坐在台前即可完成的动作与表情，例如点头、微笑、自然眨眼、轻微摆头、表情认真、语气坚定等
+10. digital_human 的 action 严禁出现任何凭空道具、场景、背景元素或夸张肢体动作，例如不能写手持计算器、指向图表、站起身、走动、在街头、在客厅等
+11. material_desc 只描述素材画面本身应该出现什么内容，不要描述数字人主播，也不要写镜头外的设定
+12. material_keyword 要跟随目标市场语言输出，给运营直接阅读
+13. material_search_keyword 必须使用简洁准确的英文关键词，专门给素材库检索使用"""
 
 WEB_SEARCH_GUIDANCE = """
 
@@ -144,6 +154,178 @@ def _build_context_guidance(target_market: str, department_id: str) -> str:
 {extra}
 """
 
+
+def _digital_human_action_fallback(target_market: str) -> str:
+    if target_market == "tw":
+        return "坐在台前，語氣自然穩定，適度點頭並自然眨眼"
+    if target_market == "jp":
+        return "卓上で落ち着いて話し、自然にうなずきながら穏やかに締める"
+    return "坐在台前，语气自然稳重，轻微点头并自然眨眼"
+
+
+def _material_desc_fallback(target_market: str) -> str:
+    if target_market == "tw":
+        return "以新聞截圖、數據圖表、案例畫面或現場實景來支撐這段旁白，不要出現主播。"
+    if target_market == "jp":
+        return "このナレーションを支えるニュース画面、データ図表、事例映像、現地の実景を見せ、司会者は出さない。"
+    return "用新闻截图、数据图表、案例画面或现场实景来支撑这段旁白，不要出现主播。"
+
+
+def _material_search_keyword_fallback(department_id: str) -> str:
+    if department_id == "robotics":
+        return "robotics ai technology product demonstration industry footage"
+    return "news data infographic real estate policy city footage"
+
+
+def _material_keyword_fallback(script_text: str, target_market: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (script_text or "").strip())
+    limit = 20 if target_market in {"cn", "tw"} else 28
+    return cleaned[:limit] or ("新闻素材" if target_market == "cn" else "新聞素材" if target_market == "tw" else "ニュース素材")
+
+
+def _middle_transition_fallback(target_market: str) -> str:
+    if target_market == "tw":
+        return "但真正關鍵的，其實是接下來這一點。"
+    if target_market == "jp":
+        return "ただ、本当に大事なのはこの次のポイントです。"
+    return "但真正关键的，其实是接下来这一点。"
+
+
+def _shorten_middle_transition_script(script_text: str, target_market: str) -> str:
+    text = re.sub(r"\s+", " ", (script_text or "").strip())
+    if not text:
+        return _middle_transition_fallback(target_market)
+    parts = [part.strip(" ，,。；;！!？?") for part in re.split(r"[。！？!?；;，,]", text) if part.strip()]
+    candidate = parts[0] if parts else text
+    max_len = 24 if target_market in {"cn", "tw"} else 34
+    if len(candidate) > max_len:
+        candidate = candidate[:max_len].rstrip("，,、 ")
+    if len(candidate) < 6:
+        return _middle_transition_fallback(target_market)
+    suffix = "。" if target_market in {"cn", "tw"} else "。"
+    return candidate + ("" if candidate.endswith(("。", "！", "？", ".", "!", "?")) else suffix)
+
+
+def _segment_type_priority(seg: dict) -> int:
+    script_text = (seg.get("script") or "").strip()
+    text = script_text.lower()
+    strong_anchor_tokens = [
+        "最后", "總結", "总结", "所以", "其實", "其实", "為什麼", "为什么", "你可能",
+        "很多人", "重點", "重点", "關鍵", "关键", "先講結論", "先讲结论",
+        "結論", "结论", "最後一個", "最后一个", "まず結論", "つまり", "要するに",
+    ]
+    info_heavy_tokens = [
+        "數據", "数据", "比例", "流程", "步驟", "步骤", "法規", "法规", "政策",
+        "時間線", "时间线", "案例", "金額", "金额", "%", "年", "月", "日", "億",
+        "万", "萬", "条", "項", "项", "第", "政府", "公告", "報告", "报告",
+    ]
+    score = 0
+    if any(token in script_text for token in strong_anchor_tokens) or any(token in text for token in ["why", "summary", "key", "important", "finally"]):
+        score += 4
+    if any(token in script_text for token in info_heavy_tokens):
+        score -= 3
+    if len(script_text) <= 42:
+        score += 1
+    if len(re.findall(r"\d", script_text)) >= 2:
+        score -= 2
+    return score
+
+
+def _convert_segment_to_material(seg: dict, target_market: str, department_id: str) -> dict:
+    converted = {
+        "type": "material",
+        "start": int(seg.get("start", 0) or 0),
+        "end": int(seg.get("end", 0) or 0),
+        "duration": int(seg.get("duration", 0) or 0),
+        "script": (seg.get("script") or "").strip(),
+        "material_keyword": seg.get("material_keyword") or _material_keyword_fallback(seg.get("script", ""), target_market),
+        "material_search_keyword": seg.get("material_search_keyword") or _material_search_keyword_fallback(department_id),
+        "material_desc": seg.get("material_desc") or _material_desc_fallback(target_market),
+    }
+    return converted
+
+
+def _convert_segment_to_digital_human(seg: dict, target_market: str) -> dict:
+    return {
+        "type": "digital_human",
+        "start": int(seg.get("start", 0) or 0),
+        "end": int(seg.get("end", 0) or 0),
+        "duration": int(seg.get("duration", 0) or 0),
+        "script": (seg.get("script") or "").strip(),
+        "action": seg.get("action") or _digital_human_action_fallback(target_market),
+    }
+
+
+def _is_short_transition_candidate(seg: dict) -> bool:
+    duration = int(seg.get("duration", 0) or 0)
+    script_text = (seg.get("script") or "").strip()
+    if 6 <= duration <= 10 and len(script_text) <= 48:
+        return True
+    transition_tokens = [
+        "但真正关键", "但更重要", "接下来", "再看一个", "还有一点", "先别急", "不过真正",
+        "但问题是", "但重点是", "說到這裡", "接著看", "次に", "ここで大事", "ただ本当に重要",
+    ]
+    return any(token in script_text for token in transition_tokens)
+
+
+def _rebalance_segment_mix(data: dict, target_market: str, department_id: str) -> dict:
+    segments = list((data or {}).get("segments") or [])
+    if not segments:
+        return data
+
+    normalized_segments = []
+    for seg in segments:
+        if seg.get("type") == "digital_human":
+            normalized_segments.append(_convert_segment_to_digital_human(seg, target_market))
+        else:
+            normalized_segments.append(_convert_segment_to_material(seg, target_market, department_id))
+    segments = normalized_segments
+
+    if segments[0].get("type") != "digital_human":
+        segments[0] = _convert_segment_to_digital_human(segments[0], target_market)
+    if len(segments) > 1 and segments[-1].get("type") != "digital_human":
+        segments[-1] = _convert_segment_to_digital_human(segments[-1], target_market)
+
+    def dh_indices() -> list[int]:
+        return [idx for idx, seg in enumerate(segments) if seg.get("type") == "digital_human"]
+
+    def dh_total_duration() -> int:
+        return sum(int(seg.get("duration", 0) or 0) for seg in segments if seg.get("type") == "digital_human")
+
+    protected = {0, len(segments) - 1}
+    target_middle_index = None
+    candidate_pool = [idx for idx in range(1, len(segments) - 1)]
+    if candidate_pool:
+        preferred = [idx for idx in candidate_pool if _is_short_transition_candidate(segments[idx])]
+        source_pool = preferred or candidate_pool
+        target_middle_index = min(
+            source_pool,
+            key=lambda idx: (
+                abs(idx - (len(segments) // 2)),
+                -_segment_type_priority(segments[idx]),
+                int(segments[idx].get("duration", 0) or 0),
+            ),
+        )
+        segments[target_middle_index] = _convert_segment_to_digital_human(segments[target_middle_index], target_market)
+        segments[target_middle_index]["script"] = _shorten_middle_transition_script(segments[target_middle_index].get("script", ""), target_market)
+
+    interior_dh = [idx for idx in dh_indices() if idx not in protected]
+    if interior_dh:
+        keep_indices = {target_middle_index} if target_middle_index is not None else set()
+        for idx in interior_dh:
+            if idx not in keep_indices:
+                segments[idx] = _convert_segment_to_material(segments[idx], target_market, department_id)
+
+    while len(dh_indices()) > MAX_DIGITAL_HUMAN_SEGMENTS:
+        removable = [idx for idx in dh_indices() if idx not in protected]
+        if not removable:
+            break
+        idx = min(removable, key=lambda item: (_segment_type_priority(segments[item]), int(segments[item].get("duration", 0) or 0)))
+        segments[idx] = _convert_segment_to_material(segments[idx], target_market, department_id)
+
+    data["segments"] = segments
+    return data
+
 def _iter_text_values(value: Any):
     if isinstance(value, str):
         yield value
@@ -171,7 +353,7 @@ def _find_cn_marketing_hits(data: dict) -> list[str]:
     return hits
 
 
-def _rewrite_script_for_cn_safety(topic: str, data: dict, enable_web_search: bool, target_market: str, department_id: str) -> tuple[dict, dict]:
+def _rewrite_script_for_cn_safety(topic: str, data: dict, enable_web_search: bool, target_market: str, department_id: str, provider: str = SCRIPT_MODEL_CLAUDE) -> tuple[dict, dict]:
     hits = _find_cn_marketing_hits(data)
     prompt = f"""
 下面是一份已经生成好的短视频 JSON 脚本，但它面向中国市场，需要进一步改成“小红书知识科普安全模式”。
@@ -194,11 +376,11 @@ def _rewrite_script_for_cn_safety(topic: str, data: dict, enable_web_search: boo
 8. 避免第二人称交易导向表达，例如“如果你在考虑日本置业”“如果你正打算买房”。
 9. 避免“欢迎在评论区告诉我”这类偏运营导向收口，改成更克制、更中立的问题句。
 """
-    rewritten, usage = _request_json_from_claude(prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    rewritten, usage = _request_json_by_provider(provider, prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     return rewritten, usage
 
 
-def _rewrite_segment_for_cn_safety(topic: str, script_data: dict, segment_index: int, segment: dict, enable_web_search: bool, target_market: str, department_id: str) -> tuple[dict, dict]:
+def _rewrite_segment_for_cn_safety(topic: str, script_data: dict, segment_index: int, segment: dict, enable_web_search: bool, target_market: str, department_id: str, provider: str = SCRIPT_MODEL_CLAUDE) -> tuple[dict, dict]:
     prompt = f"""
 下面是一条面向中国市场的小红书知识型短视频脚本中的单个段落，请你把它改成更安全、更中立的科普表达。
 
@@ -219,7 +401,7 @@ def _rewrite_segment_for_cn_safety(topic: str, script_data: dict, segment_index:
 7. 避免第二人称交易导向表达，例如“如果你在考虑日本置业”“如果你正打算买房”。
 8. 避免“欢迎在评论区告诉我”这类偏运营导向收口，改成更克制、更中立的问题句。
 """
-    rewritten, usage = _request_json_from_claude(prompt, max_tokens=1800, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    rewritten, usage = _request_json_by_provider(provider, prompt, max_tokens=1800, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     return rewritten, usage
 
 
@@ -263,6 +445,10 @@ def _merge_usage(base: dict | None, extra: dict | None) -> dict:
 
 def _get_openai_api_key() -> str:
     return (os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def _get_glm_api_key() -> str:
+    return (os.getenv("ZHIPUAI_API_KEY") or os.getenv("GLM_API_KEY") or "").strip()
 
 
 def _get_openai_fallback_model() -> str:
@@ -382,10 +568,33 @@ def _extract_usage_from_openai_payload(payload: dict) -> dict:
     }
 
 
+def _extract_usage_from_glm_payload(payload: dict) -> dict:
+    usage_obj = payload.get("usage") or {}
+    web_search_calls = 0
+    for choice in payload.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message") or {}
+        tool_calls = message.get("tool_calls") or []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            if (tool_call.get("type") or "") == "web_search":
+                web_search_calls += 1
+    return {
+        "input_tokens": int(usage_obj.get("prompt_tokens", 0) or 0),
+        "output_tokens": int(usage_obj.get("completion_tokens", 0) or 0),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "web_search_calls": web_search_calls,
+    }
+
+
 def _extract_usage_from_openai_responses_payload(payload: dict) -> dict:
     usage_obj = payload.get("usage") or {}
     input_tokens = 0
     output_tokens = 0
+    web_search_calls = 0
     if isinstance(usage_obj.get("input_tokens"), int):
         input_tokens = int(usage_obj.get("input_tokens", 0) or 0)
     elif isinstance((usage_obj.get("input_tokens_details") or {}).get("total_tokens"), int):
@@ -394,12 +603,17 @@ def _extract_usage_from_openai_responses_payload(payload: dict) -> dict:
         output_tokens = int(usage_obj.get("output_tokens", 0) or 0)
     elif isinstance((usage_obj.get("output_tokens_details") or {}).get("total_tokens"), int):
         output_tokens = int((usage_obj.get("output_tokens_details") or {}).get("total_tokens", 0) or 0)
+    for item in payload.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("type") or "") == "web_search_call":
+            web_search_calls += 1
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
-        "web_search_calls": 0,
+        "web_search_calls": web_search_calls,
     }
 
 
@@ -463,6 +677,7 @@ def _request_json_from_openai_chat(
     model_name: str,
     user_prompt: str,
     max_tokens: int,
+    enable_web_search: bool,
     target_market: str,
     department_id: str,
 ) -> tuple[dict, dict]:
@@ -474,6 +689,8 @@ def _request_json_from_openai_chat(
         ],
         "max_completion_tokens": max_tokens,
     }
+    if enable_web_search:
+        payload["model"] = "gpt-5-search-api"
     response = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers={
@@ -498,6 +715,7 @@ def _request_json_from_openai_responses(
     model_name: str,
     user_prompt: str,
     max_tokens: int,
+    enable_web_search: bool,
     target_market: str,
     department_id: str,
 ) -> tuple[dict, dict]:
@@ -513,6 +731,9 @@ def _request_json_from_openai_responses(
             }
         },
     }
+    if enable_web_search:
+        payload["tools"] = [{"type": "web_search"}]
+        payload["tool_choice"] = "auto"
     response = requests.post(
         "https://api.openai.com/v1/responses",
         headers={
@@ -531,7 +752,7 @@ def _request_json_from_openai_responses(
     return data, usage
 
 
-def _request_json_from_openai(user_prompt: str, max_tokens: int, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
+def _request_json_from_openai(user_prompt: str, max_tokens: int, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
     api_key = _get_openai_api_key()
     if not api_key:
         raise OpenAIFallbackUnavailableError("未配置 OPENAI_API_KEY")
@@ -554,6 +775,7 @@ def _request_json_from_openai(user_prompt: str, max_tokens: int, target_market: 
                         model_name=model_name,
                         user_prompt=user_prompt,
                         max_tokens=max_tokens,
+                        enable_web_search=enable_web_search,
                         target_market=target_market,
                         department_id=department_id,
                     )
@@ -563,6 +785,7 @@ def _request_json_from_openai(user_prompt: str, max_tokens: int, target_market: 
                         model_name=model_name,
                         user_prompt=user_prompt,
                         max_tokens=max_tokens,
+                        enable_web_search=enable_web_search,
                         target_market=target_market,
                         department_id=department_id,
                     )
@@ -589,6 +812,91 @@ def _request_json_from_openai(user_prompt: str, max_tokens: int, target_market: 
     if last_error:
         raise last_error
     raise ValueError("OpenAI fallback 请求失败")
+
+
+def _request_json_from_glm(user_prompt: str, max_tokens: int, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
+    api_key = _get_glm_api_key()
+    if not api_key:
+        raise ValueError("未配置 ZHIPUAI_API_KEY")
+
+    model_name = (os.getenv("GLM_MODEL") or "glm-5.1").strip() or "glm-5.1"
+    effective_prompt = user_prompt
+    usage_total: dict = {}
+
+    if enable_web_search:
+        search_payload = {
+            "model": (os.getenv("GLM_WEB_SEARCH_MODEL") or "glm-4-air").strip() or "glm-4-air",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"请围绕这个任务先做联网搜索，并输出一份供后续写作模型使用的事实摘要：{user_prompt}",
+                }
+            ],
+            "max_tokens": 2200,
+            "temperature": 0.3,
+            "tools": [{
+                "type": "web_search",
+                "web_search": {
+                    "enable": "True",
+                    "search_engine": "search_pro",
+                    "search_result": "True",
+                    "search_prompt": "你是一位研究助手。请基于联网搜索{search_result}整理一份事实摘要，优先保留最新、权威、可验证的信息，并尽量附上来源日期。输出纯文本摘要，不要 JSON。",
+                    "count": "6",
+                    "search_recency_filter": "noLimit",
+                    "content_size": "high",
+                },
+            }],
+            "tool_choice": "auto",
+        }
+        search_response = requests.post(
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=search_payload,
+            timeout=180,
+        )
+        if search_response.status_code >= 400:
+            raise requests.HTTPError(search_response.text[:500], response=search_response)
+        search_body = search_response.json()
+        search_raw = _extract_openai_text(search_body)
+        usage_total = _merge_usage(usage_total, _extract_usage_from_glm_payload(search_body))
+        effective_prompt = f"""{user_prompt}
+
+下面是智谱联网搜索得到的实时资料摘要，请优先基于这些最新资料生成最终结果；如果摘要与常识冲突，以联网摘要为准，但仍需保持谨慎表述：
+
+{search_raw}
+"""
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)},
+            {"role": "user", "content": effective_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+    }
+    response = requests.post(
+        "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=180,
+    )
+    if response.status_code >= 400:
+        raise requests.HTTPError(response.text[:500], response=response)
+    body = response.json()
+    raw = _extract_openai_text(body)
+    data, repair_usage = _parse_json_response(raw)
+    usage = _merge_usage(usage_total, _merge_usage(_extract_usage_from_glm_payload(body), repair_usage))
+    if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
+        data, schema_usage = _repair_schema_with_openai(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+        usage = _merge_usage(usage, schema_usage)
+    return data, usage
 
 
 
@@ -709,6 +1017,30 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
         raise last_error
     raise ValueError('Claude 未返回可解析的 JSON 内容')
 
+
+def _normalize_script_model_provider(provider: str | None) -> str:
+    requested = str(provider or "").strip().lower()
+    if requested in {SCRIPT_MODEL_CLAUDE, SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT}:
+        return requested
+    return SCRIPT_MODEL_CLAUDE
+
+
+def _request_json_by_provider(
+    provider: str,
+    user_prompt: str,
+    *,
+    max_tokens: int,
+    enable_web_search: bool,
+    target_market: str = "cn",
+    department_id: str = "real_estate",
+) -> tuple[dict, dict]:
+    normalized = _normalize_script_model_provider(provider)
+    if normalized == SCRIPT_MODEL_GLM:
+        return _request_json_from_glm(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    if normalized == SCRIPT_MODEL_CHATGPT:
+        return _request_json_from_openai(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    return _request_json_from_claude(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+
 def _build_message_kwargs(user_prompt: str, max_tokens: int, enable_web_search: bool, target_market: str = "cn", department_id: str = "real_estate") -> dict:
     kwargs = {
         'model': 'claude-sonnet-4-6',
@@ -728,7 +1060,7 @@ def _build_message_kwargs(user_prompt: str, max_tokens: int, enable_web_search: 
     return kwargs
 
 
-def revise_script_segment(topic: str, script_data: dict, segment_index: int, instruction: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> dict:
+def revise_script_segment(topic: str, script_data: dict, segment_index: int, instruction: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_CLAUDE) -> dict:
     target = script_data.get('segments', [])[segment_index]
     segment_type = target.get('type', 'material')
     prompt = f"""
@@ -756,9 +1088,9 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
 - material_search_keyword 必须是英文且适合后续找素材
 """
 
-    revised, usage = _request_json_from_claude(prompt, max_tokens=1600, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    revised, usage = _request_json_by_provider(provider, prompt, max_tokens=1600, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     if target_market == "cn" and _find_cn_marketing_hits(revised):
-        safe_revised, safe_usage = _rewrite_segment_for_cn_safety(topic, script_data, segment_index, revised, enable_web_search, target_market, department_id)
+        safe_revised, safe_usage = _rewrite_segment_for_cn_safety(topic, script_data, segment_index, revised, enable_web_search, target_market, department_id, provider=provider)
         revised = safe_revised
         usage = _merge_usage(usage, safe_usage)
     for key in ('type', 'start', 'end', 'duration'):
@@ -788,22 +1120,24 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
     }
 
 
-def generate_script(topic: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> dict:
+def generate_script(topic: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_CLAUDE) -> dict:
     """
     输入选题，生成完整视频文案
     """
     print(f"📝 正在生成文案：{topic}")
     print(f"🌏 目标市场：{target_market}｜部门：{department_id}")
+    print(f"🤖 文案模型：{_normalize_script_model_provider(provider)}")
     if enable_web_search:
-        print('🌐 已启用 Claude 实时联网检索')
+        print(f"🌐 已启用实时联网检索：{_normalize_script_model_provider(provider)}")
 
     prompt = f"请为以下选题生成视频文案：{topic}"
-    data, usage = _request_json_from_claude(prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    data, usage = _request_json_by_provider(provider, prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     if target_market == "cn" and _find_cn_marketing_hits(data):
         print("🛡️ 命中中国市场营销风险词，正在自动改写为小红书安全模式")
-        safe_data, safe_usage = _rewrite_script_for_cn_safety(topic, data, enable_web_search, target_market, department_id)
+        safe_data, safe_usage = _rewrite_script_for_cn_safety(topic, data, enable_web_search, target_market, department_id, provider=provider)
         data = safe_data
         usage = _merge_usage(usage, safe_usage)
+    data = _rebalance_segment_mix(data, target_market, department_id)
     data['_meta'] = {'usage': usage}
     print(f"✅ 文案生成完成，共 {len(data['segments'])} 段，总时长 {data['total_duration']} 秒")
     return data

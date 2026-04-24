@@ -255,6 +255,9 @@ OMNIHUMAN_RUNNING_JOBS = 0
 OMNIHUMAN_RUNNING_ITEMS: list[dict] = []
 HUNYUAN_ENGINE_ID = "hunyuan_local"
 VOLC_ENGINE_ID = "volc_omnihuman"
+SCRIPT_MODEL_CLAUDE = "claude"
+SCRIPT_MODEL_GLM = "glm_5_1"
+SCRIPT_MODEL_CHATGPT = "chatgpt"
 DIGITAL_HUMAN_ENGINES = [
     {
         "id": VOLC_ENGINE_ID,
@@ -267,6 +270,29 @@ DIGITAL_HUMAN_ENGINES = [
         "id": HUNYUAN_ENGINE_ID,
         "name": "5090 本地 HunyuanVideo-Avatar",
         "description": "测试功能：672 + 20 steps，口型更好但速度很慢。",
+        "admin_only": True,
+        "default": False,
+    },
+]
+SCRIPT_MODEL_OPTIONS = [
+    {
+        "id": SCRIPT_MODEL_CLAUDE,
+        "name": "Claude",
+        "description": "当前默认，支持实时联网检索，适合最新资讯与结构化脚本生成。",
+        "admin_only": False,
+        "default": True,
+    },
+    {
+        "id": SCRIPT_MODEL_GLM,
+        "name": "GLM-5.1",
+        "description": "智谱旗舰模型，中文写作和结构化输出更强，适合内容文案测试。",
+        "admin_only": True,
+        "default": False,
+    },
+    {
+        "id": SCRIPT_MODEL_CHATGPT,
+        "name": "ChatGPT",
+        "description": "OpenAI GPT-5 mini 路线，作为管理员可选文案模型保留。",
         "admin_only": True,
         "default": False,
     },
@@ -573,6 +599,29 @@ def _digital_human_engine_options_for_user(user: Optional[dict]) -> list[dict]:
     return [item for item in DIGITAL_HUMAN_ENGINES if not item.get("admin_only")]
 
 
+def _normalize_script_model(model_id: str | None, user: Optional[dict] = None) -> str:
+    requested = str(model_id or "").strip().lower()
+    if requested == SCRIPT_MODEL_CLAUDE:
+        return SCRIPT_MODEL_CLAUDE
+    if requested in {SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT} and _is_admin(user):
+        return requested
+    return SCRIPT_MODEL_CLAUDE
+
+
+def _script_model_label(model_id: str | None) -> str:
+    normalized = _normalize_script_model(model_id, {"role": "admin"} if model_id in {SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT} else None)
+    for item in SCRIPT_MODEL_OPTIONS:
+        if item["id"] == normalized:
+            return item["name"]
+    return "Claude"
+
+
+def _script_model_options_for_user(user: Optional[dict]) -> list[dict]:
+    if _is_admin(user):
+        return SCRIPT_MODEL_OPTIONS
+    return [item for item in SCRIPT_MODEL_OPTIONS if not item.get("admin_only")]
+
+
 def _get_avatar_option(avatar_id: Optional[str], target_market_id: Optional[str] = None) -> Optional[dict]:
     avatars = _list_avatar_options(target_market_id=target_market_id, include_all=not target_market_id)
     if not avatars:
@@ -800,6 +849,7 @@ def run_pipeline_with_progress(
         workflow_config = task.get("workflow_config", {}) or {}
         target_market = workflow_config.get("target_market", "cn")
         department_id = workflow_config.get("department_id", "real_estate")
+        script_model = _normalize_script_model(workflow_config.get("script_model"), task)
         digital_human_engine = _normalize_digital_human_engine(workflow_config.get("digital_human_engine"), task)
         target_market_obj = _get_target_market(target_market)
         voice_preset = dict(voice_preset or _get_voice_preset(workflow_config.get("voice_preset_id"), target_market))
@@ -826,6 +876,7 @@ def run_pipeline_with_progress(
                 enable_web_search=workflow_config.get("web_search_enabled", False),
                 target_market=target_market,
                 department_id=department_id,
+                provider=script_model,
             )
         else:
             tracker.log("已加载确认后的文案脚本", step=1)
@@ -861,6 +912,8 @@ def run_pipeline_with_progress(
                 "target_market": target_market,
                 "department_id": department_id,
                 "web_search_enabled": workflow_config.get("web_search_enabled", False),
+                "script_model": script_model,
+                "script_model_name": _script_model_label(script_model),
                 "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
                 "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
                 "digital_human_engine": digital_human_engine,
@@ -941,6 +994,8 @@ def run_pipeline_with_progress(
                 "target_market": target_market,
                 "department_id": department_id,
                 "web_search_enabled": workflow_config.get("web_search_enabled", False),
+                "script_model": script_model,
+                "script_model_name": _script_model_label(script_model),
                 "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
                 "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
                 "digital_human_engine": digital_human_engine,
@@ -1203,6 +1258,8 @@ def run_resume_pipeline_with_progress(task_id: str):
                 "target_market": target_market,
                 "department_id": department_id,
                 "web_search_enabled": workflow_config.get("web_search_enabled", False),
+                "script_model": script_model,
+                "script_model_name": _script_model_label(script_model),
                 "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
                 "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
                 "digital_human_engine": digital_human_engine,
@@ -2080,6 +2137,7 @@ def _make_produce_submission_key(
     web_search_enabled: bool,
     target_market: str,
     department_id: str,
+    script_model: str = SCRIPT_MODEL_CLAUDE,
     digital_human_engine: str = VOLC_ENGINE_ID,
 ) -> str:
     payload = {
@@ -2092,6 +2150,7 @@ def _make_produce_submission_key(
         "web_search_enabled": bool(web_search_enabled),
         "target_market": target_market or "",
         "department_id": department_id or "",
+        "script_model": _normalize_script_model(script_model),
         "digital_human_engine": digital_human_engine or VOLC_ENGINE_ID,
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2290,6 +2349,7 @@ def _build_script_preview_payload(
     web_search_enabled: bool = False,
     target_market: str = "cn",
     department_id: str = "real_estate",
+    script_model: str = SCRIPT_MODEL_CLAUDE,
     source_info: Optional[dict] = None,
     input_topic: str = "",
 ) -> dict:
@@ -2299,6 +2359,8 @@ def _build_script_preview_payload(
     payload["web_search_enabled"] = bool(web_search_enabled)
     payload["target_market"] = target_market or payload.get("target_market", "cn")
     payload["department_id"] = department_id or payload.get("department_id", "real_estate")
+    payload["script_model"] = _normalize_script_model(script_model)
+    payload["script_model_name"] = _script_model_label(script_model)
     if source_info:
         payload["source"] = source_info
 
@@ -3266,6 +3328,7 @@ async def workbench_options(request: Request):
         "composition_transitions": COMPOSITION_TRANSITIONS,
         "subtitle_templates": SUBTITLE_TEMPLATES,
         "digital_human_engines": _digital_human_engine_options_for_user(user),
+        "script_models": _script_model_options_for_user(user),
         "current_user": user,
         "current_task": _build_current_task_payload(user),
         "active_tasks": _build_active_tasks_payload(user),
@@ -3305,6 +3368,7 @@ async def script_preview(
     use_web_search: str = Form("false"),
     target_market: str = Form("cn"),
     department_id: str = Form("real_estate"),
+    script_model: str = Form(SCRIPT_MODEL_CLAUDE),
     digital_human_engine: str = Form(VOLC_ENGINE_ID),
 ):
     user, error = _require_user(request)
@@ -3318,30 +3382,34 @@ async def script_preview(
     if not source_ready:
         return JSONResponse({"error": source_error, "source": source_info}, status_code=422)
     generation_topic = _build_source_generation_topic(source_info, topic_text=topic_text, fallback_topic=topic)
+    selected_script_model = _normalize_script_model(script_model, user)
     web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") == "news"
     try:
         script_data = _run_script_ai_job(
             job_id=f"preview:{user.get('username', 'guest')}:{time.time_ns()}",
             label="文案生成",
-            runner=lambda: generate_script(generation_topic, enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id),
+            runner=lambda: generate_script(generation_topic, enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id, provider=selected_script_model),
         )
         script_usage = (script_data.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
+        import traceback
+        print(f"[script_preview_error] model={selected_script_model} web_search={web_search_enabled} topic={generation_topic!r} error={exc!r}")
+        traceback.print_exc()
         message, status_code = _friendly_ai_error_message(exc, "文案生成")
         return JSONResponse({"error": message}, status_code=status_code)
     _record_cost_entry(
         event_type="script_generate",
         amount=_estimate_script_cost(generation_topic, script_data, web_search_enabled=web_search_enabled, usage=script_usage),
-        provider=COST_RULES["script_generate"]["provider"],
+        provider=_script_model_label(selected_script_model),
         user=user,
         topic=generation_topic,
-        meta={"scope": "preview", "web_search_enabled": web_search_enabled, "target_market": target_market, "department_id": department_id, "usage": script_usage, "source": source_info},
+        meta={"scope": "preview", "web_search_enabled": web_search_enabled, "target_market": target_market, "department_id": department_id, "usage": script_usage, "source": source_info, "script_model": selected_script_model},
     )
     return {
         "topic": generation_topic,
         "input_topic": topic_text or topic,
         "script": script_data,
-        "preview": _build_script_preview_payload(script_data, generation_topic, web_search_enabled=web_search_enabled, target_market=target_market, department_id=department_id, source_info=source_info, input_topic=topic),
+        "preview": _build_script_preview_payload(script_data, generation_topic, web_search_enabled=web_search_enabled, target_market=target_market, department_id=department_id, script_model=selected_script_model, source_info=source_info, input_topic=topic),
         "source": source_info,
     }
 
@@ -3359,6 +3427,7 @@ async def produce_video(
     use_web_search: str = Form("false"),
     target_market: str = Form("cn"),
     department_id: str = Form("real_estate"),
+    script_model: str = Form(SCRIPT_MODEL_CLAUDE),
     digital_human_engine: str = Form(VOLC_ENGINE_ID),
 ):
     user, error = _require_user(request)
@@ -3375,6 +3444,7 @@ async def produce_video(
     if not source_ready:
         return JSONResponse({"error": source_error, "source": source_info}, status_code=422)
     generation_topic = _build_source_generation_topic(source_info, topic_text=topic_text, fallback_topic=topic)
+    selected_script_model = _normalize_script_model(script_model, user)
     web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") == "news"
     selected_digital_human_engine = _normalize_digital_human_engine(digital_human_engine, user)
     submission_key = _make_produce_submission_key(
@@ -3387,6 +3457,7 @@ async def produce_video(
         web_search_enabled=web_search_enabled,
         target_market=target_market,
         department_id=department_id,
+        script_model=selected_script_model,
         digital_human_engine=selected_digital_human_engine,
     )
 
@@ -3446,6 +3517,7 @@ async def produce_video(
             "compose_transition_id": "fade",
             "subtitle_template_id": "classic",
             "source": source_info,
+            "script_model": selected_script_model,
             "digital_human_engine": selected_digital_human_engine,
         },
         "cost_entries": [],
@@ -3875,6 +3947,7 @@ async def revise_script_preview_segment(
     use_web_search: str = Form("false"),
     target_market: str = Form("cn"),
     department_id: str = Form("real_estate"),
+    script_model: str = Form(SCRIPT_MODEL_CLAUDE),
 ):
     user, error = _require_user(request)
     if error:
@@ -3899,12 +3972,13 @@ async def revise_script_preview_segment(
     if not source_ready:
         return JSONResponse({"error": source_error, "source": source_info}, status_code=422)
     generation_topic = _build_source_generation_topic(source_info, topic_text=topic_text, fallback_topic=topic)
+    selected_script_model = _normalize_script_model(script_model, user)
     web_search_enabled = _parse_bool_form(use_web_search) or source_info.get("kind") == "news"
     try:
         revised_segment = _run_script_ai_job(
             job_id=f"revise:{user.get('username', 'guest')}:{time.time_ns()}",
             label="AI 修改",
-            runner=lambda: revise_script_segment(generation_topic, script_data, segment_index - 1, instruction.strip(), enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id),
+            runner=lambda: revise_script_segment(generation_topic, script_data, segment_index - 1, instruction.strip(), enable_web_search=web_search_enabled, target_market=target_market, department_id=department_id, provider=selected_script_model),
         )
         revise_usage = (revised_segment.pop("_meta", {}) or {}).get("usage", {})
     except Exception as exc:
@@ -3913,15 +3987,15 @@ async def revise_script_preview_segment(
     _record_cost_entry(
         event_type="script_revise",
         amount=_estimate_script_cost(instruction.strip(), {"segment": revised_segment}, web_search_enabled=web_search_enabled, revise=True, usage=revise_usage),
-        provider=COST_RULES["script_revise"]["provider"],
+        provider=_script_model_label(selected_script_model),
         user=user,
         topic=topic,
-        meta={"segment_index": segment_index, "web_search_enabled": web_search_enabled, "target_market": target_market, "department_id": department_id, "usage": revise_usage},
+        meta={"segment_index": segment_index, "web_search_enabled": web_search_enabled, "target_market": target_market, "department_id": department_id, "usage": revise_usage, "script_model": selected_script_model},
     )
     script_data["segments"][segment_index - 1] = revised_segment
     return {
         "script": script_data,
-        "preview": _build_script_preview_payload(script_data, topic, web_search_enabled=web_search_enabled, target_market=target_market, department_id=department_id),
+        "preview": _build_script_preview_payload(script_data, topic, web_search_enabled=web_search_enabled, target_market=target_market, department_id=department_id, script_model=selected_script_model),
         "segment": revised_segment,
     }
 
