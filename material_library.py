@@ -2,10 +2,14 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
+
+from PIL import Image
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -17,6 +21,15 @@ MATERIAL_LIBRARY_LOCK = threading.Lock()
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_SUFFIXES = VIDEO_SUFFIXES | IMAGE_SUFFIXES
+MATERIAL_CATEGORIES = [
+    "房地产",
+    "科技",
+    "新闻",
+    "通用氛围",
+    "城市街景",
+    "室内空间",
+    "人物辅助",
+]
 
 
 def _now() -> float:
@@ -57,6 +70,77 @@ def _slugify(value: str, fallback: str = "material") -> str:
 def _safe_suffix(filename: str) -> str:
     suffix = Path(filename or "").suffix.lower()
     return suffix if suffix in ALLOWED_SUFFIXES else ""
+
+
+def _extract_image_metadata(path: Path) -> dict:
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+        return {
+            "width": int(width or 0),
+            "height": int(height or 0),
+            "duration_seconds": 0.0,
+        }
+    except Exception:
+        return {
+            "width": 0,
+            "height": 0,
+            "duration_seconds": 0.0,
+        }
+
+
+def _extract_video_metadata(path: Path) -> dict:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout or "{}")
+        stream = ((data.get("streams") or [{}])[0]) if isinstance(data, dict) else {}
+        fmt = data.get("format") or {}
+        width = int(float(stream.get("width") or 0))
+        height = int(float(stream.get("height") or 0))
+        duration = float(fmt.get("duration") or 0.0)
+        return {
+            "width": width,
+            "height": height,
+            "duration_seconds": duration,
+        }
+    except Exception:
+        return {
+            "width": 0,
+            "height": 0,
+            "duration_seconds": 0.0,
+        }
+
+
+def extract_material_metadata(path: str | Path, kind: Optional[str] = None) -> dict:
+    target = Path(path)
+    resolved_kind = str(kind or _asset_kind_for_suffix(str(target))).strip().lower() or "image"
+    base = {
+        "file_size_bytes": int(target.stat().st_size) if target.exists() else 0,
+        "width": 0,
+        "height": 0,
+        "duration_seconds": 0.0,
+    }
+    if not target.exists():
+        return base
+    if resolved_kind == "video":
+        base.update(_extract_video_metadata(target))
+    else:
+        base.update(_extract_image_metadata(target))
+    return base
 
 
 def _load_manifest() -> dict:
@@ -106,6 +190,10 @@ def _normalize_item(item: dict) -> dict:
         "reviewed_at": float(item.get("reviewed_at") or 0),
         "reviewed_by_username": str(item.get("reviewed_by_username") or "").strip(),
         "reviewed_by_display_name": str(item.get("reviewed_by_display_name") or "").strip(),
+        "file_size_bytes": int(item.get("file_size_bytes") or 0),
+        "width": int(item.get("width") or 0),
+        "height": int(item.get("height") or 0),
+        "duration_seconds": float(item.get("duration_seconds") or 0),
     }
 
 
@@ -152,6 +240,7 @@ def register_material_file(
     final_path = MATERIAL_LIBRARY_DIR / final_name
     MATERIAL_LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source_path), str(final_path))
+    metadata = extract_material_metadata(final_path)
     item = _normalize_item(
         {
             "id": material_id,
@@ -170,6 +259,10 @@ def register_material_file(
             "original_filename": original_filename or source_path.name,
             "source": source,
             "created_at": _now(),
+            "file_size_bytes": metadata.get("file_size_bytes", 0),
+            "width": metadata.get("width", 0),
+            "height": metadata.get("height", 0),
+            "duration_seconds": metadata.get("duration_seconds", 0.0),
         }
     )
     with MATERIAL_LIBRARY_LOCK:
@@ -208,6 +301,49 @@ def update_material_library_item(item_id: str, updates: dict) -> dict:
         manifest["items"] = items
         _save_manifest(manifest)
     return normalized
+
+
+def batch_update_material_library_items(item_ids: list[str], updates: dict) -> list[dict]:
+    normalized_ids = {str(item_id or "").strip() for item_id in item_ids if str(item_id or "").strip()}
+    if not normalized_ids:
+        return []
+    updated_items = []
+    with MATERIAL_LIBRARY_LOCK:
+        manifest = _load_manifest()
+        items = manifest.get("items", [])
+        for index, row in enumerate(items):
+            item_id = str((row or {}).get("id") or "").strip()
+            if item_id not in normalized_ids:
+                continue
+            merged = dict(row or {})
+            merged.update(updates or {})
+            normalized = _normalize_item(merged)
+            items[index] = normalized
+            updated_items.append(normalized)
+        manifest["items"] = items
+        _save_manifest(manifest)
+    return updated_items
+
+
+def batch_delete_material_library_items(item_ids: list[str]) -> list[dict]:
+    normalized_ids = {str(item_id or "").strip() for item_id in item_ids if str(item_id or "").strip()}
+    if not normalized_ids:
+        return []
+    deleted_rows = []
+    with MATERIAL_LIBRARY_LOCK:
+        manifest = _load_manifest()
+        items = manifest.get("items", [])
+        kept = []
+        for row in items:
+            if str((row or {}).get("id") or "").strip() in normalized_ids:
+                deleted_rows.append(_normalize_item(row))
+            else:
+                kept.append(row)
+        manifest["items"] = kept
+        _save_manifest(manifest)
+    for item in deleted_rows:
+        (MATERIAL_LIBRARY_DIR / Path(str(item.get("filename") or "")).name).unlink(missing_ok=True)
+    return deleted_rows
 
 
 def _text_variants(value: str) -> list[str]:
@@ -252,6 +388,45 @@ def _material_score(item: dict, seg: dict, *, target_market: str = "", departmen
     if seg.get("material_keyword") and str(item.get("category") or "").lower() in str(seg.get("material_keyword") or "").lower():
         score += 4
     return score
+
+
+def material_item_matches_filters(
+    item: dict,
+    *,
+    q: str = "",
+    kind: str = "",
+    category: str = "",
+    uploader: str = "",
+) -> bool:
+    normalized_kind = str(kind or "").strip().lower()
+    normalized_category = str(category or "").strip().lower()
+    normalized_uploader = str(uploader or "").strip().lower()
+    if normalized_kind and str(item.get("kind") or "").strip().lower() != normalized_kind:
+        return False
+    if normalized_category and str(item.get("category") or "").strip().lower() != normalized_category:
+        return False
+    uploader_blob = " ".join(
+        [
+            str(item.get("uploader_username") or ""),
+            str(item.get("uploader_display_name") or ""),
+        ]
+    ).lower()
+    if normalized_uploader and normalized_uploader not in uploader_blob:
+        return False
+    phrases = _text_variants(q)
+    if not phrases:
+        return True
+    searchable = " ".join(
+        [
+            str(item.get("title") or ""),
+            str(item.get("category") or ""),
+            " ".join(item.get("tags") or []),
+            str(item.get("notes") or ""),
+            str(item.get("original_filename") or ""),
+            uploader_blob,
+        ]
+    ).lower()
+    return all(phrase in searchable for phrase in phrases)
 
 
 def search_material_library(

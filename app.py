@@ -33,9 +33,13 @@ load_dotenv(override=False)
 
 from avatar_generator import AvatarGenerationError, generate_avatar_candidates
 from material_library import (
+    MATERIAL_CATEGORIES,
     MATERIAL_LIBRARY_DIR,
+    batch_delete_material_library_items,
+    batch_update_material_library_items,
     delete_material_library_item,
     list_material_library_items,
+    material_item_matches_filters,
     register_material_file,
     update_material_library_item,
 )
@@ -450,6 +454,14 @@ def _delete_avatar_library_file(filename: str) -> dict:
 def _material_library_item_payload(item: dict, current_user: Optional[dict] = None) -> dict:
     payload = dict(item or {})
     payload["url"] = f"/public/material-library/{quote(str(payload.get('filename') or ''))}"
+    width = int(payload.get("width") or 0)
+    height = int(payload.get("height") or 0)
+    payload["resolution_label"] = f"{width}×{height}" if width and height else ""
+    payload["duration_label"] = (
+        f"{round(float(payload.get('duration_seconds') or 0), 1):g} 秒"
+        if str(payload.get("kind") or "") == "video" and float(payload.get("duration_seconds") or 0) > 0
+        else ""
+    )
     payload["can_review"] = bool(current_user and _is_admin(current_user))
     payload["can_delete"] = bool(
         current_user
@@ -3374,15 +3386,48 @@ async def workbench_options(request: Request):
 
 
 @app.get("/api/material-library")
-async def material_library_items(request: Request):
+async def material_library_items(
+    request: Request,
+    q: str = "",
+    kind: str = "",
+    category: str = "",
+    uploader: str = "",
+):
     user, error = _require_user(request)
     if error:
         return error
-    approved = [_material_library_item_payload(item, user) for item in list_material_library_items(status="approved")]
+    approved_rows = [
+        item
+        for item in list_material_library_items(status="approved")
+        if material_item_matches_filters(item, q=q, kind=kind, category=category, uploader=uploader)
+    ]
+    approved = [_material_library_item_payload(item, user) for item in approved_rows]
     pending = []
     if _is_admin(user):
-        pending = [_material_library_item_payload(item, user) for item in list_material_library_items(status="pending")]
-    return {"items": approved, "pending_items": pending}
+        pending_rows = [
+            item
+            for item in list_material_library_items(status="pending")
+            if material_item_matches_filters(item, q=q, kind=kind, category=category, uploader=uploader)
+        ]
+        pending = [_material_library_item_payload(item, user) for item in pending_rows]
+    uploaders = []
+    uploader_seen = set()
+    for item in list_material_library_items():
+        uploader_name = str(item.get("uploader_display_name") or item.get("uploader_username") or "").strip()
+        if not uploader_name:
+            continue
+        lowered = uploader_name.lower()
+        if lowered in uploader_seen:
+            continue
+        uploader_seen.add(lowered)
+        uploaders.append(uploader_name)
+    uploaders.sort()
+    return {
+        "items": approved,
+        "pending_items": pending,
+        "categories": MATERIAL_CATEGORIES,
+        "uploaders": uploaders,
+    }
 
 
 @app.post("/api/material-library/upload")
@@ -3426,6 +3471,7 @@ async def review_material_library_item(
     request: Request,
     status: str = Form(...),
     title: str = Form(""),
+    category: str = Form(""),
     notes: str = Form(""),
 ):
     user, error = _require_user(request)
@@ -3446,6 +3492,7 @@ async def review_material_library_item(
             {
                 "status": normalized_status,
                 "title": final_title,
+                "category": category.strip(),
                 "notes": notes.strip(),
                 "reviewed_at": time.time(),
                 "reviewed_by_username": user.get("username", ""),
@@ -3455,6 +3502,39 @@ async def review_material_library_item(
     except FileNotFoundError:
         return JSONResponse({"error": "素材不存在"}, status_code=404)
     return {"ok": True, "item": _material_library_item_payload(updated, user)}
+
+
+@app.post("/api/material-library/review-batch")
+async def review_material_library_items_batch(
+    request: Request,
+    action: str = Form(...),
+    item_ids: str = Form(""),
+    category: str = Form(""),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以批量处理素材")
+    normalized_action = str(action or "").strip().lower()
+    selected_ids = [value.strip() for value in str(item_ids or "").split(",") if value.strip()]
+    if not selected_ids:
+        return JSONResponse({"error": "请先选择素材"}, status_code=400)
+    if normalized_action == "delete":
+        deleted = batch_delete_material_library_items(selected_ids)
+        return {"ok": True, "deleted_count": len(deleted), "items": [_material_library_item_payload(item, user) for item in deleted]}
+    if normalized_action not in {"approved", "rejected"}:
+        return JSONResponse({"error": "批量操作非法"}, status_code=400)
+    updates = {
+        "status": normalized_action,
+        "reviewed_at": time.time(),
+        "reviewed_by_username": user.get("username", ""),
+        "reviewed_by_display_name": user.get("display_name", ""),
+    }
+    if category.strip():
+        updates["category"] = category.strip()
+    updated = batch_update_material_library_items(selected_ids, updates)
+    return {"ok": True, "updated_count": len(updated), "items": [_material_library_item_payload(item, user) for item in updated]}
 
 
 @app.delete("/api/material-library/{item_id}")
