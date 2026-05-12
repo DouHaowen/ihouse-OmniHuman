@@ -1616,8 +1616,55 @@
             <button class="btn btn-secondary" id="materialLibraryClearSelectionBtn" type="button">清空选择</button>
           </div>
         </div>
-        <div class="file-board" id="materialLibraryPendingList" style="display:none;"></div>
-        <div class="file-board" id="materialLibraryList"></div>
+        <div class="panel" id="materialHarvestPanel" style="padding:16px; display:none; gap:16px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+            <div>
+              <strong style="font-size:16px;">AI 爬虫候选池</strong>
+              <div class="helper" style="margin-top:6px;">先抓网页候选素材，再人工导入正式素材库。当前阶段不会直接参与生产匹配。</div>
+            </div>
+            <button class="btn btn-secondary" id="materialHarvestRefreshBtn" type="button">刷新候选池</button>
+          </div>
+          <div class="panel" style="padding:16px; background:rgba(255,255,255,0.56);">
+            <div class="field">
+              <label for="materialHarvestTopic">采集主题</label>
+              <input id="materialHarvestTopic" class="select-input" type="text" placeholder="例如：日本买房、东京街景、机器人发布会。留好主题后，即使不贴链接也能自动搜索来源。">
+            </div>
+            <div class="field">
+              <label for="materialHarvestSourceText">来源链接</label>
+              <textarea id="materialHarvestSourceText" placeholder="可选。贴新闻、官网、YouTube、B站等来源链接。留空时，系统会先按采集主题自动搜索来源，再抽取候选素材。"></textarea>
+            </div>
+            <div class="field">
+              <label for="materialHarvestNotes">采集说明</label>
+              <textarea id="materialHarvestNotes" placeholder="可选。比如：优先找东京高层公寓、商圈配套、签约现场这类画面。"></textarea>
+            </div>
+            <div class="actions">
+              <button class="btn btn-primary" id="materialHarvestStartBtn" type="button">开始采集候选素材</button>
+            </div>
+            <div class="helper" id="materialHarvestStatus">候选池是素材库独立开发阶段，不会直接改动现有生产逻辑。</div>
+          </div>
+          <div class="file-board" id="materialHarvestJobList"></div>
+          <div class="file-board" id="materialHarvestCandidateList"></div>
+        </div>
+        <div class="panel" id="materialLibraryPendingSection" style="padding:16px; display:none; gap:12px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+            <div>
+              <strong style="font-size:16px;">待审核素材</strong>
+              <div class="helper" style="margin-top:6px;">这里显示员工刚上传、还没进入正式素材库的图片和视频。</div>
+            </div>
+            <div class="helper" id="materialLibraryPendingCount">0 条</div>
+          </div>
+          <div class="file-board" id="materialLibraryPendingList"></div>
+        </div>
+        <div class="panel" id="materialLibraryApprovedSection" style="padding:16px; display:grid; gap:12px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+            <div>
+              <strong style="font-size:16px;">正式素材库</strong>
+              <div class="helper" style="margin-top:6px;">这里是已经审核通过的正式素材。下方会直接显示对应的图片和视频预览。</div>
+            </div>
+            <div class="helper" id="materialLibraryApprovedCount">0 条</div>
+          </div>
+          <div class="file-board" id="materialLibraryList"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -1657,6 +1704,8 @@
       materialLibraryUploaders: [],
       materialLibraryFilters: { q: '', kind: '', category: '', uploader: '' },
       materialLibrarySelection: [],
+      materialHarvestJobs: [],
+      materialHarvestCandidates: [],
     };
 
     function progressLabelsForLanguage(lang) {
@@ -1748,6 +1797,10 @@
       materialLibraryUploadBtn: document.getElementById('materialLibraryUploadBtn'),
       materialLibraryRefreshBtn: document.getElementById('materialLibraryRefreshBtn'),
       materialLibraryStatus: document.getElementById('materialLibraryStatus'),
+      materialLibraryPendingSection: document.getElementById('materialLibraryPendingSection'),
+      materialLibraryApprovedSection: document.getElementById('materialLibraryApprovedSection'),
+      materialLibraryPendingCount: document.getElementById('materialLibraryPendingCount'),
+      materialLibraryApprovedCount: document.getElementById('materialLibraryApprovedCount'),
       materialLibraryPendingList: document.getElementById('materialLibraryPendingList'),
       materialLibraryList: document.getElementById('materialLibraryList'),
       materialLibrarySearchInput: document.getElementById('materialLibrarySearchInput'),
@@ -1761,6 +1814,15 @@
       materialLibraryBatchDeleteBtn: document.getElementById('materialLibraryBatchDeleteBtn'),
       materialLibraryClearSelectionBtn: document.getElementById('materialLibraryClearSelectionBtn'),
       materialLibrarySelectionHint: document.getElementById('materialLibrarySelectionHint'),
+      materialHarvestPanel: document.getElementById('materialHarvestPanel'),
+      materialHarvestTopic: document.getElementById('materialHarvestTopic'),
+      materialHarvestSourceText: document.getElementById('materialHarvestSourceText'),
+      materialHarvestNotes: document.getElementById('materialHarvestNotes'),
+      materialHarvestStartBtn: document.getElementById('materialHarvestStartBtn'),
+      materialHarvestRefreshBtn: document.getElementById('materialHarvestRefreshBtn'),
+      materialHarvestStatus: document.getElementById('materialHarvestStatus'),
+      materialHarvestJobList: document.getElementById('materialHarvestJobList'),
+      materialHarvestCandidateList: document.getElementById('materialHarvestCandidateList'),
     };
 
     function escapeHtml(value = '') {
@@ -2239,6 +2301,9 @@
 
     function renderMaterialLibrary(items = []) {
       state.materialLibraryItems = Array.isArray(items) ? items : [];
+      if (els.materialLibraryApprovedCount) {
+        els.materialLibraryApprovedCount.textContent = `${state.materialLibraryItems.length} 条`;
+      }
       if (!els.materialLibraryList) return;
       if (!state.materialLibraryItems.length) {
         els.materialLibraryList.innerHTML = `<div class="empty-box">当前筛选下还没有已审核素材。</div>`;
@@ -2267,6 +2332,7 @@
               <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at || 0))} · ${escapeHtml(item.uploader_display_name || item.uploader_username || '未记录上传人')}${markets ? ` · 市场 ${escapeHtml(markets)}` : ''}${departments ? ` · 部门 ${escapeHtml(departments)}` : ''}</div>
               ${tags.length ? `<div style="display:flex; gap:8px; flex-wrap:wrap;">${tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
               ${item.notes ? `<div class="helper">${escapeHtml(item.notes)}</div>` : ''}
+              ${item.original_filename ? `<div class="helper">原始文件：${escapeHtml(item.original_filename)}</div>` : ''}
             </div>
             <div class="history-actions">
               <a class="btn btn-secondary" href="${item.url}" target="_blank" rel="noreferrer" style="text-decoration:none;">查看</a>
@@ -2277,6 +2343,10 @@
       }).join('');
       document.querySelectorAll('.material-library-delete-btn').forEach(btn => {
         btn.addEventListener('click', () => deleteMaterialLibraryItem(btn.dataset.materialId));
+      });
+      document.querySelectorAll('#materialLibraryList img').forEach(img => {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', () => openLightbox(img.currentSrc || img.src));
       });
       document.querySelectorAll('.material-library-select-checkbox').forEach(box => {
         box.checked = (state.materialLibrarySelection || []).includes(box.dataset.materialId || '');
@@ -2289,11 +2359,18 @@
       const rows = state.materialLibraryPendingItems;
       if (!els.materialLibraryPendingList) return;
       if (!state.currentUser || state.currentUser.role !== 'admin') {
-        els.materialLibraryPendingList.style.display = 'none';
+        if (els.materialLibraryPendingSection) {
+          els.materialLibraryPendingSection.style.display = 'none';
+        }
         els.materialLibraryPendingList.innerHTML = '';
         return;
       }
-      els.materialLibraryPendingList.style.display = 'grid';
+      if (els.materialLibraryPendingSection) {
+        els.materialLibraryPendingSection.style.display = 'grid';
+      }
+      if (els.materialLibraryPendingCount) {
+        els.materialLibraryPendingCount.textContent = `${rows.length} 条`;
+      }
       if (!rows.length) {
         els.materialLibraryPendingList.innerHTML = `<div class="empty-box">当前筛选下没有待审核素材。</div>`;
         return;
@@ -2347,6 +2424,10 @@
       document.querySelectorAll('.material-review-reject-btn').forEach(btn => {
         btn.addEventListener('click', () => reviewMaterialLibraryItem(btn.dataset.materialId, 'rejected', btn));
       });
+      document.querySelectorAll('#materialLibraryPendingList img').forEach(img => {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', () => openLightbox(img.currentSrc || img.src));
+      });
       document.querySelectorAll('.material-library-select-checkbox').forEach(box => {
         box.checked = (state.materialLibrarySelection || []).includes(box.dataset.materialId || '');
         box.addEventListener('change', () => toggleMaterialLibrarySelection(box.dataset.materialId, box.checked));
@@ -2373,6 +2454,9 @@
         renderMaterialLibrary(data.items || []);
         renderMaterialLibraryPending(data.pending_items || []);
         renderMaterialLibrarySelectionState();
+        if (els.materialHarvestPanel) {
+          els.materialHarvestPanel.style.display = state.currentUser?.role === 'admin' ? 'grid' : 'none';
+        }
         if (els.materialLibraryStatus) {
           const pendingCount = (data.pending_items || []).length;
           els.materialLibraryStatus.textContent = `当前筛选下共有 ${(data.items || []).length} 条已审核素材${state.currentUser?.role === 'admin' ? `，待审核 ${pendingCount} 条` : ''}。生产时只会使用已审核素材。`;
@@ -2503,6 +2587,179 @@
         await loadMaterialLibrary();
       } catch (error) {
         alert(error.message || '批量处理失败');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
+    }
+
+    function renderMaterialHarvestJobs(items = []) {
+      state.materialHarvestJobs = Array.isArray(items) ? items : [];
+      if (!els.materialHarvestJobList) return;
+      if (!state.currentUser || state.currentUser.role !== 'admin') {
+        els.materialHarvestJobList.innerHTML = '';
+        return;
+      }
+      if (!state.materialHarvestJobs.length) {
+        els.materialHarvestJobList.innerHTML = `<div class="empty-box">还没有采集任务，先贴几条来源链接试试。</div>`;
+        return;
+      }
+      els.materialHarvestJobList.innerHTML = state.materialHarvestJobs.slice(0, 6).map(job => `
+        <div class="history-item">
+          <div class="history-main">
+            <div class="history-title">${escapeHtml(job.topic || '未命名采集任务')}</div>
+            <div class="history-topic">${escapeHtml(job.message || '等待开始')}</div>
+            <div class="history-meta">${escapeHtml(formatHistoryTime(job.created_at || 0))} · 共 ${escapeHtml(String(job.source_count || 0))} 个来源${job.manual_source_count ? `（手动 ${escapeHtml(String(job.manual_source_count || 0))}` : ''}${job.discovered_source_count ? `${job.manual_source_count ? ' / ' : '（'}自动 ${escapeHtml(String(job.discovered_source_count || 0))}` : ''}${job.source_count ? '）' : ''} · ${escapeHtml(String(job.candidate_count || 0))} 条候选 · ${escapeHtml(job.status || 'queued')}</div>
+            ${job.error ? `<div class="helper" style="color:var(--danger);">${escapeHtml(job.error)}</div>` : ''}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function renderMaterialHarvestCandidates(items = []) {
+      state.materialHarvestCandidates = Array.isArray(items) ? items : [];
+      if (!els.materialHarvestCandidateList) return;
+      if (!state.currentUser || state.currentUser.role !== 'admin') {
+        els.materialHarvestCandidateList.innerHTML = '';
+        return;
+      }
+      if (!state.materialHarvestCandidates.length) {
+        els.materialHarvestCandidateList.innerHTML = `<div class="empty-box">还没有采集到候选素材。第一版会从你提供的网页里提取图片、封面和视频链接。</div>`;
+        return;
+      }
+      els.materialHarvestCandidateList.innerHTML = state.materialHarvestCandidates.map(item => {
+        const preview = item.kind === 'video'
+          ? `<video src="${item.preview_url}" muted playsinline controls preload="metadata" style="width:100%; max-height:220px; border-radius:18px; background:#000;"></video>`
+          : `<img src="${item.preview_url}" alt="${escapeHtml(item.title || item.page_title || 'candidate')}" style="width:100%; max-height:220px; object-fit:cover; border-radius:18px; background:#fff;">`;
+        return `
+          <div class="history-item">
+            <div class="history-main" style="display:grid; gap:12px;">
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <span class="tag">${escapeHtml(item.kind === 'video' ? '视频候选' : '图片候选')}</span>
+                <span class="tag" style="${item.status === 'imported' ? 'background:rgba(18,146,101,0.10); color:var(--success);' : item.status === 'rejected' ? 'background:rgba(205,77,77,0.10); color:var(--danger);' : 'background:rgba(187,132,65,0.10); color:var(--accent);'}">${escapeHtml(item.status || 'pending')}</span>
+              </div>
+              ${preview}
+              <div class="history-title">${escapeHtml(item.page_title || item.title || '未命名候选素材')}</div>
+              <div class="history-topic">${escapeHtml(item.domain || '')}</div>
+              ${item.page_excerpt ? `<div class="helper">${escapeHtml(item.page_excerpt)}</div>` : ''}
+              <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at || 0))}</div>
+            </div>
+            <div class="history-actions">
+              <a class="btn btn-secondary" href="${item.source_url}" target="_blank" rel="noreferrer" style="text-decoration:none;">打开来源</a>
+              <a class="btn btn-secondary" href="${item.preview_url}" target="_blank" rel="noreferrer" style="text-decoration:none;">查看候选</a>
+              ${item.can_import ? `<button class="btn btn-primary material-harvest-import-btn" type="button" data-candidate-id="${item.id}">导入正式素材库</button>` : ''}
+              ${item.can_reject ? `<button class="btn btn-ghost material-harvest-reject-btn" type="button" data-candidate-id="${item.id}">拒绝</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+      document.querySelectorAll('.material-harvest-import-btn').forEach(btn => {
+        btn.addEventListener('click', () => importHarvestCandidate(btn.dataset.candidateId, btn));
+      });
+      document.querySelectorAll('.material-harvest-reject-btn').forEach(btn => {
+        btn.addEventListener('click', () => rejectHarvestCandidate(btn.dataset.candidateId, btn));
+      });
+    }
+
+    async function loadMaterialHarvest() {
+      if (!state.currentUser || state.currentUser.role !== 'admin') return;
+      try {
+        const res = await fetch('/api/material-library/harvest');
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '候选池加载失败');
+        renderMaterialHarvestJobs(data.jobs || []);
+        renderMaterialHarvestCandidates(data.candidates || []);
+        if (els.materialHarvestStatus) {
+          els.materialHarvestStatus.textContent = `当前共有 ${(data.jobs || []).length} 个采集任务，${(data.candidates || []).length} 条候选素材。候选导入前不会进入正式素材库。`;
+        }
+      } catch (error) {
+        if (els.materialHarvestCandidateList) {
+          els.materialHarvestCandidateList.innerHTML = `<div class="empty-box">${escapeHtml(error.message || '候选池加载失败')}</div>`;
+        }
+      }
+    }
+
+    async function startMaterialHarvestJob() {
+      const topic = els.materialHarvestTopic?.value.trim() || '';
+      const sourceText = els.materialHarvestSourceText?.value.trim() || '';
+      if (!sourceText && !topic) {
+        alert('请先填写采集主题，或贴至少一条来源链接');
+        return;
+      }
+      const formData = new FormData();
+      formData.append('topic', topic);
+      formData.append('source_text', sourceText);
+      formData.append('search_notes', els.materialHarvestNotes?.value.trim() || '');
+      const originalText = els.materialHarvestStartBtn?.textContent || '开始采集候选素材';
+      if (els.materialHarvestStartBtn) {
+        els.materialHarvestStartBtn.disabled = true;
+        els.materialHarvestStartBtn.textContent = '采集中...';
+      }
+      if (els.materialHarvestStatus) {
+        els.materialHarvestStatus.textContent = '正在创建采集任务并抓取候选素材...';
+      }
+      try {
+        const res = await fetch('/api/material-library/harvest/jobs', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '采集任务创建失败');
+        await loadMaterialHarvest();
+      } catch (error) {
+        if (els.materialHarvestStatus) {
+          els.materialHarvestStatus.textContent = error.message || '采集任务创建失败';
+        }
+        alert(error.message || '采集任务创建失败');
+      } finally {
+        if (els.materialHarvestStartBtn) {
+          els.materialHarvestStartBtn.disabled = false;
+          els.materialHarvestStartBtn.textContent = originalText;
+        }
+      }
+    }
+
+    async function importHarvestCandidate(candidateId, button) {
+      if (!candidateId) return;
+      const category = window.prompt('导入到正式素材库时的分类（可留空）', '') || '';
+      const notes = window.prompt('导入备注（可留空）', '') || '';
+      const formData = new FormData();
+      formData.append('category', category.trim());
+      formData.append('notes', notes.trim());
+      const originalText = button?.textContent || '导入正式素材库';
+      if (button) {
+        button.disabled = true;
+        button.textContent = '导入中...';
+      }
+      try {
+        const res = await fetch(`/api/material-library/harvest/candidates/${candidateId}/import`, { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '导入失败');
+        await loadMaterialHarvest();
+        await loadMaterialLibrary();
+      } catch (error) {
+        alert(error.message || '导入失败');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
+    }
+
+    async function rejectHarvestCandidate(candidateId, button) {
+      if (!candidateId) return;
+      const originalText = button?.textContent || '拒绝';
+      if (button) {
+        button.disabled = true;
+        button.textContent = '处理中...';
+      }
+      try {
+        const res = await fetch(`/api/material-library/harvest/candidates/${candidateId}/reject`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '拒绝失败');
+        await loadMaterialHarvest();
+      } catch (error) {
+        alert(error.message || '拒绝失败');
       } finally {
         if (button) {
           button.disabled = false;
@@ -2902,6 +3159,7 @@
       startActiveTasksPolling();
       await loadHistory();
       await loadMaterialLibrary();
+      await loadMaterialHarvest();
       await restoreActiveTaskState();
     }
 
@@ -2923,6 +3181,7 @@
       startActiveTasksPolling();
       await loadHistory();
       await loadMaterialLibrary();
+      await loadMaterialHarvest();
       await loadCostSummary();
       await restoreActiveTaskState();
       setAuthVisible(false);
@@ -3484,14 +3743,14 @@
       }
       els.digitalHumanEngineField.style.display = 'grid';
       if (els.digitalHumanEngineHint) {
-        els.digitalHumanEngineHint.textContent = '仅管理员测试：Hunyuan 会走 5090 后台队列，同一时间只跑 1 个，生成很慢但可恢复轮询。';
+        els.digitalHumanEngineHint.textContent = '管理员可测试多种数字人引擎；员工账号会默认走本地 5090 InfiniteTalk，并在失败时自动重试。';
       }
       els.digitalHumanEngineGrid.innerHTML = engines.map(engine => `
         <article class="preset-card ${engine.id === state.selectedDigitalHumanEngine ? 'selected' : ''}" data-digital-human-engine="${engine.id}">
           <div class="preset-head">
             <div>
               <div class="preset-name">${escapeHtml(engine.name || engine.id)}</div>
-              <div class="preset-subtitle">${engine.id === 'hunyuan_local' ? '本地 5090 测试' : '生产默认'}</div>
+              <div class="preset-subtitle">${engine.id === 'volc_omnihuman' ? '火山云端' : engine.id === 'infinitetalk_local' ? '员工生产默认 / 本地 5090' : '本地 5090 测试'}</div>
             </div>
             ${engine.default ? `<span class="tag">${escapeHtml(copyText('statusDefault', '默认'))}</span>` : ''}
           </div>
@@ -4576,6 +4835,7 @@
     els.materialLibraryDrawerBtn?.addEventListener('click', async () => {
       openDrawer('materialLibraryDrawer');
       await loadMaterialLibrary();
+      await loadMaterialHarvest();
     });
     els.materialLibraryUploadBtn?.addEventListener('click', uploadMaterialLibraryItems);
     els.materialLibraryRefreshBtn?.addEventListener('click', loadMaterialLibrary);
@@ -4599,6 +4859,8 @@
     els.materialLibraryBatchRejectBtn?.addEventListener('click', () => batchReviewMaterialLibrary('rejected', els.materialLibraryBatchRejectBtn));
     els.materialLibraryBatchDeleteBtn?.addEventListener('click', () => batchReviewMaterialLibrary('delete', els.materialLibraryBatchDeleteBtn));
     els.materialLibraryClearSelectionBtn?.addEventListener('click', () => setMaterialLibrarySelection([]));
+    els.materialHarvestStartBtn?.addEventListener('click', startMaterialHarvestJob);
+    els.materialHarvestRefreshBtn?.addEventListener('click', loadMaterialHarvest);
     if (els.composeVideoBtn) els.composeVideoBtn.addEventListener('click', composeFinalVideo);
     els.loginForm.addEventListener('submit', handleLogin);
     els.logoutBtn.addEventListener('click', handleLogout);

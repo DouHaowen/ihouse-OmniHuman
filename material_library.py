@@ -232,7 +232,7 @@ def register_material_file(
     source_path = Path(temp_path).resolve()
     if not source_path.exists():
         raise FileNotFoundError("上传素材不存在")
-    suffix = _safe_suffix(original_filename or source_path.name)
+    suffix = _safe_suffix(original_filename) or _safe_suffix(source_path.name)
     if not suffix:
         raise ValueError("仅支持上传 jpg、jpeg、png、webp、mp4、mov、m4v、webm")
     material_id = uuid.uuid4().hex[:12]

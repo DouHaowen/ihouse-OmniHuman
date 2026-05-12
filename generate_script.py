@@ -20,6 +20,7 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 SCRIPT_MODEL_CLAUDE = "claude"
 SCRIPT_MODEL_GLM = "glm_5_1"
 SCRIPT_MODEL_CHATGPT = "chatgpt"
+SCRIPT_MODEL_QWEN_LOCAL = "qwen_local"
 
 MAX_DIGITAL_HUMAN_TOTAL_SECONDS = 35
 TARGET_DIGITAL_HUMAN_TOTAL_SECONDS = 30
@@ -459,6 +460,18 @@ def _get_openai_compat_fallback_model() -> str:
     return (os.getenv("OPENAI_COMPAT_FALLBACK_MODEL") or "gpt-5-mini").strip()
 
 
+def _get_local_qwen_api_key() -> str:
+    return (os.getenv("LOCAL_QWEN_API_KEY") or "").strip()
+
+
+def _get_local_qwen_base_url() -> str:
+    return (os.getenv("LOCAL_QWEN_BASE_URL") or "https://ihouse-mix.office.ihousejapan.cn/v1/chat/completions").strip()
+
+
+def _get_local_qwen_model() -> str:
+    return (os.getenv("LOCAL_QWEN_MODEL") or "Qwen/Qwen3.5-122B-A10B-GPTQ-Int4").strip()
+
+
 def _is_retryable_anthropic_error(exc: Exception) -> bool:
     status_code = getattr(exc, "status_code", None)
     text = str(exc).lower()
@@ -671,6 +684,53 @@ def _repair_schema_with_openai(raw_payload: dict, max_tokens: int, target_market
     return data, repair_usage
 
 
+def _repair_schema_with_claude(raw_payload: dict, max_tokens: int, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
+    repair_prompt = f"""
+下面这份 JSON 不是 iHouse 系统需要的最终结构。请你在保留原始主题信息的前提下，把它重写成 iHouse 规定的严格 JSON 结构。
+
+必须满足：
+1. 顶层只允许包含：title, cover_title, total_duration, segments, social_post
+2. segments 必须是数组，且每一段只允许是以下两种结构之一：
+   - digital_human: type/start/end/duration/script/action
+   - material: type/start/end/duration/script/material_keyword/material_search_keyword/material_desc
+3. 开头、中间短过渡、结尾固定为 3 段数字人，其余内容优先为素材段
+4. 数字全部使用整数
+5. 只返回合法 JSON，不要解释
+
+原始 JSON：
+{json.dumps(raw_payload, ensure_ascii=False, indent=2)}
+"""
+    message = _create_message_with_retry(
+        **_build_message_kwargs(
+            repair_prompt,
+            max_tokens=max_tokens,
+            enable_web_search=False,
+            target_market=target_market,
+            department_id=department_id,
+        )
+    )
+    usage = _extract_usage_from_message(message)
+    raw = _extract_message_text(message)
+    data, repair_usage = _parse_json_response(raw)
+    usage = _merge_usage(usage, repair_usage)
+    if not _has_expected_script_shape(data):
+        raise ValueError("Claude schema repair 后仍未返回符合要求的脚本结构")
+    return data, usage
+
+
+def _ensure_script_schema(data: Any, max_tokens: int, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
+    if _has_expected_script_shape(data):
+        return data, {}
+    if isinstance(data, dict):
+        if _get_openai_api_key():
+            repaired, usage = _repair_schema_with_openai(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+        else:
+            repaired, usage = _repair_schema_with_claude(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+        if _has_expected_script_shape(repaired):
+            return repaired, usage
+    raise ValueError("文案模型未返回符合要求的脚本结构")
+
+
 def _request_json_from_openai_chat(
     *,
     api_key: str,
@@ -812,6 +872,56 @@ def _request_json_from_openai(user_prompt: str, max_tokens: int, enable_web_sear
     if last_error:
         raise last_error
     raise ValueError("OpenAI fallback 请求失败")
+
+
+def _request_json_from_local_qwen(
+    user_prompt: str,
+    max_tokens: int,
+    enable_web_search: bool = False,
+    target_market: str = "cn",
+    department_id: str = "real_estate",
+) -> tuple[dict, dict]:
+    api_key = _get_local_qwen_api_key()
+    if not api_key:
+        raise ValueError("未配置 LOCAL_QWEN_API_KEY")
+
+    effective_prompt = user_prompt
+    if enable_web_search:
+        effective_prompt = f"""{user_prompt}
+
+补充说明：
+当前工作台启用了实时联网检索，但这个本地 Qwen 测试接口暂未接入原生搜索工具。
+请在没有外部搜索结果的前提下谨慎表达，不要伪造“最新政策”或“刚刚发生”的结论。"""
+
+    payload = {
+        "model": _get_local_qwen_model(),
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)},
+            {"role": "user", "content": effective_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+        "response_format": {"type": "json_object"},
+    }
+    response = requests.post(
+        _get_local_qwen_base_url(),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=180,
+    )
+    if response.status_code >= 400:
+        raise requests.HTTPError(response.text[:500], response=response)
+    body = response.json()
+    raw = _extract_openai_text(body)
+    data, repair_usage = _parse_json_response(raw)
+    usage = _merge_usage(_extract_usage_from_openai_payload(body), repair_usage)
+    if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
+        data, schema_usage = _ensure_script_schema(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+        usage = _merge_usage(usage, schema_usage)
+    return data, usage
 
 
 def _request_json_from_glm(user_prompt: str, max_tokens: int, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
@@ -1020,7 +1130,7 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
 
 def _normalize_script_model_provider(provider: str | None) -> str:
     requested = str(provider or "").strip().lower()
-    if requested in {SCRIPT_MODEL_CLAUDE, SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT}:
+    if requested in {SCRIPT_MODEL_CLAUDE, SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT, SCRIPT_MODEL_QWEN_LOCAL}:
         return requested
     return SCRIPT_MODEL_CLAUDE
 
@@ -1037,6 +1147,8 @@ def _request_json_by_provider(
     normalized = _normalize_script_model_provider(provider)
     if normalized == SCRIPT_MODEL_GLM:
         return _request_json_from_glm(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    if normalized == SCRIPT_MODEL_QWEN_LOCAL:
+        return _request_json_from_local_qwen(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     if normalized == SCRIPT_MODEL_CHATGPT:
         return _request_json_from_openai(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     return _request_json_from_claude(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
@@ -1132,6 +1244,8 @@ def generate_script(topic: str, enable_web_search: bool = False, target_market: 
 
     prompt = f"请为以下选题生成视频文案：{topic}"
     data, usage = _request_json_by_provider(provider, prompt, max_tokens=4200, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    data, schema_usage = _ensure_script_schema(data, max_tokens=4200, target_market=target_market, department_id=department_id)
+    usage = _merge_usage(usage, schema_usage)
     if target_market == "cn" and _find_cn_marketing_hits(data):
         print("🛡️ 命中中国市场营销风险词，正在自动改写为小红书安全模式")
         safe_data, safe_usage = _rewrite_script_for_cn_safety(topic, data, enable_web_search, target_market, department_id, provider=provider)

@@ -32,6 +32,14 @@ from starlette.middleware.sessions import SessionMiddleware
 load_dotenv(override=False)
 
 from avatar_generator import AvatarGenerationError, generate_avatar_candidates
+from ai_material_harvester import (
+    create_harvest_job,
+    import_harvest_candidate_to_material_library,
+    list_harvest_candidates,
+    list_harvest_jobs,
+    run_harvest_job_async,
+    update_harvest_candidate,
+)
 from material_library import (
     MATERIAL_CATEGORIES,
     MATERIAL_LIBRARY_DIR,
@@ -286,10 +294,12 @@ OMNIHUMAN_WAITING_JOBS: list[dict] = []
 OMNIHUMAN_RUNNING_JOBS = 0
 OMNIHUMAN_RUNNING_ITEMS: list[dict] = []
 HUNYUAN_ENGINE_ID = "hunyuan_local"
+INFINITETALK_ENGINE_ID = "infinitetalk_local"
 VOLC_ENGINE_ID = "volc_omnihuman"
 SCRIPT_MODEL_CLAUDE = "claude"
 SCRIPT_MODEL_GLM = "glm_5_1"
 SCRIPT_MODEL_CHATGPT = "chatgpt"
+SCRIPT_MODEL_QWEN_LOCAL = "qwen_local"
 DIGITAL_HUMAN_ENGINES = [
     {
         "id": VOLC_ENGINE_ID,
@@ -302,6 +312,13 @@ DIGITAL_HUMAN_ENGINES = [
         "id": HUNYUAN_ENGINE_ID,
         "name": "5090 本地 HunyuanVideo-Avatar",
         "description": "测试功能：672 + 20 steps，口型更好但速度很慢。",
+        "admin_only": True,
+        "default": False,
+    },
+    {
+        "id": INFINITETALK_ENGINE_ID,
+        "name": "5090 本地 InfiniteTalk",
+        "description": "测试功能：480P + fp8 + 整段音频时长透传，默认嘴型更收、速度更快。",
         "admin_only": True,
         "default": False,
     },
@@ -325,6 +342,13 @@ SCRIPT_MODEL_OPTIONS = [
         "id": SCRIPT_MODEL_CHATGPT,
         "name": "ChatGPT",
         "description": "OpenAI GPT-5 mini 路线，作为管理员可选文案模型保留。",
+        "admin_only": True,
+        "default": False,
+    },
+    {
+        "id": SCRIPT_MODEL_QWEN_LOCAL,
+        "name": "本地 Qwen 122B",
+        "description": "管理员测试：走本地 OpenAI 兼容端点，适合对比中文文案生成效果。",
         "admin_only": True,
         "default": False,
     },
@@ -470,6 +494,22 @@ def _material_library_item_payload(item: dict, current_user: Optional[dict] = No
             or str(payload.get("uploader_username") or "") == str(current_user.get("username") or "")
         )
     )
+    return payload
+
+
+def _harvest_job_payload(job: dict) -> dict:
+    payload = dict(job or {})
+    payload["source_count"] = len(payload.get("source_urls") or []) + len(payload.get("discovered_source_urls") or [])
+    payload["manual_source_count"] = len(payload.get("source_urls") or [])
+    payload["discovered_source_count"] = len(payload.get("discovered_source_urls") or [])
+    return payload
+
+
+def _harvest_candidate_payload(candidate: dict, current_user: Optional[dict] = None) -> dict:
+    payload = dict(candidate or {})
+    payload["preview_url"] = str(payload.get("asset_url") or "").strip()
+    payload["can_import"] = bool(current_user and _is_admin(current_user) and payload.get("status") == "pending")
+    payload["can_reject"] = bool(current_user and _is_admin(current_user) and payload.get("status") == "pending")
     return payload
 
 
@@ -634,13 +674,18 @@ def _is_avatar_voice_compatible(avatar_option: Optional[dict], voice_preset: Opt
 
 def _normalize_digital_human_engine(engine_id: str | None, user: Optional[dict] = None) -> str:
     requested = (engine_id or VOLC_ENGINE_ID).strip()
+    if not _is_admin(user):
+        return INFINITETALK_ENGINE_ID
     if requested == HUNYUAN_ENGINE_ID and _is_admin(user):
         return HUNYUAN_ENGINE_ID
+    if requested == INFINITETALK_ENGINE_ID and _is_admin(user):
+        return INFINITETALK_ENGINE_ID
     return VOLC_ENGINE_ID
 
 
 def _digital_human_engine_label(engine_id: str | None) -> str:
-    normalized = _normalize_digital_human_engine(engine_id, {"role": "admin"} if engine_id == HUNYUAN_ENGINE_ID else None)
+    admin_user = {"role": "admin"} if engine_id in {HUNYUAN_ENGINE_ID, INFINITETALK_ENGINE_ID} else None
+    normalized = _normalize_digital_human_engine(engine_id, admin_user)
     for item in DIGITAL_HUMAN_ENGINES:
         if item["id"] == normalized:
             return item["name"]
@@ -650,20 +695,28 @@ def _digital_human_engine_label(engine_id: str | None) -> str:
 def _digital_human_engine_options_for_user(user: Optional[dict]) -> list[dict]:
     if _is_admin(user):
         return DIGITAL_HUMAN_ENGINES
-    return [item for item in DIGITAL_HUMAN_ENGINES if not item.get("admin_only")]
+    return [
+        {
+            "id": INFINITETALK_ENGINE_ID,
+            "name": "5090 本地 InfiniteTalk",
+            "description": "员工默认：走本地 5090 数字人队列，按整段音频时长生成，默认小嘴型并带自动重试。",
+            "admin_only": False,
+            "default": True,
+        }
+    ]
 
 
 def _normalize_script_model(model_id: str | None, user: Optional[dict] = None) -> str:
     requested = str(model_id or "").strip().lower()
     if requested == SCRIPT_MODEL_CLAUDE:
         return SCRIPT_MODEL_CLAUDE
-    if requested in {SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT} and _is_admin(user):
+    if requested in {SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT, SCRIPT_MODEL_QWEN_LOCAL} and _is_admin(user):
         return requested
     return SCRIPT_MODEL_CLAUDE
 
 
 def _script_model_label(model_id: str | None) -> str:
-    normalized = _normalize_script_model(model_id, {"role": "admin"} if model_id in {SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT} else None)
+    normalized = _normalize_script_model(model_id, {"role": "admin"} if model_id in {SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT, SCRIPT_MODEL_QWEN_LOCAL} else None)
     for item in SCRIPT_MODEL_OPTIONS:
         if item["id"] == normalized:
             return item["name"]
@@ -835,6 +888,17 @@ def _generate_digital_human_video_by_engine(
         from hunyuan_avatar_client import generate_hunyuan_avatar_video
 
         return generate_hunyuan_avatar_video(
+            image_path=image_path,
+            audio_path=audio_path,
+            output_path=output_path,
+            prompt=prompt,
+            external_task_id=task_id,
+            segment_index=segment_index,
+        )
+    if engine_id == INFINITETALK_ENGINE_ID:
+        from infinitetalk_avatar_client import generate_infinitetalk_avatar_video
+
+        return generate_infinitetalk_avatar_video(
             image_path=image_path,
             audio_path=audio_path,
             output_path=output_path,
@@ -1204,6 +1268,7 @@ def run_resume_pipeline_with_progress(task_id: str):
         workflow_config = task.get("workflow_config", {}) or result.get("workflow_config", {}) or {}
         target_market = workflow_config.get("target_market", "cn")
         department_id = workflow_config.get("department_id", "real_estate")
+        script_model = _normalize_script_model(workflow_config.get("script_model"), task)
         digital_human_engine = _normalize_digital_human_engine(workflow_config.get("digital_human_engine"), task)
         target_market_obj = _get_target_market(target_market)
         voice_cfg = workflow_config.get("voice_preset", {}) or {}
@@ -1618,12 +1683,17 @@ def _is_retryable_omnihuman_error(exc: Exception) -> bool:
         "timed out",
         "connection reset",
         "connection aborted",
+        "connection refused",
+        "remote end closed",
         "temporarily unavailable",
         "service unavailable",
+        "bad gateway",
+        "health check failed",
         "cuda-capable device",
         "device(s) is/are busy",
         "gpu",
         "hunyuan",
+        "infinitetalk",
     ]
     return any(token in text for token in retry_tokens)
 
@@ -3535,6 +3605,91 @@ async def review_material_library_items_batch(
         updates["category"] = category.strip()
     updated = batch_update_material_library_items(selected_ids, updates)
     return {"ok": True, "updated_count": len(updated), "items": [_material_library_item_payload(item, user) for item in updated]}
+
+
+@app.get("/api/material-library/harvest")
+async def material_harvest_payload(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return {"jobs": [], "candidates": []}
+    jobs = [_harvest_job_payload(item) for item in list_harvest_jobs()]
+    candidates = [_harvest_candidate_payload(item, user) for item in list_harvest_candidates()]
+    return {"jobs": jobs, "candidates": candidates}
+
+
+@app.post("/api/material-library/harvest/jobs")
+async def create_material_harvest_job(
+    request: Request,
+    topic: str = Form(""),
+    source_text: str = Form(""),
+    search_notes: str = Form(""),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以发起采集任务")
+    job = create_harvest_job(
+        topic=topic,
+        source_text=source_text,
+        search_notes=search_notes,
+        created_by_username=user.get("username", ""),
+        created_by_display_name=user.get("display_name", ""),
+    )
+    run_harvest_job_async(job["id"])
+    return {"ok": True, "job": _harvest_job_payload(job)}
+
+
+@app.post("/api/material-library/harvest/candidates/{candidate_id}/import")
+async def import_material_harvest_candidate(
+    candidate_id: str,
+    request: Request,
+    category: str = Form(""),
+    notes: str = Form(""),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以导入候选素材")
+    try:
+        item = import_harvest_candidate_to_material_library(
+            candidate_id,
+            uploader_username=user.get("username", ""),
+            uploader_display_name=user.get("display_name", ""),
+            category=category.strip(),
+            notes=notes.strip(),
+        )
+        updated = update_material_library_item(
+            str(item.get("id")),
+            {
+                "status": "approved",
+                "reviewed_at": time.time(),
+                "reviewed_by_username": user.get("username", ""),
+                "reviewed_by_display_name": user.get("display_name", ""),
+            },
+        )
+    except FileNotFoundError:
+        return JSONResponse({"error": "候选素材不存在"}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": f"导入失败：{exc}"}, status_code=400)
+    return {"ok": True, "item": _material_library_item_payload(updated, user)}
+
+
+@app.post("/api/material-library/harvest/candidates/{candidate_id}/reject")
+async def reject_material_harvest_candidate(candidate_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以拒绝候选素材")
+    try:
+        candidate = update_harvest_candidate(candidate_id, {"status": "rejected"})
+    except FileNotFoundError:
+        return JSONResponse({"error": "候选素材不存在"}, status_code=404)
+    return {"ok": True, "candidate": _harvest_candidate_payload(candidate, user)}
 
 
 @app.delete("/api/material-library/{item_id}")

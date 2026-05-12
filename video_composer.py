@@ -885,9 +885,10 @@ def compose_history_video(output_dir: str, result: dict, transition_id: str = "f
 
     try:
         # ── Per-segment: build video (silent) + prepare audio (uniform m4a) ──
-        # DH segments → audio extracted from DH video (lip-sync baked in)
-        # Material segments → TTS mp3
-        # All audio normalized to aac m4a so concat doesn't break.
+        # Prefer the original TTS audio for every segment. Some DH outputs carry
+        # malformed AAC tracks, which can break concat during final composition.
+        # We still use the DH video as the visual track and trim/pad it to the
+        # chosen audio duration so the muxed result stays aligned.
         segment_video_files: list[Path] = []
         segment_audio_files: list[Path] = []
         subtitle_audio_segments: list[dict] = []
@@ -901,18 +902,19 @@ def compose_history_video(output_dir: str, result: dict, transition_id: str = "f
 
             seg_audio = work_dir / f"audio_{idx:02d}.m4a"
 
-            if is_dh:
-                # Extract audio from DH video → uniform m4a
-                _run([
-                    "ffmpeg", "-y", "-i", str(dh_video),
-                    "-vn", "-c:a", AUDIO_CODEC, "-b:a", "192k",
-                    str(seg_audio),
-                ])
-            elif tts_audio and tts_audio.exists():
+            if tts_audio and tts_audio.exists():
                 # Convert TTS mp3 → uniform m4a
                 _run([
                     "ffmpeg", "-y", "-i", str(tts_audio),
                     "-c:a", AUDIO_CODEC, "-b:a", "192k",
+                    str(seg_audio),
+                ])
+            elif is_dh:
+                # Fallback: extract audio from DH video when the original audio
+                # file is missing. This keeps older tasks composable.
+                _run([
+                    "ffmpeg", "-y", "-i", str(dh_video),
+                    "-vn", "-c:a", AUDIO_CODEC, "-b:a", "192k",
                     str(seg_audio),
                 ])
             else:
