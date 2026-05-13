@@ -7,7 +7,7 @@ import json
 import os
 import re
 import time
-from typing import Any
+from typing import Any, Optional
 
 import anthropic
 import requests
@@ -25,6 +25,9 @@ SCRIPT_MODEL_QWEN_LOCAL = "qwen_local"
 MAX_DIGITAL_HUMAN_TOTAL_SECONDS = 35
 TARGET_DIGITAL_HUMAN_TOTAL_SECONDS = 30
 MAX_DIGITAL_HUMAN_SEGMENTS = 3
+OPENING_DIGITAL_HUMAN_MAX_SECONDS = 8
+MIDDLE_DIGITAL_HUMAN_MAX_SECONDS = 6
+CLOSING_DIGITAL_HUMAN_MAX_SECONDS = 8
 
 
 class UpstreamBusyError(Exception):
@@ -70,15 +73,16 @@ SYSTEM_PROMPT = """你是一个专业的AI短视频内容制作助手，服务�
 2. 总视频60~120秒
 3. 不要再强制数字人和素材交替出现，要根据内容功能智能判断：观点表达、开场抓人、转折总结更适合 digital_human；政策说明、数据案例、时间线、流程步骤、画面展示更适合 material
 4. 开头和结尾必须是数字人段落，中间固定保留 1 段短过渡型数字人，所以整条视频固定为 3 段数字人
-5. 中间那段数字人不要承担复杂信息，只用于承上启下、让主播短暂露面，时长尽量控制在 6~10 秒，文案要短，不讲长数据、长流程和复杂案例
-6. 数字人总时长目标约 30 秒，硬上限 35 秒；其余内容优先用素材承接，以降低数字人频率和成本
-7. social_post 只输出一份，必须面向当前目标市场，语气适合社交媒体发布
-8. 所有数字必须是整数
-9. digital_human 的 action 只能描述主播坐在台前即可完成的动作与表情，例如点头、微笑、自然眨眼、轻微摆头、表情认真、语气坚定等
-10. digital_human 的 action 严禁出现任何凭空道具、场景、背景元素或夸张肢体动作，例如不能写手持计算器、指向图表、站起身、走动、在街头、在客厅等
-11. material_desc 只描述素材画面本身应该出现什么内容，不要描述数字人主播，也不要写镜头外的设定
-12. material_keyword 要跟随目标市场语言输出，给运营直接阅读
-13. material_search_keyword 必须使用简洁准确的英文关键词，专门给素材库检索使用"""
+5. 开头数字人只讲一句点题话，结尾数字人只讲一句总结或轻互动，二者都要明显短，不要写成长段口播
+6. 中间那段数字人不要承担复杂信息，只用于承上启下、让主播短暂露面，时长尽量控制在 4~6 秒，文案要短，不讲长数据、长流程和复杂案例
+7. 数字人总时长尽量继续压缩，开头和结尾各控制在 6~8 秒，中间控制在 4~6 秒；其余内容优先用素材承接，以降低数字人频率和成本
+8. social_post 只输出一份，必须面向当前目标市场，语气适合社交媒体发布
+9. 所有数字必须是整数
+10. digital_human 的 action 只能描述主播坐在台前即可完成的动作与表情，例如点头、微笑、自然眨眼、轻微摆头、表情认真、语气坚定等
+11. digital_human 的 action 严禁出现任何凭空道具、场景、背景元素或夸张肢体动作，例如不能写手持计算器、指向图表、站起身、走动、在街头、在客厅等
+12. material_desc 只描述素材画面本身应该出现什么内容，不要描述数字人主播，也不要写镜头外的设定
+13. material_keyword 要跟随目标市场语言输出，给运营直接阅读
+14. material_search_keyword 必须使用简洁准确的英文关键词，专门给素材库检索使用"""
 
 WEB_SEARCH_GUIDANCE = """
 
@@ -192,6 +196,22 @@ def _middle_transition_fallback(target_market: str) -> str:
     return "但真正关键的，其实是接下来这一点。"
 
 
+def _opening_anchor_fallback(target_market: str) -> str:
+    if target_market == "tw":
+        return "先講結論，這件事和你以為的不太一樣。"
+    if target_market == "jp":
+        return "まず結論から言うと、この話は多くの人の想像と少し違います。"
+    return "先说结论，这件事和你以为的不太一样。"
+
+
+def _closing_anchor_fallback(target_market: str) -> str:
+    if target_market == "tw":
+        return "所以真正的重點，不是表面看到的那樣。"
+    if target_market == "jp":
+        return "つまり本当のポイントは、見た目ほど単純ではないということです。"
+    return "所以真正的重点，不是表面看到的那样。"
+
+
 def _shorten_middle_transition_script(script_text: str, target_market: str) -> str:
     text = re.sub(r"\s+", " ", (script_text or "").strip())
     if not text:
@@ -205,6 +225,132 @@ def _shorten_middle_transition_script(script_text: str, target_market: str) -> s
         return _middle_transition_fallback(target_market)
     suffix = "。" if target_market in {"cn", "tw"} else "。"
     return candidate + ("" if candidate.endswith(("。", "！", "？", ".", "!", "?")) else suffix)
+
+
+def _shorten_single_sentence_script(script_text: str, target_market: str, fallback: str, max_len: int) -> str:
+    text = re.sub(r"\s+", " ", (script_text or "").strip())
+    if not text:
+        return fallback
+    parts = [part.strip(" ，,。；;！!？?") for part in re.split(r"[。！？!?；;，,]", text) if part.strip()]
+    candidate = parts[0] if parts else text
+    if len(candidate) > max_len:
+        candidate = candidate[:max_len].rstrip("，,、 ")
+    if len(candidate) < 6:
+        return fallback
+    suffix = "。" if target_market in {"cn", "tw", "jp"} else "."
+    return candidate + ("" if candidate.endswith(("。", "！", "？", ".", "!", "?")) else suffix)
+
+
+def _split_sentences(script_text: str) -> list[str]:
+    text = re.sub(r"\s+", " ", (script_text or "").strip())
+    if not text:
+        return []
+    parts = re.split(r"(?<=[。！？!?])\s*", text)
+    sentences = [part.strip() for part in parts if part.strip()]
+    if sentences:
+        return sentences
+    return [text]
+
+
+def _split_clauses(script_text: str) -> list[str]:
+    text = re.sub(r"\s+", " ", (script_text or "").strip())
+    if not text:
+        return []
+    parts = [part.strip(" ，,、；;。！？!?") for part in re.split(r"[，,、；;。！？!?]", text) if part.strip()]
+    return [part for part in parts if part]
+
+
+def _sentence_suffix(target_market: str) -> str:
+    return "。" if target_market in {"cn", "tw", "jp"} else "."
+
+
+def _ensure_terminal_punctuation(text: str, target_market: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return cleaned
+    if cleaned.endswith(("。", "！", "？", ".", "!", "?")):
+        return cleaned
+    return cleaned + _sentence_suffix(target_market)
+
+
+def _append_script(base: str, extra: str) -> str:
+    base = (base or "").strip()
+    extra = (extra or "").strip()
+    if not extra:
+        return base
+    if not base:
+        return extra
+    joiner = "" if base.endswith(("。", "！", "？", ".", "!", "?")) else "。"
+    return f"{base}{joiner}{extra}"
+
+
+def _prepend_script(base: str, extra: str) -> str:
+    base = (base or "").strip()
+    extra = (extra or "").strip()
+    if not extra:
+        return base
+    if not base:
+        return extra
+    joiner = "" if extra.endswith(("。", "！", "？", ".", "!", "?")) else "。"
+    return f"{extra}{joiner}{base}"
+
+
+def _extract_opening_hook(script_text: str, target_market: str) -> tuple[str, str]:
+    sentences = _split_sentences(script_text)
+    if len(sentences) >= 2:
+        kept = _ensure_terminal_punctuation(sentences[0], target_market)
+        overflow = " ".join(sentences[1:]).strip()
+        return kept, overflow
+
+    clauses = _split_clauses(script_text)
+    if len(clauses) >= 2:
+        kept = _ensure_terminal_punctuation(clauses[0], target_market)
+        overflow = "，".join(clauses[1:]).strip()
+        return kept, overflow
+
+    kept = _shorten_single_sentence_script(
+        script_text,
+        target_market,
+        _opening_anchor_fallback(target_market),
+        28 if target_market in {"cn", "tw"} else 40,
+    )
+    return kept, ""
+
+
+def _extract_closing_hook(script_text: str, target_market: str) -> tuple[str, str]:
+    sentences = _split_sentences(script_text)
+    if len(sentences) >= 2:
+        kept = _ensure_terminal_punctuation(sentences[-1], target_market)
+        overflow = " ".join(sentences[:-1]).strip()
+        return kept, overflow
+
+    clauses = _split_clauses(script_text)
+    if len(clauses) >= 2:
+        kept = _ensure_terminal_punctuation(clauses[-1], target_market)
+        overflow = "，".join(clauses[:-1]).strip()
+        return kept, overflow
+
+    kept = _shorten_single_sentence_script(
+        script_text,
+        target_market,
+        _closing_anchor_fallback(target_market),
+        28 if target_market in {"cn", "tw"} else 40,
+    )
+    return kept, ""
+
+
+def _retime_segments(segments: list[dict]) -> list[dict]:
+    cursor = 0
+    retimed = []
+    for seg in segments:
+        duration = max(1, int(seg.get("duration", 0) or 0))
+        seg_copy = dict(seg)
+        seg_copy["start"] = cursor
+        seg_copy["end"] = cursor + duration
+        seg_copy["duration"] = duration
+        cursor += duration
+        retimed.append(seg_copy)
+    return retimed
 
 
 def _segment_type_priority(seg: dict) -> int:
@@ -255,6 +401,20 @@ def _convert_segment_to_digital_human(seg: dict, target_market: str) -> dict:
         "script": (seg.get("script") or "").strip(),
         "action": seg.get("action") or _digital_human_action_fallback(target_market),
     }
+
+
+def _find_next_material_index(segments: list[dict], start_idx: int) -> Optional[int]:
+    for idx in range(start_idx + 1, len(segments)):
+        if segments[idx].get("type") == "material":
+            return idx
+    return None
+
+
+def _find_prev_material_index(segments: list[dict], start_idx: int) -> Optional[int]:
+    for idx in range(start_idx - 1, -1, -1):
+        if segments[idx].get("type") == "material":
+            return idx
+    return None
 
 
 def _is_short_transition_candidate(seg: dict) -> bool:
@@ -324,7 +484,53 @@ def _rebalance_segment_mix(data: dict, target_market: str, department_id: str) -
         idx = min(removable, key=lambda item: (_segment_type_priority(segments[item]), int(segments[item].get("duration", 0) or 0)))
         segments[idx] = _convert_segment_to_material(segments[idx], target_market, department_id)
 
+    if segments and segments[0].get("type") == "digital_human":
+        kept_opening, overflow_opening = _extract_opening_hook(segments[0].get("script", ""), target_market)
+        segments[0]["script"] = _shorten_single_sentence_script(
+            kept_opening,
+            target_market,
+            _opening_anchor_fallback(target_market),
+            28 if target_market in {"cn", "tw"} else 40,
+        )
+        original_opening_duration = int(segments[0].get("duration", 0) or 0)
+        segments[0]["duration"] = min(original_opening_duration, OPENING_DIGITAL_HUMAN_MAX_SECONDS)
+        freed_opening = max(0, original_opening_duration - int(segments[0].get("duration", 0) or 0))
+        target_opening_material_idx = _find_next_material_index(segments, 0)
+        if overflow_opening and target_opening_material_idx is not None:
+            segments[target_opening_material_idx]["script"] = _prepend_script(
+                segments[target_opening_material_idx].get("script", ""),
+                overflow_opening,
+            )
+            segments[target_opening_material_idx]["duration"] = int(segments[target_opening_material_idx].get("duration", 0) or 0) + freed_opening
+
+    middle_dh_indices = [idx for idx in dh_indices() if idx not in protected]
+    if middle_dh_indices:
+        middle_idx = middle_dh_indices[0]
+        segments[middle_idx]["script"] = _shorten_middle_transition_script(segments[middle_idx].get("script", ""), target_market)
+        segments[middle_idx]["duration"] = min(int(segments[middle_idx].get("duration", 0) or 0), MIDDLE_DIGITAL_HUMAN_MAX_SECONDS)
+
+    if len(segments) > 1 and segments[-1].get("type") == "digital_human":
+        kept_closing, overflow_closing = _extract_closing_hook(segments[-1].get("script", ""), target_market)
+        segments[-1]["script"] = _shorten_single_sentence_script(
+            kept_closing,
+            target_market,
+            _closing_anchor_fallback(target_market),
+            28 if target_market in {"cn", "tw"} else 40,
+        )
+        original_closing_duration = int(segments[-1].get("duration", 0) or 0)
+        segments[-1]["duration"] = min(original_closing_duration, CLOSING_DIGITAL_HUMAN_MAX_SECONDS)
+        freed_closing = max(0, original_closing_duration - int(segments[-1].get("duration", 0) or 0))
+        target_closing_material_idx = _find_prev_material_index(segments, len(segments) - 1)
+        if overflow_closing and target_closing_material_idx is not None:
+            segments[target_closing_material_idx]["script"] = _append_script(
+                segments[target_closing_material_idx].get("script", ""),
+                overflow_closing,
+            )
+            segments[target_closing_material_idx]["duration"] = int(segments[target_closing_material_idx].get("duration", 0) or 0) + freed_closing
+
+    segments = _retime_segments(segments)
     data["segments"] = segments
+    data["total_duration"] = sum(int(seg.get("duration", 0) or 0) for seg in segments)
     return data
 
 def _iter_text_values(value: Any):
@@ -470,6 +676,31 @@ def _get_local_qwen_base_url() -> str:
 
 def _get_local_qwen_model() -> str:
     return (os.getenv("LOCAL_QWEN_MODEL") or "Qwen/Qwen3.5-122B-A10B-GPTQ-Int4").strip()
+
+
+def _get_local_qwen_verify_ssl() -> bool:
+    raw = (os.getenv("LOCAL_QWEN_VERIFY_SSL") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    base_url = _get_local_qwen_base_url().lower()
+    if "__qwen_local__" in base_url or "172.18.0.1" in base_url or "127.0.0.1" in base_url:
+        return False
+    return True
+
+
+def _get_local_qwen_public_base_url() -> str:
+    return "https://ihouse-mix.office.ihousejapan.cn/v1/chat/completions"
+
+
+def _get_local_qwen_candidate_configs() -> list[tuple[str, bool]]:
+    primary_url = _get_local_qwen_base_url()
+    configs: list[tuple[str, bool]] = [(primary_url, _get_local_qwen_verify_ssl())]
+    fallback_url = _get_local_qwen_public_base_url()
+    if fallback_url and fallback_url != primary_url:
+        configs.append((fallback_url, True))
+    return configs
 
 
 def _is_retryable_anthropic_error(exc: Exception) -> bool:
@@ -903,17 +1134,31 @@ def _request_json_from_local_qwen(
         "temperature": 0.7,
         "response_format": {"type": "json_object"},
     }
-    response = requests.post(
-        _get_local_qwen_base_url(),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=180,
-    )
-    if response.status_code >= 400:
-        raise requests.HTTPError(response.text[:500], response=response)
+    last_error: Exception | None = None
+    response = None
+    for base_url, verify_ssl in _get_local_qwen_candidate_configs():
+        try:
+            response = requests.post(
+                base_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=180,
+                verify=verify_ssl,
+            )
+            if response.status_code >= 400:
+                raise requests.HTTPError(response.text[:500], response=response)
+            break
+        except Exception as exc:
+            last_error = exc
+            response = None
+            continue
+    if response is None:
+        if last_error:
+            raise last_error
+        raise ValueError("本地 Qwen 请求失败")
     body = response.json()
     raw = _extract_openai_text(body)
     data, repair_usage = _parse_json_response(raw)
