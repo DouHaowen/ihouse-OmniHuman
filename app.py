@@ -246,6 +246,22 @@ USERS = {
         "department_id": "real_estate",
         "target_market": "cn",
     },
+    "bin": {
+        "password": "bin123",
+        "role": "user",
+        "display_name": "bin",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "ricky": {
+        "password": "ricky123",
+        "role": "user",
+        "display_name": "ricky",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
     "tai": {
         "password": "tai123",
         "role": "user",
