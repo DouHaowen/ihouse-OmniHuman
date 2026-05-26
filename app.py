@@ -51,6 +51,8 @@ from material_library import (
     register_material_file,
     update_material_library_item,
 )
+from property_video_workflow import PROPERTY_VIDEO_EXTENSIONS, build_property_video
+from property_video_vision import analyze_property_video_with_openai
 from source_ingest import analyze_topic_fields, analyze_topic_input
 
 app = FastAPI(title="iHouse 内容工作台")
@@ -143,6 +145,36 @@ VOICE_PRESETS = [
         "default_volume": 1.0,
         "tags": ["男声", "普通话", "沉稳"],
         "sample_text": "大家好，今天带你快速看懂这个选题最重要的关键信息。",
+    },
+    {
+        "id": "ricky_clone",
+        "name": "Ricky 音色",
+        "subtitle": "中文克隆男声",
+        "gender": "male",
+        "language": "zh-CN",
+        "style": "使用 Ricky 克隆声音，适合房源实拍解说、客户介绍和专业讲解。",
+        "voice_id": os.getenv("VOICE_RICKY_CLONE", "moss_audio_8b8f2575-5814-11f1-9bad-16a399225e91"),
+        "default_speed": 1.1,
+        "default_volume": 1.0,
+        "tags": ["男声", "克隆", "Ricky"],
+        "sample_text": "大家好，我来带你快速看一下这套房子的实际空间和重点细节。",
+        "enabled": True,
+        "availability_note": "已启用",
+    },
+    {
+        "id": "bin_clone",
+        "name": "Bin 音色",
+        "subtitle": "中文克隆男声",
+        "gender": "male",
+        "language": "zh-CN",
+        "style": "使用 Bin 克隆声音，适合房源实拍解说、销售跟进和客户沟通。",
+        "voice_id": os.getenv("VOICE_BIN_CLONE", "moss_audio_aac68cec-5811-11f1-9d84-fa57111a9d42"),
+        "default_speed": 1.1,
+        "default_volume": 1.0,
+        "tags": ["男声", "克隆", "Bin"],
+        "sample_text": "大家好，下面我带你按顺序看看这套房子的空间布局和居住感受。",
+        "enabled": True,
+        "availability_note": "已启用",
     },
     {
         "id": "mandarin_female",
@@ -671,11 +703,12 @@ def _get_voice_preset(voice_preset_id: Optional[str], target_market_id: Optional
 
 def _get_visible_voice_preset_ids(target_market_id: Optional[str]) -> set[str]:
     target_market_id = (target_market_id or "cn").strip() or "cn"
+    base_ids = {"ricky_clone", "bin_clone"}
     if target_market_id == "tw":
-        return {"taiwan_clone"}
+        return {"mandarin_female", "mandarin_male", "taiwan_female", "taiwan_clone", "japanese_female"} | base_ids
     if target_market_id == "jp":
-        return {"japanese_female"}
-    return {"mandarin_female", "mandarin_male"}
+        return {"mandarin_female", "mandarin_male", "japanese_female"} | base_ids
+    return {"mandarin_female", "mandarin_male"} | base_ids
 
 
 def _is_avatar_voice_compatible(avatar_option: Optional[dict], voice_preset: Optional[dict]) -> bool:
@@ -1248,6 +1281,40 @@ def run_pipeline_with_progress(
         tracker.cancel(str(exc) or "任务已停止")
     except Exception as exc:
         tracker.fail(str(exc))
+        import traceback
+        traceback.print_exc()
+
+
+def run_property_video_with_progress(task_id: str, uploaded_video_paths: list[str], script_text: str, voice_preset: dict, target_market: str, speed: float):
+    tracker = tasks[task_id]["tracker"]
+    tracker.total_steps = 4
+    task = tasks[task_id]
+    try:
+        from generate_audio import generate_audio
+
+        output_dir = Path(task["output_dir"])
+        result = build_property_video(
+            output_dir=output_dir,
+            uploaded_video_paths=[Path(path) for path in uploaded_video_paths],
+            script_text=script_text,
+            voice_id=voice_preset.get("voice_id") or voice_preset.get("id") or "",
+            voice_preset=voice_preset,
+            speed=speed,
+            target_market=target_market,
+            generate_audio_fn=generate_audio,
+            log=lambda message, step=None: tracker.log(message, step=step),
+        )
+        result["owner_username"] = task.get("owner_username")
+        result["owner_display_name"] = task.get("owner_display_name")
+        result["owner_role"] = task.get("owner_role")
+        task["result"] = result
+        task["topic"] = result.get("title") or "房源实拍成片"
+        _persist_task_result(task)
+        tracker.finish(result)
+        _push_live_event("task_completed", "房源实拍成片已完成", task, {"scope": "property_video"})
+    except Exception as exc:
+        tracker.fail(str(exc))
+        _push_live_event("task_failed", str(exc), task, {"scope": "property_video"})
         import traceback
         traceback.print_exc()
 
@@ -2442,6 +2509,12 @@ def _serialize_result_for_ui(output_dir: str, result: dict, topic: str) -> dict:
         payload["subtitle_file"] = {
             "url": subtitle_url,
             "name": Path(str(payload.get("subtitle_path", ""))).name or "timeline_subtitles.srt",
+        }
+    narration_audio_url = _history_file_url(output_dir, payload.get("narration_audio_path", ""))
+    if narration_audio_url:
+        payload["narration_audio"] = {
+            "url": narration_audio_url,
+            "name": Path(str(payload.get("narration_audio_path", ""))).name or "narration.mp3",
         }
     return payload
 
@@ -3924,6 +3997,155 @@ async def produce_video(
     return {"task_id": task_id, "reused_existing": False}
 
 
+@app.post("/api/property-video/jobs")
+async def start_property_video_job(
+    request: Request,
+    videos: list[UploadFile] = File(...),
+    script_text: str = Form(...),
+    voice_preset_id: str = Form(...),
+    speed: float = Form(1.1),
+    target_market: str = Form("cn"),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+
+    script_text = (script_text or "").strip()
+    if not script_text:
+        return JSONResponse({"error": "请先填写房源解说文案"}, status_code=400)
+    if not videos:
+        return JSONResponse({"error": "请至少上传一个房源视频"}, status_code=400)
+
+    voice_preset = _get_voice_preset(voice_preset_id, target_market)
+    if voice_preset.get("enabled") is False:
+        return JSONResponse({"error": "当前音色还未配置，暂时不可用"}, status_code=400)
+
+    task_id = str(uuid.uuid4())[:8]
+    output_dir = Path(_create_output_dir("property_video", "房源实拍成片"))
+    incoming_dir = output_dir / "incoming"
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[str] = []
+    try:
+        for index, upload in enumerate(videos, start=1):
+            original_name = Path(upload.filename or f"clip_{index:02d}.mp4").name
+            suffix = Path(original_name).suffix.lower()
+            if suffix not in PROPERTY_VIDEO_EXTENSIONS:
+                return JSONResponse({"error": f"只支持上传视频文件：{', '.join(sorted(PROPERTY_VIDEO_EXTENSIONS))}"}, status_code=400)
+            destination = incoming_dir / f"{index:02d}_{uuid.uuid4().hex[:8]}{suffix}"
+            with destination.open("wb") as out:
+                shutil.copyfileobj(upload.file, out)
+            saved_paths.append(str(destination))
+    except Exception as exc:
+        return JSONResponse({"error": f"视频上传保存失败：{exc}"}, status_code=500)
+
+    voice_preset["selected_speed"] = speed
+    tracker = ProgressTracker(task_id)
+    tracker.total_steps = 4
+    tasks[task_id] = {
+        "owner_username": user.get("username"),
+        "owner_display_name": user.get("display_name"),
+        "owner_role": user.get("role"),
+        "id": task_id,
+        "mode": "property_video",
+        "topic": "房源实拍成片",
+        "image_path": "",
+        "tracker": tracker,
+        "output_dir": str(output_dir),
+        "result": None,
+        "public_base_url": _get_public_base_url(request),
+        "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "workflow_config": {
+            "voice_preset_id": voice_preset.get("id"),
+            "speed": speed,
+            "target_market": target_market,
+            "voice_preset": voice_preset,
+            "property_video_mode": "real_shot_voiceover",
+        },
+        "cost_entries": [],
+        "cost_summary": _empty_cost_summary(),
+    }
+    tracker.log("房源实拍成片任务已创建，准备开始...")
+    _push_live_event("task_created", "创建了房源实拍成片任务", tasks[task_id])
+    thread = threading.Thread(
+        target=run_property_video_with_progress,
+        args=(task_id, saved_paths, script_text, voice_preset, target_market, speed),
+        daemon=True,
+    )
+    thread.start()
+    return {"task_id": task_id}
+
+
+@app.post("/api/property-video/analyze")
+async def analyze_property_video(
+    request: Request,
+    videos: list[UploadFile] = File(...),
+    target_market: str = Form("cn"),
+    notes: str = Form(""),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not videos:
+        return JSONResponse({"error": "请至少上传一个房源视频"}, status_code=400)
+
+    analysis_id = str(uuid.uuid4())[:8]
+    output_dir = Path(_create_output_dir("property_analysis", "房源视觉分析"))
+    incoming_dir = output_dir / "incoming"
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[Path] = []
+    try:
+        for index, upload in enumerate(videos, start=1):
+            original_name = Path(upload.filename or f"clip_{index:02d}.mp4").name
+            suffix = Path(original_name).suffix.lower()
+            if suffix not in PROPERTY_VIDEO_EXTENSIONS:
+                return JSONResponse({"error": f"只支持上传视频文件：{', '.join(sorted(PROPERTY_VIDEO_EXTENSIONS))}"}, status_code=400)
+            destination = incoming_dir / f"{index:02d}_{uuid.uuid4().hex[:8]}{suffix}"
+            with destination.open("wb") as out:
+                shutil.copyfileobj(upload.file, out)
+            saved_paths.append(destination)
+    except Exception as exc:
+        return JSONResponse({"error": f"视频上传保存失败：{exc}"}, status_code=500)
+
+    try:
+        analysis = analyze_property_video_with_openai(
+            video_paths=saved_paths,
+            work_dir=output_dir / "analysis",
+            target_market=target_market,
+            user_notes=notes,
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    result = {
+        "analysis_id": analysis_id,
+        "owner_username": user.get("username"),
+        "owner_display_name": user.get("display_name"),
+        "owner_role": user.get("role"),
+        "target_market": target_market,
+        "notes": notes,
+        "created_at": time.time(),
+        "analysis": analysis,
+    }
+    (output_dir / "analysis_result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    return {
+        "analysis_id": analysis_id,
+        "overall_summary": analysis.get("overall_summary", ""),
+        "suggested_script": analysis.get("suggested_script", ""),
+        "total_video_duration": analysis.get("total_video_duration", 0),
+        "target_script_chars": analysis.get("target_script_chars", ""),
+        "estimated_narration_seconds": analysis.get("estimated_narration_seconds", 0),
+        "clip_durations": analysis.get("clip_durations", []),
+        "clips": analysis.get("clips", []),
+        "warnings": analysis.get("warnings", []),
+        "model": analysis.get("model", ""),
+        "usage": analysis.get("usage", {}),
+    }
+
+
 @app.post("/api/generate")
 async def start_generation(
     request: Request,
@@ -4089,11 +4311,13 @@ async def task_progress(task_id: str, request: Request):
                     output_dir = tasks[task_id].get("output_dir", "")
                     result = _load_result_from_output_dir(Path(output_dir)) if output_dir else None
                     lifecycle = _build_history_lifecycle(Path(output_dir), result) if result else {}
+                    last_message = tracker.messages[-1]["message"] if tracker.messages else ""
                     result_data = {
                         "mode": tasks[task_id].get("mode", "full"),
                         "output_dir": output_dir,
                         "history_id": Path(output_dir).name if output_dir else "",
                         "can_retry": bool(lifecycle.get("can_resume_production")),
+                        "error": last_message.replace("出错了：", "", 1),
                     }
                 yield {
                     "event": "done",

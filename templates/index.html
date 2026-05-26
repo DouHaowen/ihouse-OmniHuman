@@ -1255,6 +1255,7 @@
           <button class="btn btn-secondary" id="activeTasksDrawerBtn" type="button" style="min-height:42px;">当前任务</button>
           <button class="btn btn-secondary" id="historyDrawerBtn" type="button" style="min-height:42px;">历史记录</button>
           <button class="btn btn-secondary" id="materialLibraryDrawerBtn" type="button" style="min-height:42px;">素材库</button>
+          <button class="btn btn-secondary" id="propertyVideoPageBtn" type="button" style="min-height:42px;">房源实拍成片</button>
           <div class="user-chip" id="sessionUser" style="display:none;"></div>
           <a class="btn btn-secondary" id="adminDashboardBtn" href="/admin/dashboard" style="display:none; min-height:42px; text-decoration:none;">管理员看板</a>
           <a class="btn btn-ghost" id="logoutBtn" href="/logout" style="display:none; min-height:42px; text-decoration:none;">退出登录</a>
@@ -1264,7 +1265,7 @@
 
       <div class="stage">
         <main class="workspace">
-          <section class="workflow-strip panel" style="padding:18px 20px;">
+          <section class="workflow-strip panel" id="workflowStrip" style="padding:18px 20px;">
             <div class="workflow-strip-head">
               <div class="workflow-strip-copy">
                 <strong id="workflowTitle">当前工作流</strong>
@@ -1296,7 +1297,7 @@
             </div>
           </section>
 
-          <div class="main-stack">
+          <div class="main-stack" id="aiWorkflowWorkspace">
             <section class="panel">
               <div class="workspace-stage">                <section id="topicPanel">
                   <div class="field-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
@@ -1484,6 +1485,103 @@
               </div>
             </section>
           </div>
+
+          <section class="panel" id="propertyVideoWorkspace" style="display:none;">
+            <div class="panel-header" style="margin-bottom:18px;">
+              <div>
+                <div class="section-kicker">Property Real Shot</div>
+                <h2 class="section-title">房源实拍成片</h2>
+                <p class="section-desc">销售上传一条长视频或多个房间片段，填写自己的解说文案，系统自动生成配音、字幕并拼接成一个可交付视频。</p>
+              </div>
+              <div class="actions" style="justify-content:flex-end;">
+                <button class="btn btn-secondary" id="backToAiWorkflowBtn" type="button">返回内容生产</button>
+              </div>
+            </div>
+
+            <div class="field-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
+              <div class="field">
+                <label for="propertyVideoMarketSelect">目标市场 / 语言</label>
+                <select id="propertyVideoMarketSelect" class="select-input"></select>
+              </div>
+              <div class="field">
+                <label for="propertyVideoVoiceSelect">解说音色</label>
+                <select id="propertyVideoVoiceSelect" class="select-input"></select>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="propertyVideoFiles">上传房源视频</label>
+              <input id="propertyVideoFiles" class="select-input" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm" multiple>
+              <div class="helper">可以上传一个长视频，也可以上传多个房间片段。第一版会按上传顺序拼接，原视频会静音，只保留系统生成的解说配音。</div>
+            </div>
+
+            <div class="field">
+              <label for="propertyVideoAnalyzeNotes">AI 分析补充信息</label>
+              <textarea id="propertyVideoAnalyzeNotes" placeholder="请销售人员写清楚这段房源素材的信息，以及希望 AI 文案重点介绍什么。&#10;例如：这是大阪市中心一套面向单身或两人居住的公寓，视频里主要展示玄关、客厅和阳台。文案重点突出采光、收纳、生活便利和适合自住，不要提具体价格、面积和车站距离。"></textarea>
+              <div class="helper">这里是文案生成的主要依据。AI 会优先根据销售填写的房源信息和重点卖点写解说文案，视频视觉分析只作为辅助理解画面顺序和空间内容。</div>
+            </div>
+
+            <div class="actions">
+              <button class="btn btn-secondary" id="propertyVideoAnalyzeBtn" type="button">AI 分析视频并生成文案</button>
+              <div class="topbar-status" id="propertyVideoAnalyzeStatus" style="display:none;">等待分析</div>
+            </div>
+
+            <div class="panel" id="propertyVideoAnalysisPanel" style="display:none; padding:16px; gap:12px; margin-top:14px;">
+              <div class="panel-header" style="margin-bottom:0;">
+                <div>
+                  <div class="section-kicker">Visual Analysis</div>
+                  <h3 class="section-title" style="font-size:22px;">AI 视频理解结果</h3>
+                  <p class="section-desc">AI 会结合销售补充信息和视频关键帧生成文案。生成后的文案会自动填入下方文本框，销售可以继续修改后再生成成片。</p>
+                </div>
+              </div>
+              <div class="insight-grid" id="propertyVideoAnalysisSummary"></div>
+              <div class="file-board" id="propertyVideoClipAnalysisList"></div>
+            </div>
+
+            <div class="field">
+              <label for="propertyVideoScript">销售解说文案</label>
+              <textarea id="propertyVideoScript" placeholder="例如：现在带您看这套位于东京的两室一厅。首先是玄关，收纳空间比较完整；往里走是客厅，采光很好，适合家庭居住……"></textarea>
+              <div class="helper">字幕会根据这段文案自动切句并分配时间轴，后续版本可以再升级成逐片段文案。</div>
+            </div>
+
+            <div class="field">
+              <label for="propertyVideoSpeedRange">语速微调</label>
+              <div class="range-row">
+                <input id="propertyVideoSpeedRange" type="range" min="0.85" max="1.35" step="0.05" value="1.1">
+                <input id="propertyVideoSpeedValue" class="range-value" type="text" value="1.10" readonly>
+              </div>
+            </div>
+
+            <div class="actions">
+              <button class="btn btn-primary" id="propertyVideoStartBtn" type="button">生成房源实拍成片</button>
+              <button class="btn btn-ghost" id="propertyVideoResetBtn" type="button">清空</button>
+            </div>
+            <div class="helper" style="margin-top:10px;">生成时系统会先合并视频并读取总时长，再生成配音并自动校准文案长度，尽量让配音贴近视频总时长。不会补静音、不会末帧定格补视频；如果误差仍然过大，系统会提示销售扩写或压缩文案后重试。</div>
+
+            <div class="panel progress-shell" id="propertyVideoProgressPanel" style="display:none; margin-top:22px;">
+              <div class="panel-header">
+                <div>
+                  <div class="section-kicker">Property Production</div>
+                  <h3 class="section-title" style="font-size:24px;">房源视频处理中</h3>
+                  <p class="section-desc">这里会显示配音、字幕、拼接和最终合成进度。</p>
+                </div>
+                <div class="topbar-status" id="propertyVideoProgressStatus"><span class="spinner"></span> 等待开始</div>
+              </div>
+              <div class="log-panel" id="propertyVideoLogPanel"></div>
+            </div>
+
+            <div class="panel" id="propertyVideoResultPanel" style="display:none; margin-top:22px;">
+              <div class="panel-header">
+                <div>
+                  <div class="section-kicker">Result</div>
+                  <h3 class="section-title" style="font-size:24px;">房源实拍成片已完成</h3>
+                  <p class="section-desc" id="propertyVideoResultDesc">可以预览最终视频，也可以单独下载字幕和配音文件。</p>
+                </div>
+              </div>
+              <div class="media-grid" id="propertyVideoFinalOutput"></div>
+              <div class="file-board" id="propertyVideoFileList" style="margin-top:14px;"></div>
+            </div>
+          </section>
         </main>
       </div>
     </div>
@@ -1706,6 +1804,9 @@
       materialLibrarySelection: [],
       materialHarvestJobs: [],
       materialHarvestCandidates: [],
+      workspaceMode: 'ai',
+      propertyVideoTaskId: null,
+      propertyVideoEventSource: null,
     };
 
     function progressLabelsForLanguage(lang) {
@@ -1789,6 +1890,31 @@
       activeTasksDrawerBtn: document.getElementById('activeTasksDrawerBtn'),
       historyDrawerBtn: document.getElementById('historyDrawerBtn'),
       materialLibraryDrawerBtn: document.getElementById('materialLibraryDrawerBtn'),
+      propertyVideoPageBtn: document.getElementById('propertyVideoPageBtn'),
+      workflowStrip: document.getElementById('workflowStrip'),
+      aiWorkflowWorkspace: document.getElementById('aiWorkflowWorkspace'),
+      propertyVideoWorkspace: document.getElementById('propertyVideoWorkspace'),
+      backToAiWorkflowBtn: document.getElementById('backToAiWorkflowBtn'),
+      propertyVideoMarketSelect: document.getElementById('propertyVideoMarketSelect'),
+      propertyVideoVoiceSelect: document.getElementById('propertyVideoVoiceSelect'),
+      propertyVideoFiles: document.getElementById('propertyVideoFiles'),
+      propertyVideoAnalyzeNotes: document.getElementById('propertyVideoAnalyzeNotes'),
+      propertyVideoAnalyzeBtn: document.getElementById('propertyVideoAnalyzeBtn'),
+      propertyVideoAnalyzeStatus: document.getElementById('propertyVideoAnalyzeStatus'),
+      propertyVideoAnalysisPanel: document.getElementById('propertyVideoAnalysisPanel'),
+      propertyVideoAnalysisSummary: document.getElementById('propertyVideoAnalysisSummary'),
+      propertyVideoClipAnalysisList: document.getElementById('propertyVideoClipAnalysisList'),
+      propertyVideoScript: document.getElementById('propertyVideoScript'),
+      propertyVideoSpeedRange: document.getElementById('propertyVideoSpeedRange'),
+      propertyVideoSpeedValue: document.getElementById('propertyVideoSpeedValue'),
+      propertyVideoStartBtn: document.getElementById('propertyVideoStartBtn'),
+      propertyVideoResetBtn: document.getElementById('propertyVideoResetBtn'),
+      propertyVideoProgressPanel: document.getElementById('propertyVideoProgressPanel'),
+      propertyVideoProgressStatus: document.getElementById('propertyVideoProgressStatus'),
+      propertyVideoLogPanel: document.getElementById('propertyVideoLogPanel'),
+      propertyVideoResultPanel: document.getElementById('propertyVideoResultPanel'),
+      propertyVideoFinalOutput: document.getElementById('propertyVideoFinalOutput'),
+      propertyVideoFileList: document.getElementById('propertyVideoFileList'),
       activeTasksDrawer: document.getElementById('activeTasksDrawer'),
       historyDrawer: document.getElementById('historyDrawer'),
       materialLibraryDrawer: document.getElementById('materialLibraryDrawer'),
@@ -2131,6 +2257,12 @@
         state.currentHistoryId = data.history_id || historyId;
         state.currentTaskId = data.live_task_id || null;
         closeDrawers();
+        if (data.mode === 'property_video') {
+          renderPropertyVideoResult(data);
+          setHeroStatus('已载入房源实拍成片历史任务');
+          window.scrollTo({ top: els.propertyVideoWorkspace.offsetTop - 20, behavior: 'smooth' });
+          return;
+        }
         renderResult(data);
         setHeroStatus('已载入历史任务');
         window.scrollTo({ top: els.resultPanel.offsetTop - 20, behavior: 'smooth' });
@@ -2920,18 +3052,24 @@
     const VOICE_PRESET_COPY = {
       'zh-CN': {
         mandarin_male: { name: '沉稳男声', subtitle: '中文普通话', style: '适合资讯解读、房产科普、专业解说', tags: ['男声', '普通话', '沉稳'], sample_text: '大家好，今天带你快速看懂这个选题最重要的关键信息。' },
+        ricky_clone: { name: 'Ricky 音色', subtitle: '中文克隆男声', style: '使用 Ricky 克隆声音，适合房源实拍解说、客户介绍和专业讲解。', tags: ['男声', '克隆', 'Ricky'], sample_text: '大家好，我来带你快速看一下这套房子的实际空间和重点细节。' },
+        bin_clone: { name: 'Bin 音色', subtitle: '中文克隆男声', style: '使用 Bin 克隆声音，适合房源实拍解说、销售跟进和客户沟通。', tags: ['男声', '克隆', 'Bin'], sample_text: '大家好，下面我带你按顺序看看这套房子的空间布局和居住感受。' },
         mandarin_female: { name: '温润女声', subtitle: '中文普通话', style: '适合品牌表达、生活方式、轻讲解内容', tags: ['女声', '普通话', '温润'], sample_text: '大家好，欢迎你用更轻松的方式了解这次的话题重点。' },
         taiwan_female: { name: '甜美女声', subtitle: '中文台湾语', style: '适合面向台湾用户的生活资讯、移居内容、服务介绍', tags: ['女声', '台湾', '亲切'], sample_text: '嗨，今天想用更贴近生活的方式，陪你快速看懂这个主题。' },
         japanese_female: { name: '自然日语女声', subtitle: '日语', style: '适合日本生活、置业资讯、服务介绍等内容', tags: ['女声', '日语', '自然'], sample_text: 'こんにちは。今日はこのテーマを、わかりやすく短く整理してご紹介します。' }
       },
       'zh-TW': {
         mandarin_male: { name: '沉穩男聲', subtitle: '中文普通話', style: '適合資訊解讀、房產科普與專業解說', tags: ['男聲', '普通話', '沉穩'], sample_text: '大家好，今天帶你快速看懂這個主題最重要的關鍵資訊。' },
+        ricky_clone: { name: 'Ricky 音色', subtitle: '中文克隆男聲', style: '使用 Ricky 克隆聲音，適合房源實拍解說、客戶介紹與專業講解。', tags: ['男聲', '克隆', 'Ricky'], sample_text: '大家好，我來帶你快速看一下這套房子的實際空間和重點細節。' },
+        bin_clone: { name: 'Bin 音色', subtitle: '中文克隆男聲', style: '使用 Bin 克隆聲音，適合房源實拍解說、銷售跟進與客戶溝通。', tags: ['男聲', '克隆', 'Bin'], sample_text: '大家好，下面我帶你按順序看看這套房子的空間布局和居住感受。' },
         mandarin_female: { name: '溫潤女聲', subtitle: '中文普通話', style: '適合品牌表達、生活方式與輕講解內容', tags: ['女聲', '普通話', '溫潤'], sample_text: '大家好，歡迎你用更輕鬆的方式了解這次話題的重點。' },
         taiwan_female: { name: '甜美女聲', subtitle: '中文台灣語', style: '適合面向台灣用戶的生活資訊、移居內容與服務介紹', tags: ['女聲', '台灣', '親切'], sample_text: '嗨，今天想用更貼近生活的方式，陪你快速看懂這個主題。' },
         japanese_female: { name: '自然日語女聲', subtitle: '日語', style: '適合日本生活、置業資訊與服務介紹等內容', tags: ['女聲', '日語', '自然'], sample_text: 'こんにちは。今日はこのテーマを、わかりやすく短く整理してご紹介します。' }
       },
       'ja-JP': {
         mandarin_male: { name: '落ち着いた中国語男性音声', subtitle: '中国語（標準語）', style: 'ニュース解説、不動産知識、専門説明に適しています', tags: ['男性', '中国語', '落ち着き'], sample_text: 'こんにちは。このテーマの重要なポイントを短く分かりやすく整理してご紹介します。' },
+        ricky_clone: { name: 'Ricky 音色', subtitle: '中国語クローン男性音声', style: 'Ricky のクローン音声です。物件実写動画の案内や専門的な説明に適しています。', tags: ['男性', 'クローン', 'Ricky'], sample_text: 'これから、この物件の実際の空間と注目ポイントを順番にご案内します。' },
+        bin_clone: { name: 'Bin 音色', subtitle: '中国語クローン男性音声', style: 'Bin のクローン音声です。物件実写動画の案内やお客様向け説明に適しています。', tags: ['男性', 'クローン', 'Bin'], sample_text: 'それでは、この物件の間取りと暮らしやすさを順番に見ていきましょう。' },
         mandarin_female: { name: 'やわらかな中国語女性音声', subtitle: '中国語（標準語）', style: 'ブランド紹介、ライフスタイル、やさしい解説向けです', tags: ['女性', '中国語', 'やわらかい'], sample_text: 'こんにちは。今回のテーマをもっと気軽に理解できるようにご紹介します。' },
         taiwan_female: { name: '親しみやすい台湾女性音声', subtitle: '台湾中国語', style: '台湾向けの生活情報、移住、不動産紹介に適しています', tags: ['女性', '台湾', '親しみ'], sample_text: 'こんにちは。今日は暮らしに近い感覚で、このテーマをやさしく整理してお伝えします。' },
         japanese_female: { name: '自然な日本語女性音声', subtitle: '日本語', style: '日本での暮らし、不動産情報、サービス紹介などに適しています', tags: ['女性', '日本語', '自然'], sample_text: 'こんにちは。今日はこのテーマを、わかりやすく短く整理してご紹介します。' }
@@ -3030,6 +3168,7 @@
         activeTasksBtn: "当前任务",
         historyBtn: "历史记录",
         materialLibraryBtn: "素材库",
+        propertyVideoBtn: "房源实拍成片",
         adminDashboardBtn: "管理员看板",
         logoutBtn: "退出登录",
       },
@@ -3037,6 +3176,7 @@
         activeTasksBtn: "目前任務",
         historyBtn: "歷史記錄",
         materialLibraryBtn: "素材庫",
+        propertyVideoBtn: "房源實拍成片",
         adminDashboardBtn: "管理員看板",
         logoutBtn: "退出登入",
       },
@@ -3044,6 +3184,7 @@
         activeTasksBtn: "現在のタスク",
         historyBtn: "履歴",
         materialLibraryBtn: "素材ライブラリ",
+        propertyVideoBtn: "物件動画作成",
         adminDashboardBtn: "管理ダッシュボード",
         logoutBtn: "ログアウト",
       }
@@ -3229,11 +3370,12 @@
     }
 
     function visibleVoiceIdsForMarket(marketId) {
+      const allPresetIds = (state.options?.voice_presets || []).map(item => item.id);
       if (marketId === 'tw') {
-        return (state.options?.voice_presets || []).map(item => item.id);
+        return allPresetIds;
       }
-      if (marketId === 'jp') return ['japanese_female'];
-      return ['mandarin_female', 'mandarin_male'];
+      if (marketId === 'jp') return ['mandarin_female', 'mandarin_male', 'ricky_clone', 'bin_clone', 'japanese_female'];
+      return ['mandarin_female', 'mandarin_male', 'ricky_clone', 'bin_clone'];
     }
 
     function getVisibleAvatars() {
@@ -3246,6 +3388,7 @@
     }
 
     function recommendedAvatarIdForVoice(voiceId) {
+      if (voiceId === 'ricky_clone' || voiceId === 'bin_clone') return 'avatar_host_c.png';
       if (state.selectedTargetMarket === 'tw' || state.selectedTargetMarket === 'jp') {
         return 'avatar_test_0cd3d70a.png';
       }
@@ -3368,6 +3511,7 @@
       if (els.activeTasksDrawerBtn) els.activeTasksDrawerBtn.textContent = topbarCopy.activeTasksBtn || els.activeTasksDrawerBtn.textContent;
       if (els.historyDrawerBtn) els.historyDrawerBtn.textContent = topbarCopy.historyBtn || els.historyDrawerBtn.textContent;
       if (els.materialLibraryDrawerBtn) els.materialLibraryDrawerBtn.textContent = topbarCopy.materialLibraryBtn || els.materialLibraryDrawerBtn.textContent;
+      if (els.propertyVideoPageBtn) els.propertyVideoPageBtn.textContent = topbarCopy.propertyVideoBtn || els.propertyVideoPageBtn.textContent;
       if (els.adminDashboardBtn) els.adminDashboardBtn.textContent = topbarCopy.adminDashboardBtn || els.adminDashboardBtn.textContent;
       if (els.logoutBtn) els.logoutBtn.textContent = topbarCopy.logoutBtn || els.logoutBtn.textContent;
       if (els.progressTitle) els.progressTitle.textContent = dict.progressTitle || els.progressTitle.textContent;
@@ -3427,6 +3571,257 @@
       return;
     }
 
+    function switchWorkspaceMode(mode) {
+      state.workspaceMode = mode === 'property' ? 'property' : 'ai';
+      const propertyMode = state.workspaceMode === 'property';
+      if (els.workflowStrip) els.workflowStrip.style.display = propertyMode ? 'none' : '';
+      if (els.aiWorkflowWorkspace) els.aiWorkflowWorkspace.style.display = propertyMode ? 'none' : '';
+      if (els.propertyVideoWorkspace) els.propertyVideoWorkspace.style.display = propertyMode ? 'block' : 'none';
+      if (els.propertyVideoPageBtn) {
+        els.propertyVideoPageBtn.classList.toggle('btn-primary', propertyMode);
+        els.propertyVideoPageBtn.classList.toggle('btn-secondary', !propertyMode);
+      }
+      if (propertyMode) {
+        renderPropertyVideoOptions();
+        setHeroStatus('房源实拍成片工作台已就绪');
+      } else {
+        setHeroStatus(copyText('heroReady', '工作台已就绪'));
+      }
+    }
+
+    function renderPropertyVideoOptions() {
+      if (!els.propertyVideoMarketSelect || !els.propertyVideoVoiceSelect) return;
+      const markets = state.options?.target_markets || [];
+      const currentMarket = els.propertyVideoMarketSelect.value || state.selectedTargetMarket || 'cn';
+      els.propertyVideoMarketSelect.innerHTML = markets.map(item => `<option value="${item.id}">${escapeHtml(optionLabel('targetMarkets', item.id, item.name))}｜${escapeHtml(optionLabel('contentLanguages', item.content_language, item.content_language || ''))}</option>`).join('');
+      els.propertyVideoMarketSelect.value = markets.some(item => item.id === currentMarket) ? currentMarket : (markets[0]?.id || 'cn');
+
+      const presets = state.options?.voice_presets || [];
+      const currentVoice = els.propertyVideoVoiceSelect.value || '';
+      els.propertyVideoVoiceSelect.innerHTML = presets.map(preset => {
+        const localized = localizedVoicePreset(preset);
+        const disabled = preset.enabled === false ? 'disabled' : '';
+        const note = preset.enabled === false ? `（${preset.availability_note || '未配置'}）` : '';
+        return `<option value="${preset.id}" ${disabled}>${escapeHtml(localized.name)}｜${escapeHtml(localized.subtitle)}${escapeHtml(note)}</option>`;
+      }).join('');
+      const market = markets.find(item => item.id === els.propertyVideoMarketSelect.value);
+      const preferred = market?.default_voice_preset_id || presets.find(item => item.enabled !== false)?.id || '';
+      const availableIds = new Set(presets.filter(item => item.enabled !== false).map(item => item.id));
+      const fallbackVoice = availableIds.has(preferred) ? preferred : (presets.find(item => item.enabled !== false)?.id || '');
+      els.propertyVideoVoiceSelect.value = availableIds.has(currentVoice) ? currentVoice : fallbackVoice;
+      const selected = presets.find(item => item.id === els.propertyVideoVoiceSelect.value);
+      if (selected?.default_speed && els.propertyVideoSpeedRange && els.propertyVideoSpeedValue) {
+        els.propertyVideoSpeedRange.value = Number(selected.default_speed).toFixed(2);
+        els.propertyVideoSpeedValue.value = Number(selected.default_speed).toFixed(2);
+      }
+    }
+
+    function appendPropertyVideoLog(message) {
+      if (!els.propertyVideoLogPanel) return;
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.textContent = message;
+      els.propertyVideoLogPanel.appendChild(line);
+      els.propertyVideoLogPanel.scrollTop = els.propertyVideoLogPanel.scrollHeight;
+    }
+
+    function renderPropertyVideoAnalysis(data) {
+      if (!data) return;
+      if (els.propertyVideoAnalysisPanel) els.propertyVideoAnalysisPanel.style.display = 'grid';
+      if (els.propertyVideoAnalysisSummary) {
+        const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean) : [];
+        els.propertyVideoAnalysisSummary.innerHTML = `
+          <div class="insight-card">
+            <div class="label">合并后总视频时长</div>
+            <div class="value" style="font-size:16px;">${escapeHtml(String(data.total_video_duration || '-'))} 秒</div>
+          </div>
+          <div class="insight-card">
+            <div class="label">建议文案长度</div>
+            <div class="value" style="font-size:16px;">${escapeHtml(String(data.target_script_chars || '-'))} 字</div>
+          </div>
+          <div class="insight-card">
+            <div class="label">整体判断</div>
+            <div class="value" style="font-size:16px;">${escapeHtml(data.overall_summary || 'AI 已完成视频理解。')}</div>
+          </div>
+          <div class="insight-card">
+            <div class="label">模型</div>
+            <div class="value" style="font-size:16px;">${escapeHtml(data.model || 'OpenAI Vision')}</div>
+          </div>
+          ${warnings.length ? `<div class="insight-card"><div class="label">注意点</div><div class="value" style="font-size:15px;">${warnings.map(item => escapeHtml(item)).join('<br>')}</div></div>` : ''}
+        `;
+      }
+      if (els.propertyVideoClipAnalysisList) {
+        const clips = Array.isArray(data.clips) ? data.clips : [];
+        els.propertyVideoClipAnalysisList.innerHTML = clips.length ? clips.map(clip => `
+          <div class="history-item">
+            <div class="history-main">
+              <div class="history-title">片段 ${escapeHtml(String(clip.clip_index || '-'))}｜${escapeHtml(clip.room_type || '空间识别')}</div>
+              <div class="history-topic">${escapeHtml(clip.visual_summary || '')}</div>
+              <div class="history-meta">${(clip.selling_points || []).map(item => `<span class="tag">${escapeHtml(item)}</span>`).join(' ')}</div>
+              ${clip.suggested_narration ? `<div class="social-card" style="margin-top:10px;">${escapeHtml(clip.suggested_narration)}</div>` : ''}
+            </div>
+          </div>
+        `).join('') : `<div class="empty-box">没有返回分段分析。</div>`;
+      }
+      if (data.suggested_script && els.propertyVideoScript) {
+        els.propertyVideoScript.value = data.suggested_script;
+      }
+    }
+
+    async function analyzePropertyVideo() {
+      if (!els.propertyVideoFiles?.files?.length) {
+        alert('请先上传至少一个房源视频');
+        return;
+      }
+      const formData = new FormData();
+      Array.from(els.propertyVideoFiles.files).forEach(file => formData.append('videos', file));
+      formData.append('target_market', els.propertyVideoMarketSelect?.value || state.selectedTargetMarket || 'cn');
+      formData.append('notes', els.propertyVideoAnalyzeNotes?.value || '');
+      if (els.propertyVideoAnalyzeBtn) {
+        els.propertyVideoAnalyzeBtn.disabled = true;
+        els.propertyVideoAnalyzeBtn.textContent = 'AI 分析中...';
+      }
+      if (els.propertyVideoAnalyzeStatus) {
+        els.propertyVideoAnalyzeStatus.style.display = 'inline-flex';
+        els.propertyVideoAnalyzeStatus.innerHTML = '<span class="spinner"></span> 正在抽帧并分析视频';
+      }
+      try {
+        const res = await fetch('/api/property-video/analyze', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'AI 视频分析失败');
+        renderPropertyVideoAnalysis(data);
+        if (els.propertyVideoAnalyzeStatus) els.propertyVideoAnalyzeStatus.textContent = 'AI 分析完成，文案已填入下方';
+        setHeroStatus('AI 已根据实拍视频生成解说文案');
+      } catch (error) {
+        if (els.propertyVideoAnalyzeStatus) els.propertyVideoAnalyzeStatus.textContent = 'AI 分析失败';
+        setHeroStatus(error.message || 'AI 视频分析失败', true);
+        alert(error.message || 'AI 视频分析失败');
+      } finally {
+        if (els.propertyVideoAnalyzeBtn) {
+          els.propertyVideoAnalyzeBtn.disabled = false;
+          els.propertyVideoAnalyzeBtn.textContent = 'AI 分析视频并生成文案';
+        }
+      }
+    }
+
+    function renderPropertyVideoResult(result) {
+      if (!result) return;
+      switchWorkspaceMode('property');
+      if (els.propertyVideoProgressPanel) els.propertyVideoProgressPanel.style.display = 'none';
+      if (els.propertyVideoResultPanel) els.propertyVideoResultPanel.style.display = 'block';
+      if (els.propertyVideoFinalOutput) {
+        const finalVideo = result.final_video;
+        els.propertyVideoFinalOutput.innerHTML = finalVideo ? `
+          <div class="media-card">
+            <div class="media-label">完整房源视频</div>
+            <video controls playsinline src="${finalVideo.url}" style="width:100%; border-radius:22px; background:#0b0f14;"></video>
+            <div class="actions" style="margin-top:12px;">
+              <a class="btn btn-primary" href="${finalVideo.url}" download="${escapeHtml(finalVideo.name || 'property_video.mp4')}">下载成片</a>
+            </div>
+          </div>
+        ` : `<div class="empty-box">暂未生成最终视频。</div>`;
+      }
+      if (els.propertyVideoFileList) {
+        const fileItems = [];
+        if (result.subtitle_file) fileItems.push(result.subtitle_file);
+        if (result.narration_audio) fileItems.push(result.narration_audio);
+        if (result.final_video) fileItems.push(result.final_video);
+        els.propertyVideoFileList.innerHTML = fileItems.length ? fileItems.map(item => `
+          <div class="file-item">
+            <span>${escapeHtml(item.name || 'output')}</span>
+            <a class="btn btn-secondary" href="${item.url}" download="${escapeHtml(item.name || 'output')}">下载</a>
+          </div>
+        `).join('') : `<div class="empty-box">暂无可下载文件。</div>`;
+      }
+      setHeroStatus('房源实拍成片已完成');
+    }
+
+    async function startPropertyVideoJob() {
+      if (!els.propertyVideoFiles?.files?.length) {
+        alert('请先上传至少一个房源视频');
+        return;
+      }
+      const scriptText = (els.propertyVideoScript?.value || '').trim();
+      if (!scriptText) {
+        alert('请先填写销售解说文案');
+        return;
+      }
+      const formData = new FormData();
+      Array.from(els.propertyVideoFiles.files).forEach(file => formData.append('videos', file));
+      formData.append('script_text', scriptText);
+      formData.append('voice_preset_id', els.propertyVideoVoiceSelect?.value || state.selectedVoiceId || '');
+      formData.append('speed', els.propertyVideoSpeedRange?.value || '1.1');
+      formData.append('target_market', els.propertyVideoMarketSelect?.value || state.selectedTargetMarket || 'cn');
+      if (els.propertyVideoStartBtn) {
+        els.propertyVideoStartBtn.disabled = true;
+        els.propertyVideoStartBtn.textContent = '正在提交...';
+      }
+      if (els.propertyVideoProgressPanel) els.propertyVideoProgressPanel.style.display = 'block';
+      if (els.propertyVideoResultPanel) els.propertyVideoResultPanel.style.display = 'none';
+      if (els.propertyVideoLogPanel) els.propertyVideoLogPanel.innerHTML = '';
+      try {
+        const res = await fetch('/api/property-video/jobs', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '创建房源视频任务失败');
+        state.propertyVideoTaskId = data.task_id;
+        appendPropertyVideoLog('任务已提交，开始处理房源实拍视频。');
+        subscribePropertyVideoProgress(data.task_id);
+      } catch (error) {
+        alert(error.message || '创建房源视频任务失败');
+        setHeroStatus(error.message || '创建房源视频任务失败', true);
+        if (els.propertyVideoStartBtn) {
+          els.propertyVideoStartBtn.disabled = false;
+          els.propertyVideoStartBtn.textContent = '生成房源实拍成片';
+        }
+      }
+    }
+
+    function subscribePropertyVideoProgress(taskId) {
+      if (state.propertyVideoEventSource) state.propertyVideoEventSource.close();
+      state.propertyVideoEventSource = new EventSource(`/api/tasks/${taskId}/progress`);
+      state.propertyVideoEventSource.addEventListener('progress', event => {
+        const data = JSON.parse(event.data);
+        if (els.propertyVideoProgressStatus) {
+          els.propertyVideoProgressStatus.innerHTML = `<span class="spinner"></span> 步骤 ${data.step}/${data.total_steps}`;
+        }
+        appendPropertyVideoLog(data.message);
+      });
+      state.propertyVideoEventSource.addEventListener('done', async event => {
+        const data = JSON.parse(event.data);
+        state.propertyVideoEventSource.close();
+        if (els.propertyVideoStartBtn) {
+          els.propertyVideoStartBtn.disabled = false;
+          els.propertyVideoStartBtn.textContent = '生成房源实拍成片';
+        }
+        if (data.status === 'done') {
+          const res = await fetch(`/api/tasks/${taskId}/result`);
+          const result = await res.json();
+          renderPropertyVideoResult(result);
+          loadHistory();
+        } else {
+          if (els.propertyVideoProgressStatus) els.propertyVideoProgressStatus.textContent = '任务失败';
+          setHeroStatus('房源实拍成片失败', true);
+          const errorMessage = data.result?.error || '请查看日志。';
+          appendPropertyVideoLog(`失败原因：${errorMessage}`);
+          alert(`房源实拍成片失败：${errorMessage}`);
+        }
+        loadActiveTasks();
+      });
+    }
+
+    function resetPropertyVideoForm() {
+      if (els.propertyVideoFiles) els.propertyVideoFiles.value = '';
+      if (els.propertyVideoAnalyzeNotes) els.propertyVideoAnalyzeNotes.value = '';
+      if (els.propertyVideoScript) els.propertyVideoScript.value = '';
+      if (els.propertyVideoAnalysisPanel) els.propertyVideoAnalysisPanel.style.display = 'none';
+      if (els.propertyVideoAnalysisSummary) els.propertyVideoAnalysisSummary.innerHTML = '';
+      if (els.propertyVideoClipAnalysisList) els.propertyVideoClipAnalysisList.innerHTML = '';
+      if (els.propertyVideoLogPanel) els.propertyVideoLogPanel.innerHTML = '';
+      if (els.propertyVideoProgressPanel) els.propertyVideoProgressPanel.style.display = 'none';
+      if (els.propertyVideoResultPanel) els.propertyVideoResultPanel.style.display = 'none';
+      renderPropertyVideoOptions();
+    }
+
     function activateStep(name) {
       const order = ['topic', 'script', 'progress', 'result'];
       const normalized = name === 'config' ? 'script' : name;
@@ -3466,6 +3861,7 @@
       const engines = state.options?.digital_human_engines || [];
       state.selectedDigitalHumanEngine = (engines.find(item => item.default)?.id || engines[0]?.id || 'volc_omnihuman');
       renderVoicePresets();
+      renderPropertyVideoOptions();
       renderAvatarOptions();
       renderScriptModels();
       renderDigitalHumanEngines();
@@ -3519,7 +3915,7 @@
       const visibleIds = new Set(visibleVoiceIdsForMarket(state.selectedTargetMarket));
       return presets.filter(item => visibleIds.has(item.id))
         .sort((a, b) => {
-          const order = { mandarin_female: 0, mandarin_male: 1, taiwan_clone: 2, japanese_female: 3 };
+          const order = { mandarin_female: 0, mandarin_male: 1, ricky_clone: 2, bin_clone: 3, taiwan_clone: 4, japanese_female: 5 };
           return (order[a.id] ?? 99) - (order[b.id] ?? 99);
         });
     }
@@ -4675,6 +5071,12 @@
           clearPersistedActiveTask();
           setProductionLock(false);
           setStopButtonState(false);
+          if (result.mode === 'property_video') {
+            renderPropertyVideoResult(result);
+            loadHistory();
+            loadActiveTasks();
+            return;
+          }
           renderResult(result);
           loadHistory();
           loadActiveTasks();
@@ -4727,6 +5129,7 @@
       renderInterfaceOptions();
       syncVoicePresetToMarket(true);
       renderVoicePresets();
+      renderPropertyVideoOptions();
       renderAvatarOptions();
       renderScriptModels();
       renderDigitalHumanEngines();
@@ -4798,6 +5201,7 @@
       syncVoicePresetToMarket(true);
       renderInterfaceOptions();
       renderVoicePresets();
+      renderPropertyVideoOptions();
       renderAvatarOptions();
       renderScriptModels();
       renderDigitalHumanEngines();
@@ -4837,6 +5241,22 @@
       await loadMaterialLibrary();
       await loadMaterialHarvest();
     });
+    els.propertyVideoPageBtn?.addEventListener('click', () => switchWorkspaceMode('property'));
+    els.backToAiWorkflowBtn?.addEventListener('click', () => switchWorkspaceMode('ai'));
+    els.propertyVideoMarketSelect?.addEventListener('change', renderPropertyVideoOptions);
+    els.propertyVideoVoiceSelect?.addEventListener('change', () => {
+      const preset = (state.options?.voice_presets || []).find(item => item.id === els.propertyVideoVoiceSelect.value);
+      if (preset?.default_speed && els.propertyVideoSpeedRange && els.propertyVideoSpeedValue) {
+        els.propertyVideoSpeedRange.value = Number(preset.default_speed).toFixed(2);
+        els.propertyVideoSpeedValue.value = Number(preset.default_speed).toFixed(2);
+      }
+    });
+    els.propertyVideoSpeedRange?.addEventListener('input', () => {
+      els.propertyVideoSpeedValue.value = Number(els.propertyVideoSpeedRange.value).toFixed(2);
+    });
+    els.propertyVideoAnalyzeBtn?.addEventListener('click', analyzePropertyVideo);
+    els.propertyVideoStartBtn?.addEventListener('click', startPropertyVideoJob);
+    els.propertyVideoResetBtn?.addEventListener('click', resetPropertyVideoForm);
     els.materialLibraryUploadBtn?.addEventListener('click', uploadMaterialLibraryItems);
     els.materialLibraryRefreshBtn?.addEventListener('click', loadMaterialLibrary);
     els.materialLibrarySearchInput?.addEventListener('input', event => {
