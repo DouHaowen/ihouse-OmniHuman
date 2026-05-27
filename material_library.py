@@ -20,7 +20,8 @@ MATERIAL_LIBRARY_LOCK = threading.Lock()
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
-ALLOWED_SUFFIXES = VIDEO_SUFFIXES | IMAGE_SUFFIXES
+AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
+ALLOWED_SUFFIXES = VIDEO_SUFFIXES | IMAGE_SUFFIXES | AUDIO_SUFFIXES
 MATERIAL_CATEGORIES = [
     "房地产",
     "科技",
@@ -29,6 +30,7 @@ MATERIAL_CATEGORIES = [
     "城市街景",
     "室内空间",
     "人物辅助",
+    "背景音乐",
 ]
 
 
@@ -59,6 +61,8 @@ def _asset_kind_for_suffix(path: str) -> str:
     suffix = Path(str(path)).suffix.lower()
     if suffix in VIDEO_SUFFIXES:
         return "video"
+    if suffix in AUDIO_SUFFIXES:
+        return "audio"
     return "image"
 
 
@@ -125,6 +129,34 @@ def _extract_video_metadata(path: Path) -> dict:
         }
 
 
+def _extract_audio_metadata(path: Path) -> dict:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout or "{}")
+        duration = float((data.get("format") or {}).get("duration") or 0.0)
+        return {
+            "width": 0,
+            "height": 0,
+            "duration_seconds": duration,
+        }
+    except Exception:
+        return {
+            "width": 0,
+            "height": 0,
+            "duration_seconds": 0.0,
+        }
+
+
 def extract_material_metadata(path: str | Path, kind: Optional[str] = None) -> dict:
     target = Path(path)
     resolved_kind = str(kind or _asset_kind_for_suffix(str(target))).strip().lower() or "image"
@@ -138,6 +170,8 @@ def extract_material_metadata(path: str | Path, kind: Optional[str] = None) -> d
         return base
     if resolved_kind == "video":
         base.update(_extract_video_metadata(target))
+    elif resolved_kind == "audio":
+        base.update(_extract_audio_metadata(target))
     else:
         base.update(_extract_image_metadata(target))
     return base
@@ -234,7 +268,7 @@ def register_material_file(
         raise FileNotFoundError("上传素材不存在")
     suffix = _safe_suffix(original_filename) or _safe_suffix(source_path.name)
     if not suffix:
-        raise ValueError("仅支持上传 jpg、jpeg、png、webp、mp4、mov、m4v、webm")
+        raise ValueError("仅支持上传 jpg、jpeg、png、webp、mp4、mov、m4v、webm、mp3、wav、m4a、aac、ogg")
     material_id = uuid.uuid4().hex[:12]
     final_name = f"{_slugify(title or Path(original_filename or source_path.name).stem)}_{material_id}{suffix}"
     final_path = MATERIAL_LIBRARY_DIR / final_name
@@ -457,6 +491,8 @@ def search_material_library(
     image_count = 0
     for score, item in filtered:
         if item["id"] in used_ids:
+            continue
+        if item.get("kind") not in {"image", "video"}:
             continue
         if item.get("kind") == "video":
             if video_count >= limit_videos:

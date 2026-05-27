@@ -28,11 +28,16 @@ BASE_DIR = Path(os.getenv("INFINITETALK_AVATAR_BASE_DIR", "/home/saita/InfiniteT
 JOBS_DIR = Path(os.getenv("INFINITETALK_AVATAR_JOBS_DIR", str(BASE_DIR / "api_jobs"))).resolve()
 CONDA_SH = os.getenv("INFINITETALK_AVATAR_CONDA_SH", "/home/saita/miniforge3/etc/profile.d/conda.sh")
 CONDA_ENV = os.getenv("INFINITETALK_AVATAR_CONDA_ENV", "infinitetalk5090")
-DEFAULT_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_TIMEOUT_SECONDS", "21600"))
+DEFAULT_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_TIMEOUT_SECONDS", "1800"))
+DEFAULT_MIN_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_MIN_TIMEOUT_SECONDS", "900"))
+DEFAULT_MAX_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_MAX_TIMEOUT_SECONDS", "2400"))
+DEFAULT_TIMEOUT_PER_AUDIO_SECOND = float(os.getenv("INFINITETALK_AVATAR_TIMEOUT_PER_AUDIO_SECOND", "120"))
 DEFAULT_RETRIES = int(os.getenv("INFINITETALK_AVATAR_RETRIES", "1"))
 DEFAULT_FRAME_NUM = int(os.getenv("INFINITETALK_AVATAR_FRAME_NUM", "81"))
-DEFAULT_SAMPLE_STEPS = int(os.getenv("INFINITETALK_AVATAR_SAMPLE_STEPS", "8"))
-DEFAULT_MOTION_FRAME = int(os.getenv("INFINITETALK_AVATAR_MOTION_FRAME", "9"))
+DEFAULT_SAMPLE_STEPS = int(os.getenv("INFINITETALK_AVATAR_SAMPLE_STEPS", "6"))
+DEFAULT_MOTION_FRAME = int(os.getenv("INFINITETALK_AVATAR_MOTION_FRAME", "3"))
+DEFAULT_TEXT_GUIDE_SCALE = float(os.getenv("INFINITETALK_AVATAR_TEXT_GUIDE_SCALE", "5.0"))
+DEFAULT_AUDIO_GUIDE_SCALE = float(os.getenv("INFINITETALK_AVATAR_AUDIO_GUIDE_SCALE", "2.2"))
 DEFAULT_PERSISTENT_DIT = int(os.getenv("INFINITETALK_AVATAR_PERSISTENT_DIT", "0"))
 
 app = FastAPI(title="iHouse InfiniteTalk Worker")
@@ -82,6 +87,26 @@ def _status_counts() -> dict[str, int]:
             status = "unknown"
         counts[status] = counts.get(status, 0) + 1
     return counts
+
+
+def _find_reusable_job(external_task_id: str, segment_index: int) -> dict[str, Any] | None:
+    if not external_task_id or not JOBS_DIR.exists():
+        return None
+    reusable_statuses = {"queued", "running", "done"}
+    job_paths = sorted(JOBS_DIR.glob("*/job.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for path in job_paths:
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if job.get("external_task_id") != external_task_id:
+            continue
+        if int(job.get("segment_index") or 0) != int(segment_index or 0):
+            continue
+        if job.get("status") not in reusable_statuses:
+            continue
+        return job
+    return None
 
 
 def _enqueue(job_id: str) -> None:
@@ -184,6 +209,17 @@ def _build_input_json(job: dict[str, Any], input_json_path: Path) -> None:
     input_json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _resolve_timeout_seconds(audio_path: Path, settings: dict[str, Any]) -> int:
+    configured = settings.get("timeout_seconds")
+    if configured:
+        return max(60, int(configured))
+    audio_duration = _probe_media_duration_seconds(audio_path) or 0
+    if audio_duration <= 0:
+        return max(60, DEFAULT_TIMEOUT_SECONDS)
+    dynamic_timeout = int(math.ceil(audio_duration * DEFAULT_TIMEOUT_PER_AUDIO_SECOND))
+    return max(DEFAULT_MIN_TIMEOUT_SECONDS, min(DEFAULT_MAX_TIMEOUT_SECONDS, dynamic_timeout))
+
+
 def _run_generation(job: dict[str, Any]) -> None:
     job_id = str(job["job_id"])
     job_dir = _job_dir(job_id)
@@ -197,10 +233,20 @@ def _run_generation(job: dict[str, Any]) -> None:
     frame_num = _resolve_frame_num(Path(job["audio_path"]), int(settings.get("frame_num") or DEFAULT_FRAME_NUM))
     sample_steps = max(1, int(settings.get("sample_steps") or DEFAULT_SAMPLE_STEPS))
     motion_frame = max(1, int(settings.get("motion_frame") or DEFAULT_MOTION_FRAME))
+    text_guide_scale = float(settings.get("sample_text_guide_scale") or DEFAULT_TEXT_GUIDE_SCALE)
+    audio_guide_scale = float(settings.get("sample_audio_guide_scale") or DEFAULT_AUDIO_GUIDE_SCALE)
     persistent_dit = max(0, int(settings.get("num_persistent_param_in_dit") or DEFAULT_PERSISTENT_DIT))
-    timeout_seconds = int(settings.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
+    expected_duration = _probe_media_duration_seconds(Path(job["audio_path"])) or 0
+    timeout_seconds = _resolve_timeout_seconds(Path(job["audio_path"]), settings)
     save_prefix = result_dir / "segment"
     output_mp4 = Path(f"{save_prefix}.mp4")
+    job["expected_duration"] = expected_duration
+    job["timeout_seconds"] = timeout_seconds
+    job["message"] = (
+        f"正在生成 InfiniteTalk 数字人视频，音频 {expected_duration:.1f}s，"
+        f"本次最多等待 {timeout_seconds}s"
+    )
+    _write_job(job)
 
     setup_parts = [
         f"source {CONDA_SH}",
@@ -229,6 +275,8 @@ def _run_generation(job: dict[str, Any]) -> None:
         f"--frame_num {frame_num}",
         f"--sample_steps {sample_steps}",
         "--mode streaming",
+        f"--sample_text_guide_scale {text_guide_scale}",
+        f"--sample_audio_guide_scale {audio_guide_scale}",
         "--quant fp8",
         "--quant_dir weights/InfiniteTalk/quant_models/infinitetalk_single_fp8.safetensors",
         f"--motion_frame {motion_frame}",
@@ -252,7 +300,6 @@ def _run_generation(job: dict[str, Any]) -> None:
     if not output_mp4.exists():
         raise RuntimeError(f"InfiniteTalk finished but output was not found: {output_mp4}")
 
-    expected_duration = _probe_media_duration_seconds(Path(job["audio_path"])) or 0
     actual_duration = _probe_media_duration_seconds(output_mp4) or 0
     duration_ratio = actual_duration / expected_duration if expected_duration > 0 else 1.0
     if expected_duration > 0 and actual_duration <= 0:
@@ -285,16 +332,19 @@ def _worker_loop() -> None:
             job["message"] = f"正在生成 InfiniteTalk 数字人视频（第 {attempt}/{max_attempts} 次）"
             job["started_at"] = job.get("started_at") or _now()
             _write_job(job)
+            generation_error: Exception | None = None
             try:
                 _run_generation(job)
             except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(f"InfiniteTalk generation timed out after {exc.timeout} seconds") from exc
+                generation_error = RuntimeError(f"InfiniteTalk generation timed out after {exc.timeout} seconds")
             except Exception as exc:
+                generation_error = exc
+            if generation_error:
                 job = _read_job(job_id) or job
-                job["error"] = str(exc)
+                job["error"] = str(generation_error)
                 if attempt < max_attempts:
                     job["status"] = "queued"
-                    job["message"] = f"生成失败，已进入重试队列：{exc}"
+                    job["message"] = f"生成失败，已进入重试队列：{generation_error}"
                     _write_job(job)
                     _enqueue(job_id)
                 else:
@@ -344,6 +394,15 @@ async def generate(
     segment_index: int = Form(0),
     settings_json: str = Form("{}"),
 ):
+    reusable_job = _find_reusable_job(external_task_id, segment_index)
+    if reusable_job:
+        return {
+            "job_id": reusable_job["job_id"],
+            "status": reusable_job.get("status", "queued"),
+            "message": reusable_job.get("message") or "复用已有 InfiniteTalk 任务",
+            "reused": True,
+        }
+
     job_id = f"it_{uuid.uuid4().hex[:12]}"
     job_dir = _job_dir(job_id)
     input_dir = job_dir / "input"
@@ -399,6 +458,7 @@ def status(job_id: str):
             "finished_at",
             "expected_duration",
             "video_duration",
+            "timeout_seconds",
         )
     }
     payload["has_result"] = bool(job.get("result_path") and Path(job["result_path"]).exists())

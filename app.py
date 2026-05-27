@@ -4,8 +4,10 @@ FastAPI + SSE 实时进度推送
 """
 
 import csv
+import base64
 from collections import deque
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -18,7 +20,7 @@ import uuid
 import zipfile
 from functools import wraps
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
 
@@ -43,6 +45,7 @@ from ai_material_harvester import (
 from material_library import (
     MATERIAL_CATEGORIES,
     MATERIAL_LIBRARY_DIR,
+    AUDIO_SUFFIXES,
     batch_delete_material_library_items,
     batch_update_material_library_items,
     delete_material_library_item,
@@ -56,10 +59,28 @@ from property_video_vision import analyze_property_video_with_openai
 from source_ingest import analyze_topic_fields, analyze_topic_input
 
 app = FastAPI(title="iHouse 内容工作台")
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "ihouse-content-studio-session"), max_age=60 * 60 * 24 * 30, same_site="lax")
+SESSION_SAME_SITE = os.getenv("SESSION_SAME_SITE", "lax").strip().lower()
+if SESSION_SAME_SITE not in {"lax", "strict", "none"}:
+    SESSION_SAME_SITE = "lax"
+SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "0").strip().lower() in {"1", "true", "yes", "on"}
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET", "ihouse-content-studio-session"),
+    max_age=60 * 60 * 24 * 30,
+    same_site=SESSION_SAME_SITE,
+    https_only=SESSION_HTTPS_ONLY,
+)
 
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+JCLAW_HANDOFF_SECRET = os.getenv("JCLAW_AI_AGENT_HANDOFF_SECRET", "").strip()
+JCLAW_HANDOFF_ISSUER = os.getenv("JCLAW_AI_AGENT_HANDOFF_ISSUER", "jclaw").strip()
+JCLAW_HANDOFF_AUDIENCE = os.getenv("JCLAW_AI_AGENT_HANDOFF_AUDIENCE", "aiagent.office.ihousejapan.cn").strip()
+JCLAW_HANDOFF_PURPOSE = "ai-agent-handoff"
+JCLAW_HANDOFF_CLOCK_SKEW_SECONDS = max(0, int(os.getenv("JCLAW_AI_AGENT_HANDOFF_CLOCK_SKEW_SECONDS", "30")))
+JCLAW_HANDOFF_CONSUMED_JTIS: dict[str, float] = {}
+JCLAW_HANDOFF_USER_MAP: dict[str, str] = {}
 
 tasks = {}
 ASSETS_DIR = BASE_DIR / "assets"
@@ -310,26 +331,98 @@ USERS = {
         "department_id": "robotics",
         "target_market": "jp",
     },
-    "yi": {
-        "password": "yi123",
-        "role": "user",
-        "display_name": "yi",
-        "interface_language": "ja-JP",
-        "department_id": "robotics",
-        "target_market": "jp",
-    },
-    "mei": {
-        "password": "mei123",
-        "role": "user",
-        "display_name": "mei",
-        "interface_language": "ja-JP",
-        "department_id": "robotics",
-        "target_market": "jp",
-    },
     "da": {
         "password": "da123",
         "role": "user",
         "display_name": "da",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "liyh": {
+        "password": "liyh123",
+        "role": "user",
+        "display_name": "liyh",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "zhoubing": {
+        "password": "zhoubing123",
+        "role": "user",
+        "display_name": "zhoubing",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "ikemoto": {
+        "password": "ikemoto123",
+        "role": "user",
+        "display_name": "ikemoto",
+        "interface_language": "ja-JP",
+        "department_id": "robotics",
+        "target_market": "jp",
+    },
+    "zck": {
+        "password": "zck123",
+        "role": "user",
+        "display_name": "zck",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "saita": {
+        "password": "saita123",
+        "role": "admin",
+        "display_name": "saita",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "han": {
+        "password": "han123",
+        "role": "user",
+        "display_name": "han",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "sunqinxue": {
+        "password": "sunqinxue123",
+        "role": "user",
+        "display_name": "sunqinxue",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "aki": {
+        "password": "aki123",
+        "role": "admin",
+        "display_name": "aki",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "baicy": {
+        "password": "baicy123",
+        "role": "user",
+        "display_name": "baicy",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "lidj": {
+        "password": "lidj123",
+        "role": "user",
+        "display_name": "lidj",
+        "interface_language": "zh-CN",
+        "department_id": "real_estate",
+        "target_market": "cn",
+    },
+    "zhaozy": {
+        "password": "zhaozy123",
+        "role": "user",
+        "display_name": "zhaozy",
         "interface_language": "zh-CN",
         "department_id": "real_estate",
         "target_market": "cn",
@@ -531,7 +624,7 @@ def _material_library_item_payload(item: dict, current_user: Optional[dict] = No
     payload["resolution_label"] = f"{width}×{height}" if width and height else ""
     payload["duration_label"] = (
         f"{round(float(payload.get('duration_seconds') or 0), 1):g} 秒"
-        if str(payload.get("kind") or "") == "video" and float(payload.get("duration_seconds") or 0) > 0
+        if str(payload.get("kind") or "") in {"video", "audio"} and float(payload.get("duration_seconds") or 0) > 0
         else ""
     )
     payload["can_review"] = bool(current_user and _is_admin(current_user))
@@ -543,6 +636,31 @@ def _material_library_item_payload(item: dict, current_user: Optional[dict] = No
         )
     )
     return payload
+
+
+def _property_bgm_track_payloads() -> list[dict]:
+    tracks = []
+    for item in list_material_library_items(status="approved"):
+        if str(item.get("kind") or "") != "audio":
+            continue
+        payload = _material_library_item_payload(item, {"role": "admin"})
+        payload["name"] = payload.get("title") or payload.get("original_filename") or "BGM"
+        tracks.append(payload)
+    return tracks
+
+
+def _get_approved_bgm_path(item_id: str) -> Optional[Path]:
+    normalized_id = str(item_id or "").strip()
+    if not normalized_id:
+        return None
+    for item in list_material_library_items(status="approved"):
+        if str(item.get("id") or "") != normalized_id or str(item.get("kind") or "") != "audio":
+            continue
+        filename = Path(str(item.get("filename") or "")).name
+        full_path = (MATERIAL_LIBRARY_DIR / filename).resolve()
+        if str(full_path).startswith(str(MATERIAL_LIBRARY_DIR.resolve())) and full_path.exists():
+            return full_path
+    return None
 
 
 def _harvest_job_payload(job: dict) -> dict:
@@ -1285,7 +1403,7 @@ def run_pipeline_with_progress(
         traceback.print_exc()
 
 
-def run_property_video_with_progress(task_id: str, uploaded_video_paths: list[str], script_text: str, voice_preset: dict, target_market: str, speed: float):
+def run_property_video_with_progress(task_id: str, uploaded_video_paths: list[str], script_text: str, voice_preset: dict, target_market: str, speed: float, bgm_item_id: str = "", bgm_volume: float = 0.10):
     tracker = tasks[task_id]["tracker"]
     tracker.total_steps = 4
     task = tasks[task_id]
@@ -1293,6 +1411,7 @@ def run_property_video_with_progress(task_id: str, uploaded_video_paths: list[st
         from generate_audio import generate_audio
 
         output_dir = Path(task["output_dir"])
+        bgm_path = _get_approved_bgm_path(bgm_item_id)
         result = build_property_video(
             output_dir=output_dir,
             uploaded_video_paths=[Path(path) for path in uploaded_video_paths],
@@ -1301,6 +1420,8 @@ def run_property_video_with_progress(task_id: str, uploaded_video_paths: list[st
             voice_preset=voice_preset,
             speed=speed,
             target_market=target_market,
+            bgm_path=bgm_path,
+            bgm_volume=bgm_volume,
             generate_audio_fn=generate_audio,
             log=lambda message, step=None: tracker.log(message, step=step),
         )
@@ -2233,6 +2354,177 @@ def _auth_error(message: str = "请先登录") -> JSONResponse:
     return JSONResponse({"error": message}, status_code=401)
 
 
+def _base64url_decode_json(value: str) -> dict[str, Any]:
+    padding = "=" * (-len(value) % 4)
+    raw = base64.urlsafe_b64decode(f"{value}{padding}".encode("utf-8"))
+    parsed = json.loads(raw.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError("JWT 内容格式错误")
+    return parsed
+
+
+def _jwt_hs256_signature(signing_input: str, secret: str) -> str:
+    return _jwt_hs256_signature_with_key(signing_input, secret.encode("utf-8"))
+
+
+def _jwt_hs256_signature_with_key(signing_input: str, secret_key: bytes) -> str:
+    digest = hmac.new(secret_key, signing_input.encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def _jclaw_handoff_secret_keys(secret: str) -> list[tuple[str, bytes]]:
+    keys: list[tuple[str, bytes]] = [("plain", secret.encode("utf-8"))]
+    padded = secret + ("=" * (-len(secret) % 4))
+    try:
+        decoded = base64.b64decode(padded, validate=True)
+        if decoded:
+            keys.append(("base64", decoded))
+    except Exception:
+        pass
+    return keys
+
+
+def _load_jclaw_user_map() -> dict[str, str]:
+    raw_map = os.getenv("JCLAW_AI_AGENT_USER_MAP", "").strip()
+    if not raw_map:
+        return {}
+    try:
+        parsed = json.loads(raw_map)
+    except json.JSONDecodeError:
+        print("JCLAW_AI_AGENT_USER_MAP is not valid JSON; ignored", flush=True)
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key).strip().lower(): str(value).strip() for key, value in parsed.items() if str(key).strip() and str(value).strip()}
+
+
+def _consume_jclaw_jti(jti: str, exp: int) -> None:
+    now = int(time.time())
+    expired = [key for key, expires_at in JCLAW_HANDOFF_CONSUMED_JTIS.items() if expires_at <= now]
+    for key in expired:
+        JCLAW_HANDOFF_CONSUMED_JTIS.pop(key, None)
+    if not jti:
+        raise ValueError("handoff token 缺少 jti")
+    if jti in JCLAW_HANDOFF_CONSUMED_JTIS:
+        raise ValueError("handoff token 已使用")
+    JCLAW_HANDOFF_CONSUMED_JTIS[jti] = max(exp, now + 60)
+
+
+def _verify_jclaw_handoff_token(token: str) -> dict[str, Any]:
+    if not JCLAW_HANDOFF_SECRET:
+        raise ValueError("子系统未配置 JCLAW_AI_AGENT_HANDOFF_SECRET")
+    parts = str(token or "").split(".")
+    if len(parts) != 3 or not all(parts):
+        raise ValueError("handoff token 格式错误")
+
+    header_b64, payload_b64, signature = parts
+    header = _base64url_decode_json(header_b64)
+    payload = _base64url_decode_json(payload_b64)
+    if header.get("alg") != "HS256":
+        raise ValueError("handoff token 算法不支持")
+
+    signing_input = f"{header_b64}.{payload_b64}"
+    signature_matched = False
+    matched_secret_mode = ""
+    for mode, secret_key in _jclaw_handoff_secret_keys(JCLAW_HANDOFF_SECRET):
+        expected_signature = _jwt_hs256_signature_with_key(signing_input, secret_key)
+        if hmac.compare_digest(signature, expected_signature):
+            signature_matched = True
+            matched_secret_mode = mode
+            break
+    if not signature_matched:
+        raise ValueError("handoff token 签名错误")
+    if matched_secret_mode != "plain":
+        print(f"JClaw handoff signature accepted with {matched_secret_mode} secret mode", flush=True)
+
+    now = int(time.time())
+    skew = JCLAW_HANDOFF_CLOCK_SKEW_SECONDS
+    exp = int(payload.get("exp") or 0)
+    nbf = int(payload.get("nbf") or 0)
+    if payload.get("iss") != JCLAW_HANDOFF_ISSUER:
+        raise ValueError("handoff token 签发方错误")
+    aud = payload.get("aud")
+    if isinstance(aud, list):
+        aud_ok = JCLAW_HANDOFF_AUDIENCE in aud
+    else:
+        aud_ok = aud == JCLAW_HANDOFF_AUDIENCE
+    if not aud_ok:
+        raise ValueError("handoff token 目标系统错误")
+    if payload.get("purpose") != JCLAW_HANDOFF_PURPOSE:
+        raise ValueError("handoff token 用途错误")
+    if nbf and now + skew < nbf:
+        raise ValueError("handoff token 尚未生效")
+    if not exp or now - skew >= exp:
+        raise ValueError("handoff token 已过期")
+
+    _consume_jclaw_jti(str(payload.get("jti") or ""), exp)
+    return payload
+
+
+def _resolve_jclaw_user(payload: dict[str, Any]) -> str:
+    global JCLAW_HANDOFF_USER_MAP
+    if not JCLAW_HANDOFF_USER_MAP:
+        JCLAW_HANDOFF_USER_MAP = _load_jclaw_user_map()
+
+    candidates = [
+        str(payload.get("uid") or "").strip(),
+        str(payload.get("username") or "").strip(),
+        str(payload.get("email") or "").strip(),
+    ]
+    for candidate in candidates:
+        mapped = JCLAW_HANDOFF_USER_MAP.get(candidate.lower())
+        if mapped and mapped in USERS:
+            return mapped
+
+    username = str(payload.get("username") or "").strip()
+    if username in USERS:
+        return username
+    if username.lower() in USERS:
+        return username.lower()
+
+    email = str(payload.get("email") or "").strip()
+    email_name = email.split("@", 1)[0].strip().lower() if "@" in email else ""
+    if email_name and email_name in USERS:
+        return email_name
+
+    raise ValueError("主系统账号未映射到 AI 子系统账号")
+
+
+def _jclaw_sso_error_response(message: str) -> HTMLResponse:
+    safe_message = message.replace("<", "&lt;").replace(">", "&gt;")
+    return HTMLResponse(
+        f"""
+        <!doctype html>
+        <html lang="zh-CN">
+        <head><meta charset="utf-8"><title>SSO 登录失败</title></head>
+        <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:40px;color:#172033;">
+          <h2>AI 子系统登录失败</h2>
+          <p>{safe_message}</p>
+          <p>请重新从 JClaw 主系统进入，或联系管理员检查账号映射。</p>
+          <p><a href="/">返回登录页</a></p>
+        </body>
+        </html>
+        """,
+        status_code=401,
+    )
+
+
+def _complete_jclaw_handoff_login(request: Request, token: str):
+    try:
+        payload = _verify_jclaw_handoff_token(token)
+        username = _resolve_jclaw_user(payload)
+    except Exception as exc:
+        print(f"JClaw handoff login failed: {exc}", flush=True)
+        return _jclaw_sso_error_response(str(exc))
+
+    request.session["username"] = username
+    request.session["sso_source"] = "jclaw"
+    request.session["sso_username"] = str(payload.get("username") or "")
+    request.session["sso_uid"] = str(payload.get("uid") or "")
+    request.session["sso_login_at"] = int(time.time())
+    return RedirectResponse(url="/", status_code=302)
+
+
 def _forbidden_error(message: str = "没有权限访问该内容") -> JSONResponse:
     return JSONResponse({"error": message}, status_code=403)
 
@@ -2973,7 +3265,18 @@ def _build_admin_stats() -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    handoff = request.query_params.get("handoff") or request.query_params.get("token")
+    if handoff:
+        return _complete_jclaw_handoff_login(request, handoff)
     return templates.TemplateResponse(request, "index.html")
+
+
+@app.get("/sso/login", response_class=HTMLResponse)
+async def jclaw_sso_login(request: Request):
+    handoff = request.query_params.get("handoff") or request.query_params.get("token")
+    if not handoff:
+        return _jclaw_sso_error_response("缺少 handoff token")
+    return _complete_jclaw_handoff_login(request, handoff)
 
 
 @app.get("/admin/dashboard", response_class=HTMLResponse)
@@ -3538,6 +3841,7 @@ async def workbench_options(request: Request):
         "subtitle_templates": SUBTITLE_TEMPLATES,
         "digital_human_engines": _digital_human_engine_options_for_user(user),
         "script_models": _script_model_options_for_user(user),
+        "property_bgm_tracks": _property_bgm_track_payloads(),
         "current_user": user,
         "current_task": _build_current_task_payload(user),
         "active_tasks": _build_active_tasks_payload(user),
@@ -3604,6 +3908,8 @@ async def upload_material_library_items(
     for index, upload in enumerate(files or [], start=1):
         original_name = Path(upload.filename or "").name
         suffix = Path(original_name).suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".m4v", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".ogg"}:
+            return JSONResponse({"error": "仅支持上传图片、视频或音频素材"}, status_code=400)
         temp_path = upload_dir / f"{uuid.uuid4().hex[:12]}_{index}{suffix}"
         with temp_path.open("wb") as f:
             shutil.copyfileobj(upload.file, f)
@@ -3612,6 +3918,7 @@ async def upload_material_library_items(
                 temp_path=str(temp_path),
                 original_filename=original_name,
                 title=Path(original_name).stem,
+                category="背景音乐" if suffix in AUDIO_SUFFIXES else "",
                 notes=notes,
                 uploader_username=user.get("username", ""),
                 uploader_display_name=user.get("display_name", ""),
@@ -4005,6 +4312,8 @@ async def start_property_video_job(
     voice_preset_id: str = Form(...),
     speed: float = Form(1.1),
     target_market: str = Form("cn"),
+    bgm_item_id: str = Form(""),
+    bgm_volume: float = Form(0.10),
 ):
     user, error = _require_user(request)
     if error:
@@ -4019,6 +4328,10 @@ async def start_property_video_job(
     voice_preset = _get_voice_preset(voice_preset_id, target_market)
     if voice_preset.get("enabled") is False:
         return JSONResponse({"error": "当前音色还未配置，暂时不可用"}, status_code=400)
+    bgm_item_id = str(bgm_item_id or "").strip()
+    if bgm_item_id and not _get_approved_bgm_path(bgm_item_id):
+        return JSONResponse({"error": "选择的背景音乐不存在或还未审核通过"}, status_code=400)
+    bgm_volume = max(0.0, min(float(bgm_volume or 0.10), 0.30))
 
     task_id = str(uuid.uuid4())[:8]
     output_dir = Path(_create_output_dir("property_video", "房源实拍成片"))
@@ -4062,6 +4375,8 @@ async def start_property_video_job(
             "speed": speed,
             "target_market": target_market,
             "voice_preset": voice_preset,
+            "bgm_item_id": bgm_item_id,
+            "bgm_volume": bgm_volume,
             "property_video_mode": "real_shot_voiceover",
         },
         "cost_entries": [],
@@ -4071,7 +4386,7 @@ async def start_property_video_job(
     _push_live_event("task_created", "创建了房源实拍成片任务", tasks[task_id])
     thread = threading.Thread(
         target=run_property_video_with_progress,
-        args=(task_id, saved_paths, script_text, voice_preset, target_market, speed),
+        args=(task_id, saved_paths, script_text, voice_preset, target_market, speed, bgm_item_id, bgm_volume),
         daemon=True,
     )
     thread.start()

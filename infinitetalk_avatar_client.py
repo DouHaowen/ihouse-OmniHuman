@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -90,6 +92,46 @@ def _request_timeout() -> int:
     return max(10, int(os.getenv("INFINITETALK_AVATAR_REQUEST_TIMEOUT_SECONDS", "180")))
 
 
+def _status_failure_tolerance() -> int:
+    return max(1, int(os.getenv("INFINITETALK_AVATAR_STATUS_FAILURE_TOLERANCE", "6")))
+
+
+def _probe_audio_duration_seconds(path: Path) -> float:
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        if completed.returncode == 0:
+            return max(0.0, float((completed.stdout or "0").strip() or 0))
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _resolve_generation_timeout_seconds(audio: Path) -> int:
+    min_timeout = int(os.getenv("INFINITETALK_AVATAR_MIN_TIMEOUT_SECONDS", "900"))
+    max_timeout = int(os.getenv("INFINITETALK_AVATAR_MAX_TIMEOUT_SECONDS", "2400"))
+    per_audio_second = float(os.getenv("INFINITETALK_AVATAR_TIMEOUT_PER_AUDIO_SECOND", "120"))
+    audio_duration = _probe_audio_duration_seconds(audio)
+    if audio_duration <= 0:
+        return int(os.getenv("INFINITETALK_AVATAR_TIMEOUT_SECONDS", "1800"))
+    dynamic_timeout = int(math.ceil(audio_duration * per_audio_second))
+    return max(min_timeout, min(max_timeout, dynamic_timeout))
+
+
 def generate_infinitetalk_avatar_video(
     *,
     image_path: str,
@@ -111,6 +153,8 @@ def generate_infinitetalk_avatar_video(
 
     merged_settings = dict(DEFAULT_SETTINGS)
     merged_settings.update(settings or {})
+    if not merged_settings.get("timeout_seconds"):
+        merged_settings["timeout_seconds"] = _resolve_generation_timeout_seconds(audio)
     base_url = _base_url()
     timeout = _request_timeout()
     verify_tls = _verify_tls()
@@ -118,7 +162,11 @@ def generate_infinitetalk_avatar_video(
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     poll_interval = max(5, int(poll_interval_seconds or os.getenv("INFINITETALK_AVATAR_POLL_INTERVAL_SECONDS", "20")))
-    max_wait = max(300, int(max_wait_seconds or os.getenv("INFINITETALK_AVATAR_MAX_WAIT_SECONDS", "21600")))
+    configured_max_wait = max_wait_seconds or os.getenv("INFINITETALK_AVATAR_MAX_WAIT_SECONDS")
+    if configured_max_wait:
+        max_wait = max(300, int(configured_max_wait))
+    else:
+        max_wait = int(merged_settings["timeout_seconds"]) + 300
     last_error: Exception | None = None
 
     for attempt in range(1, _retry_attempts() + 1):
@@ -154,12 +202,28 @@ def generate_infinitetalk_avatar_video(
 
             start = time.time()
             last_message = ""
+            status_failures = 0
             while time.time() - start < max_wait:
-                status_response = requests.get(f"{base_url}/status/{job_id}", timeout=timeout, verify=verify_tls)
-                if status_response.status_code >= 400:
+                try:
+                    status_response = requests.get(f"{base_url}/status/{job_id}", timeout=timeout, verify=verify_tls)
+                    if status_response.status_code >= 400:
+                        raise InfiniteTalkAvatarError(
+                            f"InfiniteTalk 状态查询失败: HTTP {status_response.status_code} {status_response.text[:500]}"
+                        )
+                except (requests.RequestException, InfiniteTalkAvatarError) as exc:
+                    status_failures += 1
+                    if status_failures <= _status_failure_tolerance():
+                        print(
+                            f"InfiniteTalk job {job_id}: 状态查询临时失败"
+                            f"（{status_failures}/{_status_failure_tolerance()}）：{exc}",
+                            flush=True,
+                        )
+                        time.sleep(poll_interval)
+                        continue
                     raise InfiniteTalkAvatarError(
-                        f"InfiniteTalk 状态查询失败: HTTP {status_response.status_code} {status_response.text[:500]}"
-                    )
+                        f"InfiniteTalk 状态查询连续失败，已停止等待当前 job {job_id}: {exc}"
+                    ) from exc
+                status_failures = 0
                 status_data = status_response.json() or {}
                 status = status_data.get("status")
                 message = status_data.get("message") or status

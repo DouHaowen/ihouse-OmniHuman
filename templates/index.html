@@ -1509,6 +1509,21 @@
               </div>
             </div>
 
+            <div class="field-grid" style="grid-template-columns: minmax(0, 1fr) 220px;">
+              <div class="field">
+                <label for="propertyVideoBgmSelect">背景音乐</label>
+                <select id="propertyVideoBgmSelect" class="select-input"></select>
+                <div class="helper">BGM 来自已审核的素材库音频，会自动循环/裁剪，并压低音量避免盖住解说。</div>
+              </div>
+              <div class="field">
+                <label for="propertyVideoBgmVolumeRange">BGM 音量</label>
+                <div class="range-row">
+                  <input id="propertyVideoBgmVolumeRange" type="range" min="0" max="0.3" step="0.02" value="0.1">
+                  <input id="propertyVideoBgmVolumeValue" class="range-value" type="text" value="10%" readonly>
+                </div>
+              </div>
+            </div>
+
             <div class="field">
               <label for="propertyVideoFiles">上传房源视频</label>
               <input id="propertyVideoFiles" class="select-input" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.m4v,.webm" multiple>
@@ -1650,7 +1665,7 @@
         <div class="panel" style="padding:16px;">
           <div class="field">
             <label for="materialLibraryFiles">选择文件</label>
-            <input id="materialLibraryFiles" class="select-input" type="file" accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.m4v,.webm" multiple>
+              <input id="materialLibraryFiles" class="select-input" type="file" accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.m4v,.webm,.mp3,.wav,.m4a,.aac,.ogg,audio/*" multiple>
           </div>
           <div class="field">
             <label for="materialLibraryNotes">备注</label>
@@ -1678,6 +1693,7 @@
                 <option value="">全部</option>
                 <option value="image">图片</option>
                 <option value="video">视频</option>
+                <option value="audio">音频/BGM</option>
               </select>
             </div>
             <div class="field" style="margin:0;">
@@ -1897,6 +1913,9 @@
       backToAiWorkflowBtn: document.getElementById('backToAiWorkflowBtn'),
       propertyVideoMarketSelect: document.getElementById('propertyVideoMarketSelect'),
       propertyVideoVoiceSelect: document.getElementById('propertyVideoVoiceSelect'),
+      propertyVideoBgmSelect: document.getElementById('propertyVideoBgmSelect'),
+      propertyVideoBgmVolumeRange: document.getElementById('propertyVideoBgmVolumeRange'),
+      propertyVideoBgmVolumeValue: document.getElementById('propertyVideoBgmVolumeValue'),
       propertyVideoFiles: document.getElementById('propertyVideoFiles'),
       propertyVideoAnalyzeNotes: document.getElementById('propertyVideoAnalyzeNotes'),
       propertyVideoAnalyzeBtn: document.getElementById('propertyVideoAnalyzeBtn'),
@@ -2363,7 +2382,7 @@
 
     function formatMaterialMetaLine(item) {
       const parts = [];
-      const typeLabel = item.kind === 'video' ? '视频素材' : '图片素材';
+      const typeLabel = item.kind === 'video' ? '视频素材' : (item.kind === 'audio' ? '音频/BGM' : '图片素材');
       parts.push(typeLabel);
       if (item.resolution_label) parts.push(item.resolution_label);
       if (item.duration_label) parts.push(item.duration_label);
@@ -2447,7 +2466,9 @@
         const departments = Array.isArray(item.department_ids) ? item.department_ids.join(', ') : '';
         const media = item.kind === 'video'
           ? `<video src="${item.url}" muted playsinline controls preload="metadata" style="width:100%; max-height:220px; border-radius:18px; background:#000;"></video>`
-          : `<img src="${item.url}" alt="${escapeHtml(item.title || item.filename || 'material')}" style="width:100%; max-height:220px; object-fit:cover; border-radius:18px; background:#fff;">`;
+          : (item.kind === 'audio'
+            ? `<div class="empty-box" style="gap:10px;"><strong>BGM ｜ ${escapeHtml(item.title || item.filename || 'BGM')}</strong><audio controls preload="metadata" src="${item.url}" style="width:100%;"></audio></div>`
+            : `<img src="${item.url}" alt="${escapeHtml(item.title || item.filename || 'material')}" style="width:100%; max-height:220px; object-fit:cover; border-radius:18px; background:#fff;">`);
         return `
           <div class="history-item">
             <div class="history-main" style="display:grid; gap:12px;">
@@ -2510,7 +2531,9 @@
       els.materialLibraryPendingList.innerHTML = rows.map(item => {
         const media = item.kind === 'video'
           ? `<video src="${item.url}" muted playsinline controls preload="metadata" style="width:100%; max-height:220px; border-radius:18px; background:#000;"></video>`
-          : `<img src="${item.url}" alt="${escapeHtml(item.title || item.filename || 'material')}" style="width:100%; max-height:220px; object-fit:cover; border-radius:18px; background:#fff;">`;
+          : (item.kind === 'audio'
+            ? `<div class="empty-box" style="gap:10px;"><strong>BGM ｜ ${escapeHtml(item.title || item.filename || 'BGM')}</strong><audio controls preload="metadata" src="${item.url}" style="width:100%;"></audio></div>`
+            : `<img src="${item.url}" alt="${escapeHtml(item.title || item.filename || 'material')}" style="width:100%; max-height:220px; object-fit:cover; border-radius:18px; background:#fff;">`);
         return `
           <div class="history-item" style="display:grid; gap:14px;">
             <div class="history-main" style="display:grid; gap:12px;">
@@ -3614,6 +3637,15 @@
         els.propertyVideoSpeedRange.value = Number(selected.default_speed).toFixed(2);
         els.propertyVideoSpeedValue.value = Number(selected.default_speed).toFixed(2);
       }
+      if (els.propertyVideoBgmSelect) {
+        const currentBgm = els.propertyVideoBgmSelect.value || '';
+        const tracks = state.options?.property_bgm_tracks || [];
+        els.propertyVideoBgmSelect.innerHTML = `<option value="">不使用 BGM</option>` + tracks.map(track => {
+          const duration = track.duration_label ? `｜${track.duration_label}` : '';
+          return `<option value="${track.id}">${escapeHtml(track.name || track.title || 'BGM')}${escapeHtml(duration)}</option>`;
+        }).join('');
+        els.propertyVideoBgmSelect.value = tracks.some(track => String(track.id) === String(currentBgm)) ? currentBgm : '';
+      }
     }
 
     function appendPropertyVideoLog(message) {
@@ -3752,6 +3784,8 @@
       formData.append('voice_preset_id', els.propertyVideoVoiceSelect?.value || state.selectedVoiceId || '');
       formData.append('speed', els.propertyVideoSpeedRange?.value || '1.1');
       formData.append('target_market', els.propertyVideoMarketSelect?.value || state.selectedTargetMarket || 'cn');
+      formData.append('bgm_item_id', els.propertyVideoBgmSelect?.value || '');
+      formData.append('bgm_volume', els.propertyVideoBgmVolumeRange?.value || '0.1');
       if (els.propertyVideoStartBtn) {
         els.propertyVideoStartBtn.disabled = true;
         els.propertyVideoStartBtn.textContent = '正在提交...';
@@ -5253,6 +5287,11 @@
     });
     els.propertyVideoSpeedRange?.addEventListener('input', () => {
       els.propertyVideoSpeedValue.value = Number(els.propertyVideoSpeedRange.value).toFixed(2);
+    });
+    els.propertyVideoBgmVolumeRange?.addEventListener('input', () => {
+      if (els.propertyVideoBgmVolumeValue) {
+        els.propertyVideoBgmVolumeValue.value = `${Math.round(Number(els.propertyVideoBgmVolumeRange.value || 0) * 100)}%`;
+      }
     });
     els.propertyVideoAnalyzeBtn?.addEventListener('click', analyzePropertyVideo);
     els.propertyVideoStartBtn?.addEventListener('click', startPropertyVideoJob);

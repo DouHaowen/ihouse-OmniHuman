@@ -23,7 +23,6 @@ from video_composer import (
     WhisperModel,
     _format_srt_timestamp,
     _get_audio_duration,
-    _map_chunks_to_word_timeline,
     _word_timestamps_for_audio,
 )
 
@@ -35,6 +34,9 @@ OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 PROPERTY_AUDIO_TOLERANCE_SECONDS = 3.0
 PROPERTY_SCRIPT_CALIBRATION_ATTEMPTS = 4
 PROPERTY_MAX_OPENAI_TOKENS = 8192
+PROPERTY_SUBTITLE_MAX_CHARS = 18
+PROPERTY_SUBTITLE_MIN_SECONDS = 0.65
+PROPERTY_SUBTITLE_SILENT_RE = re.compile(r"[\s，,。！？!?；;、：:（）()《》<>【】\[\]“”\"'‘’…—\-]+")
 
 
 def _script_visible_length(text: str) -> int:
@@ -53,6 +55,10 @@ def _target_script_length_for_duration(script_text: str, target_duration: float,
     lower = max(20, int(estimated_chars * 0.94))
     upper = max(lower + 10, int(estimated_chars * 1.06))
     return current_chars, lower, upper
+
+
+def _spoken_text_length(text: str) -> int:
+    return len(PROPERTY_SUBTITLE_SILENT_RE.sub("", text or ""))
 
 
 def _run(cmd: list[str]) -> None:
@@ -86,26 +92,99 @@ def _split_script_for_subtitles(script_text: str) -> list[str]:
     text = re.sub(r"\s+", " ", (script_text or "").strip())
     if not text:
         return []
-    sentences = [part.strip() for part in re.split(r"(?<=[。！？!?；;，,、])\s*", text) if part.strip()]
+    sentences = [part.strip() for part in re.split(r"(?<=[。！？!?；;，,])\s*", text) if part.strip()]
     chunks: list[str] = []
     for sentence in sentences or [text]:
-        if len(sentence) <= 14:
+        if _spoken_text_length(sentence) <= PROPERTY_SUBTITLE_MAX_CHARS:
             chunks.append(sentence)
             continue
         pieces = [part.strip() for part in re.split(r"(?<=[，,、])\s*", sentence) if part.strip()]
         for piece in pieces or [sentence]:
-            if len(piece) <= 14:
+            if _spoken_text_length(piece) <= PROPERTY_SUBTITLE_MAX_CHARS:
                 chunks.append(piece)
                 continue
-            chunks.extend(piece[i : i + 14] for i in range(0, len(piece), 14))
+            buffer = ""
+            for char in piece:
+                buffer += char
+                if _spoken_text_length(buffer) >= PROPERTY_SUBTITLE_MAX_CHARS and char in "，,、的了和与及在是也都":
+                    chunks.append(buffer.strip())
+                    buffer = ""
+            if buffer.strip():
+                if chunks and _spoken_text_length(buffer) <= 3:
+                    chunks[-1] = f"{chunks[-1]}{buffer.strip()}"
+                else:
+                    chunks.append(buffer.strip())
     return [chunk for chunk in chunks if chunk.strip()] or [text]
 
 
-def _format_subtitle_chunk(chunk: str, max_line_chars: int = 14) -> str:
+def _format_subtitle_chunk(chunk: str, max_line_chars: int = PROPERTY_SUBTITLE_MAX_CHARS) -> str:
     chunk = (chunk or "").strip()
-    if len(chunk) <= max_line_chars:
+    if _spoken_text_length(chunk) <= max_line_chars:
         return chunk
-    return chunk[:max_line_chars].strip()
+    return chunk
+
+
+def _map_property_chunks_to_word_timeline(
+    chunks: list[str],
+    words: list[tuple[float, float, str]],
+    audio_duration: float,
+) -> list[tuple[float, float, str]]:
+    if not chunks or not words:
+        return []
+
+    anchors: list[tuple[int, float]] = [(0, float(words[0][0]))]
+    spoken_pos = 0
+    for word_start, word_end, word_text in words:
+        spoken = PROPERTY_SUBTITLE_SILENT_RE.sub("", str(word_text or ""))
+        char_count = max(len(spoken), 1)
+        start = float(word_start)
+        end = float(word_end)
+        for offset in range(char_count):
+            anchors.append((spoken_pos + offset, start + (end - start) * offset / char_count))
+        spoken_pos += char_count
+    anchors.append((spoken_pos, float(words[-1][1])))
+    if spoken_pos <= 0:
+        return []
+
+    total_script_spoken = sum(max(_spoken_text_length(chunk), 0) for chunk in chunks)
+    if total_script_spoken <= 0:
+        return []
+
+    def time_at_script_pos(pos: int) -> float:
+        mapped = pos / total_script_spoken * spoken_pos
+        previous = anchors[0]
+        for anchor in anchors:
+            if anchor[0] >= mapped:
+                next_anchor = anchor
+                break
+            previous = anchor
+        else:
+            next_anchor = anchors[-1]
+        span = next_anchor[0] - previous[0]
+        if span <= 0:
+            return previous[1]
+        ratio = (mapped - previous[0]) / span
+        return previous[1] + ratio * (next_anchor[1] - previous[1])
+
+    rows: list[tuple[float, float, str]] = []
+    cursor = 0
+    previous_end = 0.0
+    for index, chunk in enumerate(chunks):
+        chunk_len = max(_spoken_text_length(chunk), 1)
+        start = time_at_script_pos(cursor)
+        cursor += chunk_len
+        end = time_at_script_pos(cursor)
+        if index == len(chunks) - 1:
+            end = max(end, float(words[-1][1]))
+        start = max(0.0, min(start, audio_duration))
+        end = max(start + PROPERTY_SUBTITLE_MIN_SECONDS, min(end, audio_duration + 0.02))
+        if rows and start < previous_end:
+            start = previous_end
+        if rows and end <= start:
+            end = min(audio_duration + 0.02, start + PROPERTY_SUBTITLE_MIN_SECONDS)
+        rows.append((start, end, chunk))
+        previous_end = end
+    return rows
 
 
 def _write_property_subtitles(script_text: str, audio_duration: float, output_path: Path, audio_path: Path | None = None, target_market: str = "cn") -> None:
@@ -118,7 +197,7 @@ def _write_property_subtitles(script_text: str, audio_duration: float, output_pa
         try:
             language = WHISPER_LANGUAGE_MAP.get(target_market or "cn", "zh")
             words = _word_timestamps_for_audio(audio_path, language)
-            timed_chunks = _map_chunks_to_word_timeline(chunks, words, audio_duration)
+            timed_chunks = _map_property_chunks_to_word_timeline(chunks, words, audio_duration)
         except Exception:
             timed_chunks = []
 
@@ -135,8 +214,10 @@ def _write_property_subtitles(script_text: str, audio_duration: float, output_pa
             cursor = end
 
     rows: list[str] = []
+    previous_end = 0.0
     for index, (start, end, chunk) in enumerate(timed_chunks, start=1):
-        end = min(max(end, start + 0.35), audio_duration + 0.02)
+        start = max(previous_end, start)
+        end = min(max(end, start + PROPERTY_SUBTITLE_MIN_SECONDS), audio_duration + 0.02)
         rows.extend(
             [
                 str(index),
@@ -145,6 +226,7 @@ def _write_property_subtitles(script_text: str, audio_duration: float, output_pa
                 "",
             ]
         )
+        previous_end = end
     output_path.write_text("\n".join(rows).strip() + "\n", encoding="utf-8")
 
 
@@ -153,16 +235,23 @@ def _property_subtitle_filter(subtitle_path: Path) -> str:
     base_style = SUBTITLE_TEMPLATE_STYLES.get("classic") or SUBTITLE_TEMPLATE_STYLES["classic"]
     style_config = {
         **base_style,
-        "size": 11,
-        "margin_v": 62,
-        "margin_l": 120,
-        "margin_r": 120,
-        "back": "&H660B2238",
-        "outline_width": 1.0,
+        "font": "Noto Sans CJK SC",
+        "size": 13,
+        "primary": "&H00FFFFFF",
+        "outline": "&H0013202C",
+        "back": "&H00000000",
+        "border_style": 1,
+        "outline_width": 1.9,
+        "shadow": 0.8,
+        "margin_v": 86,
+        "margin_l": 96,
+        "margin_r": 96,
     }
     style = (
         f"FontName={style_config['font']},"
         f"FontSize={style_config['size']},"
+        "Bold=1,"
+        "Spacing=0.4,"
         f"PrimaryColour={style_config['primary']},"
         f"OutlineColour={style_config['outline']},"
         f"BackColour={style_config['back']},"
@@ -474,6 +563,8 @@ def _mux_voice_and_subtitles(
     audio_path: Path,
     subtitle_path: Path,
     output_path: Path,
+    bgm_path: Path | None = None,
+    bgm_volume: float = 0.10,
 ) -> tuple[float, float]:
     audio_duration = _get_audio_duration(audio_path)
     video_duration = _ffprobe_duration(video_path)
@@ -483,7 +574,94 @@ def _mux_voice_and_subtitles(
     if abs(audio_duration - video_duration) > PROPERTY_AUDIO_TOLERANCE_SECONDS:
         raise RuntimeError(f"配音时长与视频时长不匹配：视频 {video_duration:.1f}s，配音 {audio_duration:.1f}s")
 
-    filters = [_property_subtitle_filter(subtitle_path)]
+    subtitle_filter = _property_subtitle_filter(subtitle_path)
+    safe_bgm_volume = max(0.0, min(float(bgm_volume or 0.10), 0.30))
+    if bgm_path and bgm_path.exists() and safe_bgm_volume > 0:
+        fade_out_start = max(0.0, video_duration - 1.2)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-i",
+            str(audio_path),
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(bgm_path),
+            "-t",
+            f"{video_duration:.3f}",
+            "-filter_complex",
+            (
+                f"[0:v]{subtitle_filter}[vout];"
+                f"[2:a]volume={safe_bgm_volume:.3f},atrim=0:{video_duration:.3f},"
+                f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.8,"
+                f"afade=t=out:st={fade_out_start:.3f}:d=1.2[bgm];"
+                "[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+            ),
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        try:
+            _run(cmd)
+        except RuntimeError as exc:
+            if "No such filter: 'subtitles'" not in str(exc) and "Error initializing filters" not in str(exc):
+                raise
+            fallback_cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
+                "-i",
+                str(audio_path),
+                "-stream_loop",
+                "-1",
+                "-i",
+                str(bgm_path),
+                "-t",
+                f"{video_duration:.3f}",
+                "-filter_complex",
+                (
+                    f"[2:a]volume={safe_bgm_volume:.3f},atrim=0:{video_duration:.3f},"
+                    f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.8,"
+                    f"afade=t=out:st={fade_out_start:.3f}:d=1.2[bgm];"
+                    "[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                ),
+                "-map",
+                "0:v:0",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+            _run(fallback_cmd)
+        return audio_duration, video_duration
 
     base_cmd = [
         "ffmpeg",
@@ -513,7 +691,7 @@ def _mux_voice_and_subtitles(
         str(output_path),
     ]
     try:
-        _run(base_cmd[:6] + ["-vf", ",".join(filters)] + base_cmd[6:])
+        _run(base_cmd[:6] + ["-vf", subtitle_filter] + base_cmd[6:])
     except RuntimeError as exc:
         # Some local ffmpeg builds omit libass/subtitles. Keep the workflow usable
         # and still export the SRT; production images normally support burn-in.
@@ -533,6 +711,8 @@ def build_property_video(
     speed: float,
     target_market: str,
     generate_audio_fn: Callable[..., str],
+    bgm_path: Path | None = None,
+    bgm_volume: float = 0.10,
     log: Optional[Callable[[str, Optional[int]], None]] = None,
 ) -> dict:
     def emit(message: str, step: Optional[int] = None) -> None:
@@ -598,13 +778,18 @@ def build_property_video(
     subtitle_path = subtitle_dir / "property_narration.srt"
     _write_property_subtitles(script_text, audio_duration, subtitle_path, audio_path=audio_path, target_market=target_market)
 
-    emit("正在合成配音、字幕和最终成片...", 4)
+    if bgm_path and bgm_path.exists():
+        emit(f"正在合成配音、字幕、背景音乐和最终成片（BGM 音量 {int(max(0.0, min(float(bgm_volume or 0.10), 0.30)) * 100)}%）...", 4)
+    else:
+        emit("正在合成配音、字幕和最终成片...", 4)
     final_video_path = final_dir / "property_real_shot_final.mp4"
     audio_duration, video_duration = _mux_voice_and_subtitles(
         merged_video_path,
         audio_path,
         subtitle_path,
         final_video_path,
+        bgm_path=bgm_path,
+        bgm_volume=bgm_volume,
     )
 
     result = {
@@ -620,6 +805,8 @@ def build_property_video(
         "final_video_path": str(final_video_path),
         "subtitle_path": str(subtitle_path),
         "narration_audio_path": str(audio_path),
+        "bgm_path": str(bgm_path) if bgm_path else "",
+        "bgm_volume": max(0.0, min(float(bgm_volume or 0.10), 0.30)) if bgm_path else 0.0,
         "source_videos": [str(path) for path in source_videos],
         "workflow_config": {
             "target_market": target_market,
@@ -627,6 +814,8 @@ def build_property_video(
                 **voice_preset,
                 "selected_speed": speed,
             },
+            "bgm_path": str(bgm_path) if bgm_path else "",
+            "bgm_volume": max(0.0, min(float(bgm_volume or 0.10), 0.30)) if bgm_path else 0.0,
             "property_video_mode": "real_shot_voiceover",
         },
         "files": [],
