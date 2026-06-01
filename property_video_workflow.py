@@ -32,10 +32,12 @@ OUTPUT_WIDTH = 1080
 OUTPUT_HEIGHT = 1920
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 PROPERTY_AUDIO_TOLERANCE_SECONDS = 3.0
+PROPERTY_TIMELINE_AUDIO_TOLERANCE_SECONDS = 8.0
 PROPERTY_SCRIPT_CALIBRATION_ATTEMPTS = 4
 PROPERTY_MAX_OPENAI_TOKENS = 8192
 PROPERTY_SUBTITLE_MAX_CHARS = 18
 PROPERTY_SUBTITLE_MIN_SECONDS = 0.65
+PROPERTY_TIMELINE_MIN_SEGMENT_SECONDS = 2.8
 PROPERTY_SUBTITLE_SILENT_RE = re.compile(r"[\s，,。！？!?；;、：:（）()《》<>【】\[\]“”\"'‘’…—\-]+")
 
 
@@ -64,7 +66,15 @@ def _spoken_text_length(text: str) -> int:
 def _run(cmd: list[str]) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "ffmpeg failed").strip())
+        message = (result.stderr or result.stdout or "ffmpeg failed").strip()
+        lines = [line for line in message.splitlines() if line.strip()]
+        important = [
+            line
+            for line in lines
+            if any(token in line.lower() for token in ("error", "invalid", "failed", "unable", "no such", "not found", "cannot"))
+        ]
+        compact = "\n".join((important or lines[-8:])[-8:])
+        raise RuntimeError(compact or message[:1000])
 
 
 def _ffprobe_duration(path: Path) -> float:
@@ -230,22 +240,107 @@ def _write_property_subtitles(script_text: str, audio_duration: float, output_pa
     output_path.write_text("\n".join(rows).strip() + "\n", encoding="utf-8")
 
 
+def _write_property_timeline_subtitles(
+    segments: list[dict],
+    output_path: Path,
+    target_market: str = "cn",
+) -> None:
+    rows: list[str] = []
+    subtitle_index = 1
+    previous_end = 0.0
+    for segment in segments:
+        script = str(segment.get("script") or "").strip()
+        audio_path_value = str(segment.get("audio_path") or "")
+        audio_path = Path(audio_path_value) if audio_path_value else None
+        audio_duration = float(segment.get("audio_duration") or 0.0)
+        offset = float(segment.get("audio_offset") or 0.0)
+        if not script or audio_duration <= 0:
+            continue
+        chunks = _split_script_for_subtitles(script)
+        timed_chunks: list[tuple[float, float, str]] = []
+        if audio_path and audio_path.exists() and WhisperModel is not None:
+            try:
+                language = WHISPER_LANGUAGE_MAP.get(target_market or "cn", "zh")
+                words = _word_timestamps_for_audio(audio_path, language)
+                timed_chunks = _map_property_chunks_to_word_timeline(chunks, words, audio_duration)
+            except Exception:
+                timed_chunks = []
+        if not timed_chunks:
+            total_chars = sum(max(_spoken_text_length(chunk), 1) for chunk in chunks)
+            cursor = 0.0
+            for index, chunk in enumerate(chunks, start=1):
+                ratio = max(_spoken_text_length(chunk), 1) / max(total_chars, 1)
+                start = cursor
+                end = audio_duration if index == len(chunks) else cursor + max(0.75, audio_duration * ratio)
+                timed_chunks.append((start, end, chunk))
+                cursor = end
+        for start, end, chunk in timed_chunks:
+            absolute_start = max(previous_end, offset + start)
+            absolute_end = max(absolute_start + PROPERTY_SUBTITLE_MIN_SECONDS, offset + end)
+            rows.extend(
+                [
+                    str(subtitle_index),
+                    f"{_format_srt_timestamp(absolute_start)} --> {_format_srt_timestamp(absolute_end)}",
+                    _format_subtitle_chunk(chunk),
+                    "",
+                ]
+            )
+            subtitle_index += 1
+            previous_end = absolute_end
+    output_path.write_text("\n".join(rows).strip() + ("\n" if rows else ""), encoding="utf-8")
+
+
+def _write_property_timeline_subtitles_fallback(
+    segments: list[dict],
+    output_path: Path,
+) -> None:
+    rows: list[str] = []
+    subtitle_index = 1
+    previous_end = 0.0
+    for segment in segments:
+        script = str(segment.get("script") or "").strip()
+        duration = float(segment.get("audio_duration") or segment.get("target_duration") or 0.0)
+        offset = float(segment.get("audio_offset") or previous_end)
+        if not script or duration <= 0:
+            continue
+        chunks = _split_script_for_subtitles(script)
+        total_chars = sum(max(_spoken_text_length(chunk), 1) for chunk in chunks)
+        cursor = 0.0
+        for index, chunk in enumerate(chunks, start=1):
+            ratio = max(_spoken_text_length(chunk), 1) / max(total_chars, 1)
+            start = max(previous_end, offset + cursor)
+            end = offset + (duration if index == len(chunks) else cursor + max(0.75, duration * ratio))
+            end = max(start + PROPERTY_SUBTITLE_MIN_SECONDS, end)
+            rows.extend(
+                [
+                    str(subtitle_index),
+                    f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}",
+                    _format_subtitle_chunk(chunk),
+                    "",
+                ]
+            )
+            subtitle_index += 1
+            previous_end = end
+            cursor = max(0.0, end - offset)
+    output_path.write_text("\n".join(rows).strip() + ("\n" if rows else ""), encoding="utf-8")
+
+
 def _property_subtitle_filter(subtitle_path: Path) -> str:
     escaped = subtitle_path.as_posix().replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
     base_style = SUBTITLE_TEMPLATE_STYLES.get("classic") or SUBTITLE_TEMPLATE_STYLES["classic"]
     style_config = {
         **base_style,
         "font": "Noto Sans CJK SC",
-        "size": 13,
+        "size": 16,
         "primary": "&H00FFFFFF",
         "outline": "&H0013202C",
         "back": "&H00000000",
         "border_style": 1,
-        "outline_width": 1.9,
-        "shadow": 0.8,
-        "margin_v": 86,
-        "margin_l": 96,
-        "margin_r": 96,
+        "outline_width": 2.2,
+        "shadow": 0.9,
+        "margin_v": 92,
+        "margin_l": 112,
+        "margin_r": 112,
     }
     style = (
         f"FontName={style_config['font']},"
@@ -423,6 +518,150 @@ def _expand_property_script_with_openai(
     return (_extract_json_object(raw).get("script") or "").strip()
 
 
+def _split_script_sentences(script_text: str) -> list[str]:
+    text = re.sub(r"\s+", " ", (script_text or "").strip())
+    if not text:
+        return []
+    return [part.strip() for part in re.split(r"(?<=[。！？!?；;])\s*", text) if part.strip()]
+
+
+def _closing_sentence_for_market(target_market: str) -> str:
+    if target_market == "tw":
+        return "以上就是這套房源的實際看房介紹，如果您想進一步了解，可以再安排實地確認。"
+    if target_market == "jp":
+        return "以上が今回の物件紹介です。気になる点があれば、ぜひ現地で一緒に確認していきましょう。"
+    return "以上就是这套房源的实际看房介绍，如果您想进一步了解，可以再安排实地确认。"
+
+
+def _has_natural_closing(script_text: str) -> bool:
+    tail = (script_text or "").strip()[-80:]
+    closing_tokens = (
+        "以上",
+        "整体介绍",
+        "房源介绍",
+        "實際看房介紹",
+        "物件紹介",
+        "实地确认",
+        "現地",
+        "预约",
+        "預約",
+    )
+    return any(token in tail for token in closing_tokens)
+
+
+def _trim_script_to_max_length(script_text: str, target_max_chars: int, target_market: str = "cn", keep_closing: bool = True) -> str:
+    sentences = _split_script_sentences(script_text)
+    if not sentences:
+        return (script_text or "")[:max(target_max_chars, 1)].strip()
+
+    if not keep_closing or target_max_chars < 45:
+        kept: list[str] = []
+        for sentence in sentences:
+            candidate = "".join(kept + [sentence]).strip()
+            if _script_visible_length(candidate) <= target_max_chars:
+                kept.append(sentence)
+                continue
+            break
+        if kept:
+            return "".join(kept).strip()
+        first = sentences[0]
+        pieces = [part.strip() for part in re.split(r"(?<=[，,、])\s*", first) if part.strip()]
+        partial = ""
+        for piece in pieces:
+            candidate = f"{partial}{piece}".strip()
+            if _script_visible_length(candidate) <= target_max_chars:
+                partial = candidate
+                continue
+            break
+        return partial or first[:max(target_max_chars, 1)].strip()
+
+    closing = sentences[-1] if _has_natural_closing(sentences[-1]) else _closing_sentence_for_market(target_market)
+    closing_len = _script_visible_length(closing)
+    body_limit = max(20, target_max_chars - closing_len)
+    kept: list[str] = []
+    for sentence in sentences[:-1] if _has_natural_closing(sentences[-1]) else sentences:
+        if _has_natural_closing(sentence):
+            continue
+        candidate = "".join(kept + [sentence]).strip()
+        if _script_visible_length(candidate) <= body_limit:
+            kept.append(sentence)
+            continue
+        break
+
+    if kept:
+        return f"{''.join(kept).strip()}{closing}".strip()
+
+    # If the first sentence alone is too long, cut at a comma-like pause so we
+    # still avoid chopping a word or phrase in the middle whenever possible.
+    first = sentences[0]
+    pieces = [part.strip() for part in re.split(r"(?<=[，,、])\s*", first) if part.strip()]
+    partial = ""
+    for piece in pieces:
+        candidate = f"{partial}{piece}".strip()
+        if _script_visible_length(candidate) <= target_max_chars:
+            partial = candidate
+            continue
+        break
+    if partial:
+        return f"{partial}{closing}".strip()
+    return closing if closing_len <= target_max_chars else first[:max(target_max_chars, 1)].strip()
+
+
+def _compress_property_script_with_openai(
+    *,
+    script_text: str,
+    target_duration: float,
+    actual_duration: float,
+    target_market: str,
+    target_min_chars: int,
+    target_max_chars: int,
+    api_key: str,
+    model: str,
+) -> str:
+    language = "繁體中文" if target_market == "tw" else ("日语" if target_market == "jp" else "简体中文")
+    target_mid_chars = int((target_min_chars + target_max_chars) / 2)
+    prompt = f"""
+请把下面这份房源实拍连续解说文案压缩成更短、更紧凑的口播稿。
+
+输出语言：{language}
+目标视频时长：{target_duration:.2f} 秒
+当前配音真实时长：{actual_duration:.2f} 秒，明显偏长
+当前有效字数：约 {_script_visible_length(script_text)} 字
+压缩后目标有效字数：约 {target_mid_chars} 字，必须落在 {target_min_chars}-{target_max_chars} 字之间。
+
+硬性规则：
+1. 必须输出完整文案，不要输出解释，不要输出大纲。
+2. 这次必须明显压缩，不要只是润色；如果超过目标字数范围，这次任务就是失败。
+3. 保留看房顺序和核心卖点，但删除重复寒暄、泛泛而谈、过度铺垫。
+4. 不要编造价格、面积、车站距离、楼层、朝向、收益率等原文没有的硬信息。
+5. 语气仍然像销售带客户看房，句子自然连贯，适合直接配音。
+6. 输出 JSON：{{"script": "压缩后的完整解说文案"}}
+
+原文：
+{script_text}
+""".strip()
+    response = requests.post(
+        OPENAI_CHAT_COMPLETIONS_URL,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "你只输出可解析 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.25,
+            "max_tokens": PROPERTY_MAX_OPENAI_TOKENS,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=120,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"OpenAI 文案压缩失败：{response.status_code} {response.text[:500]}")
+    body = response.json()
+    raw = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+    return (_extract_json_object(raw).get("script") or "").strip()
+
+
 def _calibrate_property_script_with_openai(
     *,
     script_text: str,
@@ -430,6 +669,7 @@ def _calibrate_property_script_with_openai(
     actual_duration: float,
     target_market: str,
     attempt: int,
+    keep_closing: bool = True,
 ) -> str:
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
@@ -499,8 +739,23 @@ def _calibrate_property_script_with_openai(
             calibrated_chars = _script_visible_length(calibrated)
         if calibrated_chars < target_min_chars:
             calibrated = _pad_script_to_minimum_length(calibrated, target_min_chars, target_market)
-    if calibrated and actual_duration > target_duration and calibrated_chars >= current_chars * 0.98:
-        return calibrated[:max(target_min_chars, 1)]
+    if calibrated and actual_duration > target_duration:
+        if calibrated_chars > target_max_chars or calibrated_chars >= current_chars * 0.94:
+            compressed = _compress_property_script_with_openai(
+                script_text=calibrated,
+                target_duration=target_duration,
+                actual_duration=actual_duration,
+                target_market=target_market,
+                target_min_chars=target_min_chars,
+                target_max_chars=target_max_chars,
+                api_key=api_key,
+                model=model,
+            )
+            if _script_visible_length(compressed) < calibrated_chars:
+                calibrated = compressed
+                calibrated_chars = _script_visible_length(calibrated)
+        if calibrated_chars > target_max_chars:
+            calibrated = _trim_script_to_max_length(calibrated, target_max_chars, target_market, keep_closing=keep_closing)
     return calibrated or script_text
 
 
@@ -515,6 +770,8 @@ def _generate_calibrated_narration(
     speed: float,
     generate_audio_fn: Callable[..., str],
     emit: Callable[[str, Optional[int]], None],
+    tolerance_seconds: float = PROPERTY_AUDIO_TOLERANCE_SECONDS,
+    keep_closing: bool = True,
 ) -> tuple[str, float, int]:
     current_script = script_text
     last_duration = 0.0
@@ -531,7 +788,7 @@ def _generate_calibrated_narration(
         if last_duration <= 0:
             raise RuntimeError("配音生成完成，但无法读取音频时长")
         delta = last_duration - target_duration
-        if abs(delta) <= PROPERTY_AUDIO_TOLERANCE_SECONDS:
+        if abs(delta) <= tolerance_seconds:
             return current_script, last_duration, attempt
         if attempt >= PROPERTY_SCRIPT_CALIBRATION_ATTEMPTS:
             break
@@ -552,10 +809,262 @@ def _generate_calibrated_narration(
             actual_duration=last_duration,
             target_market=target_market,
             attempt=attempt + 1,
+            keep_closing=keep_closing,
         )
+    if last_duration > target_duration + tolerance_seconds:
+        for emergency_attempt in range(2):
+            current_chars = max(_script_visible_length(current_script), 1)
+            # The normal calibration asks the model to rewrite. If it still runs
+            # long, force a conservative sentence-level trim based on the measured
+            # TTS speed, then synthesize again. This keeps one-take videos from
+            # failing just because the model was too wordy.
+            target_chars = max(20, int(current_chars * (target_duration / max(last_duration, 1.0)) * 0.96))
+            current_script = _trim_script_to_max_length(current_script, target_chars, target_market, keep_closing=keep_closing)
+            emit(
+                f"配音仍偏长，正在按真实语速强制压缩文案后重配（第 {emergency_attempt + 1}/2 次，目标约 {target_chars} 字）...",
+                1,
+            )
+            generate_audio_fn(
+                current_script,
+                str(audio_path),
+                voice=voice_id,
+                speed=speed,
+                volume=float(voice_preset.get("default_volume", 1.0) or 1.0),
+                language=voice_preset.get("language", ""),
+            )
+            last_duration = _get_audio_duration(audio_path)
+            if last_duration <= 0:
+                raise RuntimeError("配音生成完成，但无法读取音频时长")
+            if abs(last_duration - target_duration) <= tolerance_seconds:
+                return current_script, last_duration, PROPERTY_SCRIPT_CALIBRATION_ATTEMPTS + emergency_attempt + 1
+            if last_duration < target_duration - tolerance_seconds:
+                current_script = _calibrate_property_script_with_openai(
+                    script_text=current_script,
+                    target_duration=target_duration,
+                    actual_duration=last_duration,
+                    target_market=target_market,
+                    attempt=PROPERTY_SCRIPT_CALIBRATION_ATTEMPTS + emergency_attempt + 2,
+                    keep_closing=keep_closing,
+                )
+                generate_audio_fn(
+                    current_script,
+                    str(audio_path),
+                    voice=voice_id,
+                    speed=speed,
+                    volume=float(voice_preset.get("default_volume", 1.0) or 1.0),
+                    language=voice_preset.get("language", ""),
+                )
+                last_duration = _get_audio_duration(audio_path)
+                if abs(last_duration - target_duration) <= tolerance_seconds:
+                    return current_script, last_duration, PROPERTY_SCRIPT_CALIBRATION_ATTEMPTS + emergency_attempt + 1
     raise RuntimeError(
         f"文案配音时长仍未匹配视频：视频 {target_duration:.1f}s，配音 {last_duration:.1f}s。请在解说文案中手动{'增加' if last_duration < target_duration else '减少'}约 {abs(last_duration - target_duration):.0f} 秒内容后重试。"
     )
+
+
+def _concat_audio_files(audio_paths: list[Path], output_path: Path) -> None:
+    if not audio_paths:
+        raise RuntimeError("没有可拼接的分段配音")
+    cmd = ["ffmpeg", "-y"]
+    for path in audio_paths:
+        cmd.extend(["-i", str(path)])
+    filter_inputs = "".join(f"[{index}:a]" for index in range(len(audio_paths)))
+    cmd.extend(
+        [
+            "-filter_complex",
+            f"{filter_inputs}concat=n={len(audio_paths)}:v=0:a=1[aout]",
+            "-map",
+            "[aout]",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "3",
+            str(output_path),
+        ]
+    )
+    _run(cmd)
+
+
+def _mix_timeline_audio_files(segments: list[dict], output_path: Path) -> None:
+    playable_segments = [
+        segment
+        for segment in segments
+        if segment.get("audio_path") and Path(str(segment.get("audio_path"))).exists()
+    ]
+    if not playable_segments:
+        raise RuntimeError("没有可混合的一镜到底分段配音")
+    cmd = ["ffmpeg", "-y"]
+    for segment in playable_segments:
+        cmd.extend(["-i", str(segment["audio_path"])])
+
+    filters: list[str] = []
+    labels: list[str] = []
+    for index, segment in enumerate(playable_segments):
+        delay_ms = max(0, int(round(float(segment.get("start") or 0.0) * 1000)))
+        label = f"a{index}"
+        filters.append(f"[{index}:a]adelay={delay_ms}:all=1[{label}]")
+        labels.append(f"[{label}]")
+    filters.append(f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0[aout]")
+    cmd.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[aout]",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "3",
+            str(output_path),
+        ]
+    )
+    _run(cmd)
+
+
+def _normalize_timeline_segments(timeline_segments: list[dict] | None, video_duration: float, fallback_script: str) -> list[dict]:
+    normalized: list[dict] = []
+    if not isinstance(timeline_segments, list):
+        return []
+    for index, item in enumerate(timeline_segments, start=1):
+        if not isinstance(item, dict):
+            continue
+        script = str(item.get("script") or "").strip()
+        if not script:
+            continue
+        try:
+            start = float(item.get("start", 0) or 0)
+            end = float(item.get("end", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        start = max(0.0, min(video_duration, start))
+        end = max(start, min(video_duration, end))
+        if end - start < 1.0:
+            continue
+        normalized.append(
+            {
+                "index": int(item.get("index") or index),
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "target_duration": round(end - start, 3),
+                "room_type": str(item.get("room_type") or item.get("room") or "空间"),
+                "visual_summary": str(item.get("visual_summary") or ""),
+                "script": script,
+            }
+        )
+    if not normalized:
+        return []
+    normalized.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+    merged: list[dict] = []
+    for segment in normalized:
+        duration = float(segment["end"]) - float(segment["start"])
+        if duration >= PROPERTY_TIMELINE_MIN_SEGMENT_SECONDS or not merged:
+            merged.append(segment)
+            continue
+        previous = merged[-1]
+        previous["end"] = segment["end"]
+        previous["target_duration"] = round(float(previous["end"]) - float(previous["start"]), 3)
+        if str(segment.get("room_type") or "") not in str(previous.get("room_type") or ""):
+            previous["room_type"] = f"{previous.get('room_type') or '空间'} / {segment.get('room_type') or '空间'}"
+        if segment.get("visual_summary"):
+            previous["visual_summary"] = "；".join(part for part in [str(previous.get("visual_summary") or ""), str(segment.get("visual_summary") or "")] if part)
+        previous["script"] = "\n".join(part for part in [str(previous.get("script") or "").strip(), str(segment.get("script") or "").strip()] if part)
+
+    if len(merged) >= 2 and float(merged[0]["end"]) - float(merged[0]["start"]) < PROPERTY_TIMELINE_MIN_SEGMENT_SECONDS:
+        first = merged.pop(0)
+        merged[0]["start"] = first["start"]
+        merged[0]["target_duration"] = round(float(merged[0]["end"]) - float(merged[0]["start"]), 3)
+        if str(first.get("room_type") or "") not in str(merged[0].get("room_type") or ""):
+            merged[0]["room_type"] = f"{first.get('room_type') or '空间'} / {merged[0].get('room_type') or '空间'}"
+        if first.get("visual_summary"):
+            merged[0]["visual_summary"] = "；".join(part for part in [str(first.get("visual_summary") or ""), str(merged[0].get("visual_summary") or "")] if part)
+        merged[0]["script"] = "\n".join(part for part in [str(first.get("script") or "").strip(), str(merged[0].get("script") or "").strip()] if part)
+
+    normalized = merged
+    for index, segment in enumerate(normalized, start=1):
+        segment["index"] = index
+        segment["target_duration"] = round(float(segment["end"]) - float(segment["start"]), 3)
+    if normalized[0]["start"] > 0.75:
+        normalized[0]["start"] = 0.0
+        normalized[0]["target_duration"] = round(float(normalized[0]["end"]) - float(normalized[0]["start"]), 3)
+    if video_duration - float(normalized[-1]["end"]) > 0.75:
+        normalized[-1]["end"] = round(video_duration, 3)
+        normalized[-1]["target_duration"] = round(float(normalized[-1]["end"]) - float(normalized[-1]["start"]), 3)
+    return normalized
+
+
+def _generate_timeline_narration(
+    *,
+    timeline_segments: list[dict],
+    audio_dir: Path,
+    target_market: str,
+    voice_id: str,
+    voice_preset: dict,
+    speed: float,
+    generate_audio_fn: Callable[..., str],
+    emit: Callable[[str, Optional[int]], None],
+    target_total_duration: float | None = None,
+) -> tuple[list[dict], Path, float, int]:
+    working_segments = [dict(segment) for segment in timeline_segments]
+    total_attempts = 0
+    combined_audio = audio_dir / "narration.mp3"
+    generated: list[dict] = []
+
+    for pass_index in range(2):
+        generated = []
+        for index, segment in enumerate(working_segments, start=1):
+            target_duration = float(segment.get("target_duration") or 0.0)
+            if target_duration <= 0:
+                continue
+            segment_audio = audio_dir / f"timeline_segment_{index:02d}.mp3"
+            target_audio_duration = max(1.0, target_duration - 0.25)
+            tolerance = min(PROPERTY_AUDIO_TOLERANCE_SECONDS, max(0.75, target_audio_duration * 0.14))
+            emit(
+                f"正在生成一镜到底对齐配音 {index}/{len(working_segments)}：{segment.get('room_type') or '空间'}，目标 {target_audio_duration:.1f}s...",
+                1,
+            )
+            script, audio_duration, attempts = _generate_calibrated_narration(
+                script_text=str(segment.get("script") or ""),
+                audio_path=segment_audio,
+                target_duration=target_audio_duration,
+                target_market=target_market,
+                voice_id=voice_id,
+                voice_preset=voice_preset,
+                speed=speed,
+                generate_audio_fn=generate_audio_fn,
+                emit=emit,
+                tolerance_seconds=tolerance,
+                keep_closing=False,
+            )
+            enriched = {
+                **segment,
+                "script": script,
+                "audio_path": str(segment_audio),
+                "audio_duration": round(audio_duration, 3),
+                "audio_offset": round(float(segment.get("start") or 0.0), 3),
+                "audio_video_delta_seconds": round(audio_duration - target_duration, 3),
+                "script_calibration_attempts": attempts,
+            }
+            generated.append(enriched)
+            total_attempts += attempts
+        _mix_timeline_audio_files(generated, combined_audio)
+        combined_duration = _get_audio_duration(combined_audio)
+        target = float(target_total_duration or 0.0)
+        if not target or abs(combined_duration - target) <= PROPERTY_TIMELINE_AUDIO_TOLERANCE_SECONDS or pass_index >= 1:
+            return generated, combined_audio, combined_duration, total_attempts
+
+        delta = target - combined_duration
+        adjustable = max(generated, key=lambda item: float(item.get("target_duration") or 0.0), default=None)
+        if not adjustable:
+            return generated, combined_audio, combined_duration, total_attempts
+        segment_index = max(0, int(adjustable.get("index") or len(working_segments)) - 1)
+        current_target = float(working_segments[segment_index].get("target_duration") or adjustable.get("target_duration") or 0.0)
+        working_segments[segment_index]["target_duration"] = round(max(1.0, current_target + delta), 3)
+        emit(
+            f"分段配音合计 {combined_duration:.1f}s，与视频 {target:.1f}s 相差 {abs(delta):.1f}s，正在自动调整最长场景段后重配...",
+            1,
+        )
+
+    return generated, combined_audio, _get_audio_duration(combined_audio), total_attempts
 
 
 def _mux_voice_and_subtitles(
@@ -565,13 +1074,14 @@ def _mux_voice_and_subtitles(
     output_path: Path,
     bgm_path: Path | None = None,
     bgm_volume: float = 0.10,
+    tolerance_seconds: float = PROPERTY_AUDIO_TOLERANCE_SECONDS,
 ) -> tuple[float, float]:
     audio_duration = _get_audio_duration(audio_path)
     video_duration = _ffprobe_duration(video_path)
     if audio_duration <= 0:
         raise RuntimeError("配音时长读取失败")
 
-    if abs(audio_duration - video_duration) > PROPERTY_AUDIO_TOLERANCE_SECONDS:
+    if abs(audio_duration - video_duration) > tolerance_seconds:
         raise RuntimeError(f"配音时长与视频时长不匹配：视频 {video_duration:.1f}s，配音 {audio_duration:.1f}s")
 
     subtitle_filter = _property_subtitle_filter(subtitle_path)
@@ -620,8 +1130,8 @@ def _mux_voice_and_subtitles(
         try:
             _run(cmd)
         except RuntimeError as exc:
-            if "No such filter: 'subtitles'" not in str(exc) and "Error initializing filters" not in str(exc):
-                raise
+            # Subtitle burn-in can fail on some ffmpeg/libass/font builds. Keep
+            # the deliverable video usable and still export the SRT alongside it.
             fallback_cmd = [
                 "ffmpeg",
                 "-y",
@@ -695,8 +1205,6 @@ def _mux_voice_and_subtitles(
     except RuntimeError as exc:
         # Some local ffmpeg builds omit libass/subtitles. Keep the workflow usable
         # and still export the SRT; production images normally support burn-in.
-        if "No such filter: 'subtitles'" not in str(exc) and "Error initializing filters" not in str(exc):
-            raise
         _run(base_cmd)
     return audio_duration, video_duration
 
@@ -713,6 +1221,7 @@ def build_property_video(
     generate_audio_fn: Callable[..., str],
     bgm_path: Path | None = None,
     bgm_volume: float = 0.10,
+    timeline_segments: list[dict] | None = None,
     log: Optional[Callable[[str, Optional[int]], None]] = None,
 ) -> dict:
     def emit(message: str, step: Optional[int] = None) -> None:
@@ -760,23 +1269,46 @@ def build_property_video(
     if video_duration <= 0:
         raise RuntimeError("合并后视频时长读取失败")
 
-    emit(f"正在生成房源解说配音，并校准到视频总时长 {video_duration:.1f}s...", 1)
     audio_path = audio_dir / "narration.mp3"
-    script_text, audio_duration, calibration_attempts = _generate_calibrated_narration(
-        script_text=script_text,
-        audio_path=audio_path,
-        target_duration=video_duration,
-        target_market=target_market,
-        voice_id=voice_id,
-        voice_preset=voice_preset,
-        speed=speed,
-        generate_audio_fn=generate_audio_fn,
-        emit=emit,
-    )
-
-    emit("正在生成字幕时间轴...", 2)
     subtitle_path = subtitle_dir / "property_narration.srt"
-    _write_property_subtitles(script_text, audio_duration, subtitle_path, audio_path=audio_path, target_market=target_market)
+    normalized_timeline = _normalize_timeline_segments(timeline_segments, video_duration, script_text)
+    timeline_result: list[dict] = []
+    if normalized_timeline:
+        emit(f"检测到一镜到底讲解单元，共 {len(normalized_timeline)} 段，正在生成完整连续口播...", 1)
+        script_text = "\n".join(str(segment.get("script") or "").strip() for segment in normalized_timeline if segment.get("script")).strip()
+        if not _has_natural_closing(script_text):
+            script_text = f"{script_text}\n{_closing_sentence_for_market(target_market)}".strip()
+        script_text, audio_duration, calibration_attempts = _generate_calibrated_narration(
+            script_text=script_text,
+            audio_path=audio_path,
+            target_duration=video_duration,
+            target_market=target_market,
+            voice_id=voice_id,
+            voice_preset=voice_preset,
+            speed=speed,
+            generate_audio_fn=generate_audio_fn,
+            emit=emit,
+            tolerance_seconds=PROPERTY_TIMELINE_AUDIO_TOLERANCE_SECONDS,
+            keep_closing=True,
+        )
+        timeline_result = normalized_timeline
+        emit("正在生成完整口播字幕时间轴...", 2)
+        _write_property_subtitles(script_text, audio_duration, subtitle_path, audio_path=audio_path, target_market=target_market)
+    else:
+        emit(f"正在生成房源解说配音，并校准到视频总时长 {video_duration:.1f}s...", 1)
+        script_text, audio_duration, calibration_attempts = _generate_calibrated_narration(
+            script_text=script_text,
+            audio_path=audio_path,
+            target_duration=video_duration,
+            target_market=target_market,
+            voice_id=voice_id,
+            voice_preset=voice_preset,
+            speed=speed,
+            generate_audio_fn=generate_audio_fn,
+            emit=emit,
+        )
+        emit("正在生成字幕时间轴...", 2)
+        _write_property_subtitles(script_text, audio_duration, subtitle_path, audio_path=audio_path, target_market=target_market)
 
     if bgm_path and bgm_path.exists():
         emit(f"正在合成配音、字幕、背景音乐和最终成片（BGM 音量 {int(max(0.0, min(float(bgm_volume or 0.10), 0.30)) * 100)}%）...", 4)
@@ -790,6 +1322,7 @@ def build_property_video(
         final_video_path,
         bgm_path=bgm_path,
         bgm_volume=bgm_volume,
+        tolerance_seconds=PROPERTY_TIMELINE_AUDIO_TOLERANCE_SECONDS if timeline_result else PROPERTY_AUDIO_TOLERANCE_SECONDS,
     )
 
     result = {
@@ -802,6 +1335,7 @@ def build_property_video(
         "source_video_duration": round(video_duration, 2),
         "audio_video_delta_seconds": round(audio_duration - video_duration, 2),
         "script_calibration_attempts": calibration_attempts,
+        "timeline_segments": timeline_result,
         "final_video_path": str(final_video_path),
         "subtitle_path": str(subtitle_path),
         "narration_audio_path": str(audio_path),
@@ -816,7 +1350,7 @@ def build_property_video(
             },
             "bgm_path": str(bgm_path) if bgm_path else "",
             "bgm_volume": max(0.0, min(float(bgm_volume or 0.10), 0.30)) if bgm_path else 0.0,
-            "property_video_mode": "real_shot_voiceover",
+            "property_video_mode": "one_take_narration_units" if timeline_result else "real_shot_voiceover",
         },
         "files": [],
     }

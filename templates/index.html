@@ -703,6 +703,36 @@
       margin-bottom: 14px;
     }
 
+    .timeline-script-card {
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.96);
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .timeline-script-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .timeline-script-card textarea {
+      min-height: 94px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      padding: 12px;
+      font: inherit;
+      line-height: 1.72;
+      resize: vertical;
+      background: rgba(248,250,252,0.9);
+    }
+
     .preset-card,
     .avatar-card {
       border-radius: 28px;
@@ -1823,6 +1853,7 @@
       workspaceMode: 'ai',
       propertyVideoTaskId: null,
       propertyVideoEventSource: null,
+      propertyVideoTimelineSegments: [],
     };
 
     function progressLabelsForLanguage(lang) {
@@ -3657,6 +3688,28 @@
       els.propertyVideoLogPanel.scrollTop = els.propertyVideoLogPanel.scrollHeight;
     }
 
+    function formatPropertyVideoTime(seconds) {
+      const total = Math.max(0, Number(seconds || 0));
+      const minutes = Math.floor(total / 60);
+      const rest = Math.floor(total % 60).toString().padStart(2, '0');
+      return `${minutes}:${rest}`;
+    }
+
+    function currentPropertyTimelineSegments() {
+      const cards = els.propertyVideoClipAnalysisList?.querySelectorAll('[data-property-timeline-index]') || [];
+      if (!cards.length) return [];
+      return Array.from(cards).map(card => {
+        const index = Number(card.dataset.propertyTimelineIndex || 0);
+        const source = state.propertyVideoTimelineSegments.find(item => Number(item.index || 0) === index) || {};
+        const textarea = card.querySelector('textarea');
+        return {
+          ...source,
+          index,
+          script: (textarea?.value || source.script || '').trim(),
+        };
+      }).filter(item => item.script);
+    }
+
     function renderPropertyVideoAnalysis(data) {
       if (!data) return;
       if (els.propertyVideoAnalysisPanel) els.propertyVideoAnalysisPanel.style.display = 'grid';
@@ -3683,17 +3736,48 @@
         `;
       }
       if (els.propertyVideoClipAnalysisList) {
-        const clips = Array.isArray(data.clips) ? data.clips : [];
-        els.propertyVideoClipAnalysisList.innerHTML = clips.length ? clips.map(clip => `
-          <div class="history-item">
-            <div class="history-main">
-              <div class="history-title">片段 ${escapeHtml(String(clip.clip_index || '-'))}｜${escapeHtml(clip.room_type || '空间识别')}</div>
-              <div class="history-topic">${escapeHtml(clip.visual_summary || '')}</div>
-              <div class="history-meta">${(clip.selling_points || []).map(item => `<span class="tag">${escapeHtml(item)}</span>`).join(' ')}</div>
-              ${clip.suggested_narration ? `<div class="social-card" style="margin-top:10px;">${escapeHtml(clip.suggested_narration)}</div>` : ''}
+        const timeline = Array.isArray(data.timeline_segments) ? data.timeline_segments : [];
+        state.propertyVideoTimelineSegments = timeline.map((item, index) => ({
+          ...item,
+          index: Number(item.index || index + 1),
+        }));
+        if (timeline.length) {
+          els.propertyVideoClipAnalysisList.innerHTML = `
+            <div class="empty-box" style="text-align:left;">
+              已启用一镜到底讲解单元模式：系统会先细看画面，再合并成 10-25 秒左右的自然讲解单元。销售可以逐段修改，生成时会合成一条完整连续口播，减少画面错位和文案断裂。
             </div>
-          </div>
-        `).join('') : `<div class="empty-box">没有返回分段分析。</div>`;
+            ${state.propertyVideoTimelineSegments.map((segment, index) => `
+              <div class="timeline-script-card" data-property-timeline-index="${escapeHtml(String(segment.index || index + 1))}">
+                <div class="timeline-script-head">
+                  <span>${escapeHtml(formatPropertyVideoTime(segment.start))} - ${escapeHtml(formatPropertyVideoTime(segment.end))}｜${escapeHtml(segment.room_type || '空间')}</span>
+                  <span>${escapeHtml(String(Number(segment.duration || ((segment.end || 0) - (segment.start || 0)) || 0).toFixed(1)))}s</span>
+                </div>
+                ${segment.visual_summary ? `<div class="history-topic">${escapeHtml(segment.visual_summary)}</div>` : ''}
+                ${Array.isArray(segment.evidence_timestamps) && segment.evidence_timestamps.length ? `<div class="history-meta">${segment.evidence_timestamps.map(value => `<span class="tag">参考 ${escapeHtml(formatPropertyVideoTime(value))}</span>`).join(' ')}</div>` : ''}
+                <textarea data-property-timeline-script>${escapeHtml(segment.script || '')}</textarea>
+              </div>
+            `).join('')}
+          `;
+          els.propertyVideoClipAnalysisList.querySelectorAll('[data-property-timeline-script]').forEach(textarea => {
+            textarea.addEventListener('input', () => {
+              const combined = currentPropertyTimelineSegments().map(item => item.script).join('\n');
+              if (els.propertyVideoScript) els.propertyVideoScript.value = combined;
+            });
+          });
+        } else {
+          const clips = Array.isArray(data.clips) ? data.clips : [];
+          state.propertyVideoTimelineSegments = [];
+          els.propertyVideoClipAnalysisList.innerHTML = clips.length ? clips.map(clip => `
+            <div class="history-item">
+              <div class="history-main">
+                <div class="history-title">片段 ${escapeHtml(String(clip.clip_index || '-'))}｜${escapeHtml(clip.room_type || '空间识别')}</div>
+                <div class="history-topic">${escapeHtml(clip.visual_summary || '')}</div>
+                <div class="history-meta">${(clip.selling_points || []).map(item => `<span class="tag">${escapeHtml(item)}</span>`).join(' ')}</div>
+                ${clip.suggested_narration ? `<div class="social-card" style="margin-top:10px;">${escapeHtml(clip.suggested_narration)}</div>` : ''}
+              </div>
+            </div>
+          `).join('') : `<div class="empty-box">没有返回分段分析。</div>`;
+        }
       }
       if (data.suggested_script && els.propertyVideoScript) {
         els.propertyVideoScript.value = data.suggested_script;
@@ -3786,6 +3870,10 @@
       formData.append('target_market', els.propertyVideoMarketSelect?.value || state.selectedTargetMarket || 'cn');
       formData.append('bgm_item_id', els.propertyVideoBgmSelect?.value || '');
       formData.append('bgm_volume', els.propertyVideoBgmVolumeRange?.value || '0.1');
+      const timelineSegments = currentPropertyTimelineSegments();
+      if (timelineSegments.length) {
+        formData.append('timeline_segments', JSON.stringify(timelineSegments));
+      }
       if (els.propertyVideoStartBtn) {
         els.propertyVideoStartBtn.disabled = true;
         els.propertyVideoStartBtn.textContent = '正在提交...';
@@ -3847,6 +3935,7 @@
       if (els.propertyVideoFiles) els.propertyVideoFiles.value = '';
       if (els.propertyVideoAnalyzeNotes) els.propertyVideoAnalyzeNotes.value = '';
       if (els.propertyVideoScript) els.propertyVideoScript.value = '';
+      state.propertyVideoTimelineSegments = [];
       if (els.propertyVideoAnalysisPanel) els.propertyVideoAnalysisPanel.style.display = 'none';
       if (els.propertyVideoAnalysisSummary) els.propertyVideoAnalysisSummary.innerHTML = '';
       if (els.propertyVideoClipAnalysisList) els.propertyVideoClipAnalysisList.innerHTML = '';

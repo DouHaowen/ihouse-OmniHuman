@@ -85,6 +85,28 @@
     .avatar-candidate-actions { display:flex; gap:8px; flex-wrap:wrap; }
     .btn-ghost { background:#f7faf9; color:var(--ink); }
     .btn:disabled { opacity:0.55; cursor:not-allowed; box-shadow:none; }
+    .floorplan-lab { display:grid; gap:16px; }
+    .floorplan-grid { display:grid; grid-template-columns:minmax(0,0.95fr) minmax(0,1.05fr); gap:16px; align-items:start; }
+    .floorplan-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .floorplan-stage { position:relative; border:1px solid var(--line); border-radius:22px; overflow:hidden; background:#f8fbfa; min-height:360px; display:grid; place-items:center; }
+    .floorplan-stage img { max-width:100%; width:100%; display:block; user-select:none; }
+    .floorplan-marker { position:absolute; width:22px; height:22px; border-radius:50%; background:#ff8a2a; border:3px solid #fff; box-shadow:0 10px 26px rgba(255,138,42,.38); transform:translate(-50%,-50%); display:grid; place-items:center; color:#fff; font-size:11px; font-weight:900; }
+    .floorplan-marker.active { background:#0d6b63; box-shadow:0 0 0 10px rgba(13,107,99,.16), 0 16px 30px rgba(13,107,99,.28); }
+    .floorplan-video { width:100%; border-radius:22px; background:#071014; max-height:520px; }
+    .floorplan-segments { display:grid; gap:8px; max-height:460px; overflow:auto; padding-right:4px; }
+    .floorplan-segment { border:1px solid var(--line); border-radius:16px; padding:12px; background:#fff; cursor:pointer; display:grid; gap:6px; }
+    .floorplan-segment.active { border-color:rgba(13,107,99,.55); background:rgba(13,107,99,.07); }
+    .floorplan-thumb-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(88px,1fr)); gap:8px; }
+    .floorplan-thumb { border:1px solid var(--line); border-radius:14px; overflow:hidden; background:#fff; cursor:pointer; opacity:.76; }
+    .floorplan-thumb.active { outline:3px solid rgba(13,107,99,.25); opacity:1; }
+    .floorplan-thumb img { width:100%; display:block; aspect-ratio:4/5; object-fit:cover; }
+    .opennews-lab { display:grid; gap:16px; }
+    .opennews-grid { display:grid; grid-template-columns:minmax(0,0.8fr) minmax(0,1.2fr); gap:16px; align-items:start; }
+    .opennews-source-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; }
+    .opennews-source { display:flex; gap:8px; align-items:flex-start; border:1px solid var(--line); border-radius:16px; padding:10px; background:#fff; font-weight:700; }
+    .opennews-result { border:1px solid var(--line); border-radius:18px; padding:14px; background:#fff; display:grid; gap:8px; }
+    .opennews-result.active { border-color:rgba(13,107,99,.55); background:rgba(13,107,99,.06); }
+    .opennews-draft { white-space:pre-wrap; border:1px solid var(--line); border-radius:18px; padding:14px; background:#f8fbfa; line-height:1.7; }
     .avatar-lab-card .btn-primary:disabled { background:#b9c6c3 !important; color:#ffffff !important; opacity:1; }
     .avatar-lab-card button:disabled { pointer-events:none; }
     .cost-bar { height:10px; background:#ecf5f3; border-radius:999px; overflow:hidden; margin-top:12px; }
@@ -92,7 +114,7 @@
     .stat-row { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
     .stat-percent { color:var(--muted); font-weight:700; white-space:nowrap; }
     .empty { border:1px dashed var(--line); border-radius:18px; padding:16px; color:var(--muted); text-align:center; }
-    @media (max-width: 1100px) { .kpis, .overview-grid, .finance-grid, .focus-metrics, .avatar-lab-grid, .avatar-candidate-grid { grid-template-columns:1fr; } }
+    @media (max-width: 1100px) { .kpis, .overview-grid, .finance-grid, .focus-metrics, .avatar-lab-grid, .avatar-candidate-grid, .floorplan-grid, .floorplan-form-grid, .opennews-grid { grid-template-columns:1fr; } }
     @media (max-width: 720px) { .page { padding:10px; } .topbar { flex-direction:column; align-items:stretch; } }
   </style>
 </head>
@@ -176,6 +198,87 @@
             </div>
           </section>
         </div>
+        <section class="card floorplan-lab" id="floorplanLabCard">
+          <div class="view-switch">
+            <div>
+              <div class="label">户型图联动测试</div>
+              <div class="helper" style="margin-top:0;">管理员先测试：上传销售实拍视频和户型图，AI 拆分空间时间段，再手动确认户型图点位，播放时实时高亮当前位置。</div>
+            </div>
+            <div class="chip">管理员内测</div>
+          </div>
+          <form id="floorplanNavForm" class="floorplan-lab">
+            <div class="floorplan-form-grid">
+              <div class="avatar-lab-field">
+                <label for="floorplanNavVideo">销售实拍视频</label>
+                <input id="floorplanNavVideo" type="file" accept=".mp4,.mov,.m4v,.webm,video/*" required />
+              </div>
+              <div class="avatar-lab-field">
+                <label for="floorplanNavPlans">户型图（可多张，如 1F / 2F）</label>
+                <input id="floorplanNavPlans" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" multiple required />
+              </div>
+            </div>
+            <div class="avatar-lab-field">
+              <label for="floorplanNavNotes">销售补充信息</label>
+              <textarea id="floorplanNavNotes" placeholder="例如：视频从玄关开始，先看 1F 的 LDK 和水回り，再上楼看卧室。户型图第一张是 1F，第二张是 2F。"></textarea>
+            </div>
+            <div class="avatar-lab-actions">
+              <button class="btn btn-primary" type="submit" id="floorplanNavSubmit">开始分析联动</button>
+              <button class="btn btn-ghost" type="button" id="floorplanNavSaveBtn" disabled>保存点位</button>
+              <div class="helper" id="floorplanNavHint" style="margin:0;">第一版不会生成最终成片，只做网页联动预览。</div>
+            </div>
+          </form>
+          <div class="avatar-lab-status" id="floorplanNavStatus">
+            <div class="empty">还没有开始户型图联动测试。</div>
+          </div>
+          <div class="floorplan-grid" id="floorplanNavWorkspace" style="display:none;">
+            <div class="floorplan-lab">
+              <video class="floorplan-video" id="floorplanNavPlayer" controls playsinline></video>
+              <div class="floorplan-segments" id="floorplanNavSegments"></div>
+            </div>
+            <div class="floorplan-lab">
+              <div class="floorplan-thumb-row" id="floorplanNavPlanTabs"></div>
+              <div class="floorplan-stage" id="floorplanNavStage">
+                <div class="empty">请选择户型图</div>
+              </div>
+              <div class="helper">操作方式：先点左侧某个时间段，再在户型图上点击该空间位置。播放视频时，标记会随时间切换。</div>
+            </div>
+          </div>
+        </section>
+        <section class="card opennews-lab" id="opennewsLabCard">
+          <div class="view-switch">
+            <div>
+              <div class="label">OpenNews 新闻视频测试</div>
+              <div class="helper" style="margin-top:0;">管理员内测：先抓取公开新闻候选，再生成中文新闻口播稿。第一版不自动发布、不直接进入正式生产。</div>
+            </div>
+            <div class="chip">管理员内测</div>
+          </div>
+          <div class="opennews-grid">
+            <div class="opennews-lab">
+              <div class="avatar-lab-field">
+                <label for="opennewsQuery">搜索关键词</label>
+                <input id="opennewsQuery" type="text" placeholder="例如：Taiwan Strait / DVIDS drone / Japan MOD" value="Taiwan Strait" />
+              </div>
+              <div class="avatar-lab-field">
+                <label>新闻源</label>
+                <div class="opennews-source-grid" id="opennewsSources"></div>
+              </div>
+              <div class="avatar-lab-field">
+                <label for="opennewsNotes">生成要求</label>
+                <textarea id="opennewsNotes" placeholder="例如：面向中文观众，保持中立新闻口吻，重点解释事件背景和影响。"></textarea>
+              </div>
+              <div class="avatar-lab-actions">
+                <button class="btn btn-primary" type="button" id="opennewsSearchBtn">搜索新闻候选</button>
+                <div class="helper" id="opennewsStatus" style="margin:0;">请选择来源并搜索。</div>
+              </div>
+              <div class="feed" id="opennewsResults"></div>
+            </div>
+            <div class="opennews-lab">
+              <div class="label">中文新闻稿草稿</div>
+              <div class="helper">点击候选新闻后生成。这里先用于审核新闻源、事实和口播质量。</div>
+              <div class="opennews-draft" id="opennewsDraft">还没有生成新闻稿。</div>
+            </div>
+          </div>
+        </section>
         <section class="card avatar-lab-card" id="avatarLabCard">
           <div class="view-switch">
             <div>
@@ -252,6 +355,25 @@
       avatarLabHint: document.getElementById('avatarLabHint'),
       avatarLabStatus: document.getElementById('avatarLabStatus'),
       avatarCandidateGrid: document.getElementById('avatarCandidateGrid'),
+      floorplanNavForm: document.getElementById('floorplanNavForm'),
+      floorplanNavVideo: document.getElementById('floorplanNavVideo'),
+      floorplanNavPlans: document.getElementById('floorplanNavPlans'),
+      floorplanNavNotes: document.getElementById('floorplanNavNotes'),
+      floorplanNavSubmit: document.getElementById('floorplanNavSubmit'),
+      floorplanNavSaveBtn: document.getElementById('floorplanNavSaveBtn'),
+      floorplanNavStatus: document.getElementById('floorplanNavStatus'),
+      floorplanNavWorkspace: document.getElementById('floorplanNavWorkspace'),
+      floorplanNavPlayer: document.getElementById('floorplanNavPlayer'),
+      floorplanNavSegments: document.getElementById('floorplanNavSegments'),
+      floorplanNavPlanTabs: document.getElementById('floorplanNavPlanTabs'),
+      floorplanNavStage: document.getElementById('floorplanNavStage'),
+      opennewsQuery: document.getElementById('opennewsQuery'),
+      opennewsSources: document.getElementById('opennewsSources'),
+      opennewsNotes: document.getElementById('opennewsNotes'),
+      opennewsSearchBtn: document.getElementById('opennewsSearchBtn'),
+      opennewsStatus: document.getElementById('opennewsStatus'),
+      opennewsResults: document.getElementById('opennewsResults'),
+      opennewsDraft: document.getElementById('opennewsDraft'),
       queueFeed: document.getElementById('queueFeed'),
       taskFeed: document.getElementById('taskFeed'),
       userFeed: document.getElementById('userFeed'),
@@ -265,6 +387,16 @@
     let liveTimer = null;
     let statsTimer = null;
     let avatarLabTimer = null;
+    let floorplanNavTimer = null;
+    let currentFloorplanJobId = '';
+    let floorplanNavJob = null;
+    let activeFloorplanIndex = 0;
+    let activeFloorplanSegmentIndex = 0;
+    let floorplanPoints = [];
+    let opennewsCandidates = [];
+    let selectedOpennewsArticleId = '';
+    let selectedOpennewsArticle = null;
+    let currentOpennewsDraft = null;
     let currentAvatarJobId = '';
     let activeCostRange = 'today';
     let activeView = 'overview';
@@ -284,9 +416,11 @@
       if (liveTimer) clearInterval(liveTimer);
       if (statsTimer) clearInterval(statsTimer);
       if (avatarLabTimer) clearInterval(avatarLabTimer);
+      if (floorplanNavTimer) clearInterval(floorplanNavTimer);
       liveTimer = null;
       statsTimer = null;
       avatarLabTimer = null;
+      floorplanNavTimer = null;
     }
 
     function formatTime(ts) {
@@ -547,6 +681,373 @@
       });
     }
 
+    function formatSeconds(value) {
+      const total = Math.max(0, Number(value || 0));
+      const minutes = Math.floor(total / 60);
+      const seconds = Math.floor(total % 60);
+      return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    function setOpennewsStatus(message, tone = 'normal') {
+      if (!els.opennewsStatus) return;
+      const color = tone === 'error' ? '#b54708' : tone === 'success' ? 'var(--brand)' : 'var(--muted)';
+      els.opennewsStatus.style.color = color;
+      els.opennewsStatus.textContent = message;
+    }
+
+    function selectedOpennewsSourceIds() {
+      return Array.from(els.opennewsSources?.querySelectorAll('input[type="checkbox"]:checked') || []).map(item => item.value);
+    }
+
+    function renderOpennewsSources(sources = []) {
+      if (!els.opennewsSources) return;
+      if (!sources.length) {
+        els.opennewsSources.innerHTML = '<div class="empty">暂未加载到新闻源。</div>';
+        return;
+      }
+      els.opennewsSources.innerHTML = sources.map(item => `
+        <label class="opennews-source">
+          <input type="checkbox" value="${escapeHtml(item.id || '')}" checked>
+          <span>
+            <strong>${escapeHtml(item.name || item.id || '新闻源')}</strong>
+            <span class="meta" style="display:block;">${escapeHtml(item.country || '')} · ${escapeHtml(item.content_type || '')}</span>
+            <span class="meta" style="display:block;">${escapeHtml(item.license || '未知授权')}</span>
+          </span>
+        </label>
+      `).join('');
+    }
+
+    function renderOpennewsResults(candidates = []) {
+      if (!els.opennewsResults) return;
+      opennewsCandidates = candidates;
+      if (!candidates.length) {
+        els.opennewsResults.innerHTML = '<div class="empty">没有找到候选新闻。可以换关键词，或减少来源筛选。</div>';
+        return;
+      }
+      els.opennewsResults.innerHTML = candidates.map(item => `
+        <article class="opennews-result${item.id === selectedOpennewsArticleId ? ' active' : ''}" data-opennews-id="${escapeHtml(item.id || '')}">
+          <div class="feed-top">
+            <div class="feed-name">${escapeHtml(item.title || '未命名新闻')}</div>
+            <div class="badge">${escapeHtml(item.source_name || item.source_id || '来源')}</div>
+          </div>
+          <div class="meta">${escapeHtml(item.summary || item.content_type || '点击生成中文新闻短视频稿。')}</div>
+          <div class="meta">授权：${escapeHtml(item.license || '未知')} · 时间：${escapeHtml(item.published_at || '未知')}</div>
+          <div class="avatar-candidate-actions">
+            <a class="btn" href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener">打开原文</a>
+            <button class="btn btn-primary opennews-draft-btn" type="button" data-opennews-id="${escapeHtml(item.id || '')}">生成新闻稿草稿</button>
+          </div>
+        </article>
+      `).join('');
+      els.opennewsResults.querySelectorAll('.opennews-draft-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const article = opennewsCandidates.find(item => item.id === btn.dataset.opennewsId);
+          if (!article) return;
+          selectedOpennewsArticleId = article.id || '';
+          selectedOpennewsArticle = article;
+          renderOpennewsResults(opennewsCandidates);
+          await generateOpennewsDraft(article);
+        });
+      });
+    }
+
+    function renderOpennewsDraft(draft) {
+      if (!els.opennewsDraft) return;
+      currentOpennewsDraft = draft || null;
+      if (!draft) {
+        els.opennewsDraft.textContent = '还没有生成新闻稿。';
+        return;
+      }
+      const keywords = Array.isArray(draft.material_keywords) ? draft.material_keywords.join('、') : '';
+      const notes = Array.isArray(draft.fact_check_notes) ? draft.fact_check_notes.map(item => `- ${item}`).join('\n') : (draft.fact_check_notes || '');
+      els.opennewsDraft.innerHTML = `
+        <strong>${escapeHtml(draft.video_title || '新闻视频标题')}</strong>
+
+        <b>摘要</b>
+        ${escapeHtml(draft.summary || '暂无摘要')}
+
+        <b>口播稿</b>
+        ${escapeHtml(draft.script || '暂无口播稿')}
+
+        <b>素材关键词</b>
+        ${escapeHtml(keywords || '暂无')}
+
+        <b>事实核验提醒</b>
+        ${escapeHtml(notes || '暂无')}
+
+        <b>来源标注</b>
+        ${escapeHtml(draft.source_credit || draft?._meta?.source_url || '暂无')}
+
+        <button class="btn btn-primary" type="button" id="opennewsProduceBtn" style="margin-top:12px;">生成新闻数字人视频</button>
+      `;
+      document.getElementById('opennewsProduceBtn')?.addEventListener('click', startOpennewsProduce);
+    }
+
+    async function loadOpennewsSources() {
+      if (!els.opennewsSources) return;
+      try {
+        setOpennewsStatus('正在加载新闻源...');
+        const res = await fetch('/api/admin/opennews/sources');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '新闻源加载失败');
+        renderOpennewsSources(Array.isArray(data.sources) ? data.sources : []);
+        setOpennewsStatus('请选择来源并搜索。', 'success');
+      } catch (error) {
+        renderOpennewsSources([]);
+        setOpennewsStatus(error.message || '新闻源加载失败', 'error');
+      }
+    }
+
+    async function searchOpennewsCandidates() {
+      const query = (els.opennewsQuery?.value || '').trim();
+      const sourceIds = selectedOpennewsSourceIds();
+      if (!query) {
+        setOpennewsStatus('请先输入搜索关键词。', 'error');
+        return;
+      }
+      if (!sourceIds.length) {
+        setOpennewsStatus('请至少选择一个新闻源。', 'error');
+        return;
+      }
+      if (els.opennewsSearchBtn) {
+        els.opennewsSearchBtn.disabled = true;
+        els.opennewsSearchBtn.textContent = '搜索中...';
+      }
+      selectedOpennewsArticleId = '';
+      selectedOpennewsArticle = null;
+      renderOpennewsDraft(null);
+      setOpennewsStatus('正在抓取新闻候选...');
+      try {
+        const res = await fetch('/api/admin/opennews/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, source_ids: sourceIds }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '新闻候选搜索失败');
+        renderOpennewsResults(Array.isArray(data.candidates) ? data.candidates : []);
+        setOpennewsStatus(`已找到 ${Number(data.count || 0)} 条候选。点击候选可生成中文新闻稿。`, 'success');
+      } catch (error) {
+        renderOpennewsResults([]);
+        setOpennewsStatus(error.message || '新闻候选搜索失败', 'error');
+      } finally {
+        if (els.opennewsSearchBtn) {
+          els.opennewsSearchBtn.disabled = false;
+          els.opennewsSearchBtn.textContent = '搜索新闻候选';
+        }
+      }
+    }
+
+    async function generateOpennewsDraft(article) {
+      setOpennewsStatus('正在读取原文并生成中文新闻稿...');
+      renderOpennewsDraft({ video_title: '生成中...', summary: '正在根据来源正文生成新闻稿，请稍等。' });
+      try {
+        const res = await fetch('/api/admin/opennews/draft', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            article,
+            target_market: 'cn',
+            notes: els.opennewsNotes?.value || '',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '新闻稿生成失败');
+        renderOpennewsDraft(data.draft);
+        setOpennewsStatus('新闻稿草稿已生成。确认内容后可以继续提交新闻数字人视频任务。', 'success');
+      } catch (error) {
+        renderOpennewsDraft(null);
+        setOpennewsStatus(error.message || '新闻稿生成失败', 'error');
+      }
+    }
+
+    async function startOpennewsProduce() {
+      if (!selectedOpennewsArticle || !currentOpennewsDraft) {
+        setOpennewsStatus('请先选择一条候选新闻并生成新闻稿草稿。', 'error');
+        return;
+      }
+      const btn = document.getElementById('opennewsProduceBtn');
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = '提交中...';
+      }
+      setOpennewsStatus('正在提交新闻数字人视频任务...');
+      try {
+        const res = await fetch('/api/admin/opennews/produce', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            article: selectedOpennewsArticle,
+            draft: currentOpennewsDraft,
+            target_market: 'cn',
+            voice_preset_id: 'mandarin_male',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '新闻数字人视频任务提交失败');
+        setOpennewsStatus(`新闻数字人视频任务已提交：${data.task_id}。可到“当前任务/历史记录”查看进度。`, 'success');
+        if (btn) {
+          btn.textContent = data.reused_existing ? '已有任务运行中' : '已提交视频任务';
+        }
+      } catch (error) {
+        setOpennewsStatus(error.message || '新闻数字人视频任务提交失败', 'error');
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '生成新闻数字人视频';
+        }
+      }
+    }
+
+    function setFloorplanNavStatus(message, tone = 'normal') {
+      if (!els.floorplanNavStatus) return;
+      const color = tone === 'error' ? '#b54708' : tone === 'success' ? 'var(--brand)' : 'var(--muted)';
+      els.floorplanNavStatus.innerHTML = `<div class="empty" style="border-style:solid; color:${color};">${escapeHtml(message)}</div>`;
+    }
+
+    function pointForSegment(segmentIndex) {
+      return floorplanPoints.find(item => Number(item.segment_index) === Number(segmentIndex));
+    }
+
+    function renderFloorplanMarkers() {
+      const stage = els.floorplanNavStage;
+      if (!stage || !floorplanNavJob) return;
+      stage.querySelectorAll('.floorplan-marker').forEach(node => node.remove());
+      floorplanPoints
+        .filter(point => Number(point.floorplan_index) === Number(activeFloorplanIndex))
+        .forEach(point => {
+          const marker = document.createElement('div');
+          marker.className = `floorplan-marker${Number(point.segment_index) === Number(activeFloorplanSegmentIndex) ? ' active' : ''}`;
+          marker.style.left = `${Number(point.x || 0) * 100}%`;
+          marker.style.top = `${Number(point.y || 0) * 100}%`;
+          marker.textContent = String(Number(point.segment_index || 0) + 1);
+          marker.title = point.room || '';
+          stage.appendChild(marker);
+        });
+    }
+
+    function renderFloorplanStage() {
+      const floorplans = floorplanNavJob?.floorplans || [];
+      const selected = floorplans[activeFloorplanIndex];
+      if (!selected) {
+        els.floorplanNavStage.innerHTML = '<div class="empty">没有可显示的户型图。</div>';
+        return;
+      }
+      els.floorplanNavStage.innerHTML = `<img id="floorplanNavImage" src="${escapeHtml(selected.url)}" alt="${escapeHtml(selected.name || '户型图')}">`;
+      renderFloorplanMarkers();
+    }
+
+    function renderFloorplanPlanTabs() {
+      const floorplans = floorplanNavJob?.floorplans || [];
+      els.floorplanNavPlanTabs.innerHTML = floorplans.map((item, index) => `
+        <button class="floorplan-thumb${index === activeFloorplanIndex ? ' active' : ''}" type="button" data-floorplan-index="${index}">
+          <img src="${escapeHtml(item.url)}" alt="${escapeHtml(item.name || `户型图 ${index + 1}`)}">
+          <div class="meta" style="padding:6px 8px;">${escapeHtml(item.name || `户型图 ${index + 1}`)}</div>
+        </button>
+      `).join('');
+      els.floorplanNavPlanTabs.querySelectorAll('[data-floorplan-index]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          activeFloorplanIndex = Number(btn.dataset.floorplanIndex || 0);
+          renderFloorplanPlanTabs();
+          renderFloorplanStage();
+        });
+      });
+    }
+
+    function renderFloorplanSegments() {
+      const segments = floorplanNavJob?.analysis?.segments || [];
+      els.floorplanNavSegments.innerHTML = segments.length ? segments.map((item, index) => {
+        const point = pointForSegment(index);
+        const pointLabel = point ? `已标注：户型图 ${Number(point.floorplan_index || 0) + 1} · ${(Number(point.x || 0) * 100).toFixed(1)}%, ${(Number(point.y || 0) * 100).toFixed(1)}%` : '未标注，点击本段后在户型图上打点';
+        return `
+          <div class="floorplan-segment${index === activeFloorplanSegmentIndex ? ' active' : ''}" data-segment-index="${index}">
+            <div class="feed-top">
+              <div class="feed-name">${escapeHtml(item.room || `空间 ${index + 1}`)}</div>
+              <div class="badge">${escapeHtml(formatSeconds(item.start))} - ${escapeHtml(formatSeconds(item.end))}</div>
+            </div>
+            <div class="meta">${escapeHtml(item.evidence || 'AI 根据关键帧推断，请管理员确认。')}</div>
+            <div class="meta">${escapeHtml(pointLabel)}</div>
+          </div>
+        `;
+      }).join('') : '<div class="empty">暂未生成空间时间段。</div>';
+      els.floorplanNavSegments.querySelectorAll('[data-segment-index]').forEach(card => {
+        card.addEventListener('click', () => {
+          activeFloorplanSegmentIndex = Number(card.dataset.segmentIndex || 0);
+          const point = pointForSegment(activeFloorplanSegmentIndex);
+          if (point) activeFloorplanIndex = Number(point.floorplan_index || 0);
+          const segment = segments[activeFloorplanSegmentIndex];
+          if (segment && els.floorplanNavPlayer) els.floorplanNavPlayer.currentTime = Number(segment.start || 0);
+          renderFloorplanPlanTabs();
+          renderFloorplanSegments();
+          renderFloorplanStage();
+        });
+      });
+    }
+
+    function renderFloorplanJob(job) {
+      floorplanNavJob = job;
+      if (!job) return;
+      if (job.status === 'pending' || job.status === 'running') {
+        setFloorplanNavStatus(job.message || '正在分析户型图联动任务...');
+        els.floorplanNavSubmit.disabled = true;
+        els.floorplanNavSubmit.textContent = '分析中...';
+        return;
+      }
+      els.floorplanNavSubmit.disabled = false;
+      els.floorplanNavSubmit.textContent = '开始分析联动';
+      if (job.status === 'error') {
+        setFloorplanNavStatus(job.error || job.message || '分析失败', 'error');
+        return;
+      }
+      floorplanPoints = Array.isArray(job.points) ? job.points : [];
+      setFloorplanNavStatus(job.message || '分析完成，请确认户型图点位', 'success');
+      els.floorplanNavWorkspace.style.display = 'grid';
+      els.floorplanNavSaveBtn.disabled = false;
+      if (job.video?.url && els.floorplanNavPlayer.src !== new URL(job.video.url, window.location.href).href) {
+        els.floorplanNavPlayer.src = job.video.url;
+      }
+      renderFloorplanPlanTabs();
+      renderFloorplanSegments();
+      renderFloorplanStage();
+    }
+
+    async function loadFloorplanJob(jobId) {
+      const res = await fetch(`/api/admin/floorplan-nav/jobs/${encodeURIComponent(jobId)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '户型图联动任务加载失败');
+      return data;
+    }
+
+    function startFloorplanPolling(jobId) {
+      currentFloorplanJobId = jobId;
+      if (floorplanNavTimer) clearInterval(floorplanNavTimer);
+      floorplanNavTimer = setInterval(async () => {
+        try {
+          const job = await loadFloorplanJob(jobId);
+          renderFloorplanJob(job);
+          if (job.status === 'done' || job.status === 'error') {
+            clearInterval(floorplanNavTimer);
+            floorplanNavTimer = null;
+          }
+        } catch (error) {
+          setFloorplanNavStatus(error.message || '户型图联动任务轮询失败', 'error');
+          clearInterval(floorplanNavTimer);
+          floorplanNavTimer = null;
+        }
+      }, 2500);
+    }
+
+    async function saveFloorplanPoints() {
+      if (!currentFloorplanJobId) return;
+      const res = await fetch(`/api/admin/floorplan-nav/jobs/${encodeURIComponent(currentFloorplanJobId)}/points`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ points: floorplanPoints }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '保存户型图点位失败');
+      renderFloorplanJob(data);
+      setFloorplanNavStatus('户型图点位已保存。播放视频即可查看实时联动。', 'success');
+    }
+
     async function ensureAdmin() {
       const res = await fetch('/api/me');
       if (res.status === 401) { window.location.replace('/?logged_out=' + Date.now()); return null; }
@@ -754,6 +1255,7 @@
       renderViewTabs();
       try { await loadLive(); } catch (_) {}
       try { await loadStats(); } catch (_) {}
+      try { await loadOpennewsSources(); } catch (_) {}
       try {
         const latestAvatarJob = await loadLatestAvatarJob();
         if (latestAvatarJob) {
@@ -835,6 +1337,93 @@
       accountStatsExpanded = false;
       renderCostRangeTabs();
       loadStats();
+    });
+    els.opennewsSearchBtn?.addEventListener('click', searchOpennewsCandidates);
+    els.opennewsQuery?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        searchOpennewsCandidates();
+      }
+    });
+    els.floorplanNavForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!els.floorplanNavVideo?.files?.length) {
+        setFloorplanNavStatus('请先上传销售实拍视频。', 'error');
+        return;
+      }
+      if (!els.floorplanNavPlans?.files?.length) {
+        setFloorplanNavStatus('请至少上传一张户型图。', 'error');
+        return;
+      }
+      const formData = new FormData();
+      formData.append('video', els.floorplanNavVideo.files[0]);
+      Array.from(els.floorplanNavPlans.files).forEach(file => formData.append('floorplans', file));
+      formData.append('notes', els.floorplanNavNotes?.value || '');
+      els.floorplanNavSubmit.disabled = true;
+      els.floorplanNavSubmit.textContent = '提交中...';
+      setFloorplanNavStatus('正在提交户型图联动分析任务...');
+      try {
+        const res = await fetch('/api/admin/floorplan-nav/jobs', { method: 'POST', body: formData });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '户型图联动任务提交失败');
+        currentFloorplanJobId = data.job_id || '';
+        activeFloorplanIndex = 0;
+        activeFloorplanSegmentIndex = 0;
+        floorplanPoints = [];
+        renderFloorplanJob(data);
+        startFloorplanPolling(currentFloorplanJobId);
+      } catch (error) {
+        setFloorplanNavStatus(error.message || '户型图联动任务提交失败', 'error');
+        els.floorplanNavSubmit.disabled = false;
+        els.floorplanNavSubmit.textContent = '开始分析联动';
+      }
+    });
+    els.floorplanNavStage?.addEventListener('click', (event) => {
+      const image = els.floorplanNavStage.querySelector('img');
+      if (!image || !floorplanNavJob) return;
+      const rect = image.getBoundingClientRect();
+      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) return;
+      const x = (event.clientX - rect.left) / rect.width;
+      const y = (event.clientY - rect.top) / rect.height;
+      const segments = floorplanNavJob?.analysis?.segments || [];
+      const segment = segments[activeFloorplanSegmentIndex] || {};
+      floorplanPoints = floorplanPoints.filter(item => Number(item.segment_index) !== Number(activeFloorplanSegmentIndex));
+      floorplanPoints.push({
+        segment_index: activeFloorplanSegmentIndex,
+        floorplan_index: activeFloorplanIndex,
+        x,
+        y,
+        room: segment.room || '',
+      });
+      renderFloorplanSegments();
+      renderFloorplanStage();
+      setFloorplanNavStatus('点位已临时标注，记得点击“保存点位”。', 'success');
+    });
+    els.floorplanNavSaveBtn?.addEventListener('click', async () => {
+      try {
+        els.floorplanNavSaveBtn.disabled = true;
+        els.floorplanNavSaveBtn.textContent = '保存中...';
+        await saveFloorplanPoints();
+      } catch (error) {
+        setFloorplanNavStatus(error.message || '保存点位失败', 'error');
+      } finally {
+        els.floorplanNavSaveBtn.disabled = false;
+        els.floorplanNavSaveBtn.textContent = '保存点位';
+      }
+    });
+    els.floorplanNavPlayer?.addEventListener('timeupdate', () => {
+      const segments = floorplanNavJob?.analysis?.segments || [];
+      if (!segments.length) return;
+      const current = Number(els.floorplanNavPlayer.currentTime || 0);
+      const nextIndex = segments.findIndex(item => current >= Number(item.start || 0) && current < Number(item.end || 0));
+      if (nextIndex >= 0 && nextIndex !== activeFloorplanSegmentIndex) {
+        activeFloorplanSegmentIndex = nextIndex;
+        const point = pointForSegment(nextIndex);
+        if (point) activeFloorplanIndex = Number(point.floorplan_index || 0);
+        renderFloorplanPlanTabs();
+        renderFloorplanSegments();
+        renderFloorplanStage();
+      }
     });
     init();
   </script>

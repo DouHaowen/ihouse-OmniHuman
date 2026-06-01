@@ -56,6 +56,21 @@ from material_library import (
 )
 from property_video_workflow import PROPERTY_VIDEO_EXTENSIONS, build_property_video
 from property_video_vision import analyze_property_video_with_openai
+from floorplan_nav import (
+    IMAGE_SUFFIXES as FLOORPLAN_NAV_IMAGE_SUFFIXES,
+    VIDEO_SUFFIXES as FLOORPLAN_NAV_VIDEO_SUFFIXES,
+    create_floorplan_nav_job,
+    load_floorplan_nav_job,
+    run_floorplan_nav_job_async,
+    save_floorplan_nav_job,
+)
+from opennews_admin import (
+    build_opennews_script_data,
+    generate_opennews_draft,
+    save_opennews_payload,
+    search_opennews_candidates,
+    source_payloads as opennews_source_payloads,
+)
 from source_ingest import analyze_topic_fields, analyze_topic_input
 
 app = FastAPI(title="iHouse 内容工作台")
@@ -152,6 +167,9 @@ AVATAR_RULES = {
 }
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
+FLOORPLAN_NAV_JOBS_DIR = OUTPUT_DIR / "admin_floorplan_nav_jobs"
+OPENNEWS_ADMIN_DIR = OUTPUT_DIR / "admin_opennews"
+FLOORPLAN_NAV_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 VOICE_PRESETS = [
     {
@@ -1403,7 +1421,17 @@ def run_pipeline_with_progress(
         traceback.print_exc()
 
 
-def run_property_video_with_progress(task_id: str, uploaded_video_paths: list[str], script_text: str, voice_preset: dict, target_market: str, speed: float, bgm_item_id: str = "", bgm_volume: float = 0.10):
+def run_property_video_with_progress(
+    task_id: str,
+    uploaded_video_paths: list[str],
+    script_text: str,
+    voice_preset: dict,
+    target_market: str,
+    speed: float,
+    bgm_item_id: str = "",
+    bgm_volume: float = 0.10,
+    timeline_segments: Optional[list[dict]] = None,
+):
     tracker = tasks[task_id]["tracker"]
     tracker.total_steps = 4
     task = tasks[task_id]
@@ -1422,6 +1450,7 @@ def run_property_video_with_progress(task_id: str, uploaded_video_paths: list[st
             target_market=target_market,
             bgm_path=bgm_path,
             bgm_volume=bgm_volume,
+            timeline_segments=timeline_segments,
             generate_audio_fn=generate_audio,
             log=lambda message, step=None: tracker.log(message, step=step),
         )
@@ -3341,6 +3370,314 @@ async def admin_live_status(request: Request):
     return _build_admin_live_status()
 
 
+@app.get("/api/admin/opennews/sources")
+async def admin_opennews_sources(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    return {"sources": opennews_source_payloads()}
+
+
+@app.post("/api/admin/opennews/search")
+async def admin_opennews_search(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    query = str(payload.get("query") or "").strip()
+    source_ids = payload.get("source_ids") or []
+    if isinstance(source_ids, str):
+        source_ids = [part.strip() for part in source_ids.split(",") if part.strip()]
+    candidates = search_opennews_candidates(query, source_ids=source_ids)
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "search", {"query": query, "source_ids": source_ids, "candidates": candidates, "user": user.get("username")})
+    return {"candidates": candidates, "count": len(candidates)}
+
+
+@app.post("/api/admin/opennews/draft")
+async def admin_opennews_draft(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    article = payload.get("article") or {}
+    if not article.get("url"):
+        return JSONResponse({"error": "缺少新闻链接"}, status_code=400)
+    try:
+        draft = generate_opennews_draft(
+            article=article,
+            target_market=str(payload.get("target_market") or "cn"),
+            notes=str(payload.get("notes") or ""),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "draft", {"article": article, "draft": draft, "user": user.get("username")})
+    return {"draft": draft}
+
+
+def _pick_compatible_avatar_for_opennews(target_market: str, voice_preset: dict, requested_avatar_id: str = "") -> Optional[dict]:
+    if requested_avatar_id:
+        avatar = _get_avatar_option(requested_avatar_id, target_market_id=target_market)
+        if avatar and _is_avatar_voice_compatible(avatar, voice_preset):
+            return avatar
+    for avatar in _list_avatar_options(target_market_id=target_market):
+        enriched = _get_avatar_option(avatar.get("id"), target_market_id=target_market)
+        if enriched and _is_avatar_voice_compatible(enriched, voice_preset):
+            return enriched
+    return _get_avatar_option(None, target_market_id=target_market)
+
+
+@app.post("/api/admin/opennews/produce")
+async def admin_opennews_produce(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    article = payload.get("article") or {}
+    draft = payload.get("draft") or {}
+    target_market = str(payload.get("target_market") or "cn").strip() or "cn"
+    if target_market not in {item["id"] for item in TARGET_MARKETS}:
+        target_market = "cn"
+    department_id = str(payload.get("department_id") or "real_estate").strip() or "real_estate"
+    voice_preset_id = str(payload.get("voice_preset_id") or "mandarin_male").strip() or "mandarin_male"
+    if voice_preset_id not in _get_visible_voice_preset_ids(target_market):
+        voice_preset_id = _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female"
+    voice_preset = _get_voice_preset(voice_preset_id, target_market)
+    voice_preset["selected_speed"] = float(payload.get("speed") or voice_preset.get("default_speed") or 1.1)
+    avatar_option = _pick_compatible_avatar_for_opennews(target_market, voice_preset, str(payload.get("avatar_id") or ""))
+    if not avatar_option or not _is_avatar_voice_compatible(avatar_option, voice_preset):
+        return JSONResponse({"error": "没有找到与新闻音色兼容的数字人主播"}, status_code=400)
+
+    try:
+        script_data = build_opennews_script_data(draft=draft, article=article, target_market=target_market)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    topic = f"OpenNews：{script_data.get('title') or article.get('title') or '新闻视频'}"
+    selected_digital_human_engine = _normalize_digital_human_engine(str(payload.get("digital_human_engine") or INFINITETALK_ENGINE_ID), user)
+    submission_key = _make_produce_submission_key(
+        owner_username=user.get("username", ""),
+        topic=topic,
+        script_data=script_data,
+        voice_preset_id=voice_preset.get("id", voice_preset_id),
+        avatar_id=avatar_option.get("id", ""),
+        speed=float(voice_preset.get("selected_speed") or 1.1),
+        web_search_enabled=False,
+        target_market=target_market,
+        department_id=department_id,
+        script_model=SCRIPT_MODEL_CHATGPT,
+        digital_human_engine=selected_digital_human_engine,
+    )
+    reusable_task = _find_reusable_running_task(owner_username=user.get("username", ""), submission_key=submission_key)
+    if reusable_task:
+        return {"task_id": reusable_task.get("id", ""), "reused_existing": True, "message": "OpenNews 新闻视频任务已在后台执行"}
+
+    task_id = str(uuid.uuid4())[:8]
+    tracker = ProgressTracker(task_id)
+    tasks[task_id] = {
+        "owner_username": user.get("username"),
+        "owner_display_name": user.get("display_name"),
+        "owner_role": user.get("role"),
+        "id": task_id,
+        "topic": topic,
+        "image_path": avatar_option.get("image_path", ""),
+        "tracker": tracker,
+        "output_dir": None,
+        "result": None,
+        "public_base_url": _get_public_base_url(request),
+        "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "submission_key": submission_key,
+        "workflow_config": {
+            "voice_preset_id": voice_preset.get("id", voice_preset_id),
+            "avatar_id": avatar_option.get("id", ""),
+            "speed": voice_preset.get("selected_speed", 1.1),
+            "web_search_enabled": False,
+            "target_market": target_market,
+            "department_id": department_id,
+            "compose_transition_id": "fade",
+            "subtitle_template_id": "classic",
+            "source": {"kind": "opennews", "article": article},
+            "script_model": SCRIPT_MODEL_CHATGPT,
+            "digital_human_engine": selected_digital_human_engine,
+            "opennews": True,
+        },
+        "cost_entries": [],
+        "cost_summary": _empty_cost_summary(),
+    }
+    tracker.log("OpenNews 新闻视频任务已创建，准备进入数字人生产链路...")
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "produce", {"article": article, "draft": draft, "script": script_data, "task_id": task_id, "user": user.get("username")})
+    thread = threading.Thread(
+        target=run_pipeline_with_progress,
+        args=(task_id, topic, avatar_option.get("image_path", ""), tasks[task_id]["public_base_url"], script_data, voice_preset, avatar_option),
+        daemon=True,
+    )
+    thread.start()
+    return {"task_id": task_id, "reused_existing": False, "script": script_data}
+
+
+def _floorplan_nav_job_payload(job: dict) -> dict:
+    payload = dict(job or {})
+    job_id = str(payload.get("job_id") or "")
+    video = dict(payload.get("video") or {})
+    if video.get("path"):
+        video["url"] = f"/api/admin/floorplan-nav/jobs/{quote(job_id)}/file/video"
+    floorplans = []
+    for item in payload.get("floorplans") or []:
+        floorplan = dict(item or {})
+        floorplan["url"] = f"/api/admin/floorplan-nav/jobs/{quote(job_id)}/file/floorplan/{int(floorplan.get('index') or 0)}"
+        floorplan.pop("path", None)
+        floorplans.append(floorplan)
+    payload["video"] = video
+    payload["floorplans"] = floorplans
+    analysis = dict(payload.get("analysis") or {})
+    frames = []
+    for item in analysis.get("frames") or []:
+        frame = dict(item or {})
+        frame["url"] = f"/api/admin/floorplan-nav/jobs/{quote(job_id)}/file/frame/{int(frame.get('index') or 0)}"
+        frame.pop("path", None)
+        frames.append(frame)
+    analysis["frames"] = frames
+    payload["analysis"] = analysis
+    return payload
+
+
+@app.post("/api/admin/floorplan-nav/jobs")
+async def admin_floorplan_nav_create(
+    request: Request,
+    video: UploadFile = File(...),
+    floorplans: list[UploadFile] = File(...),
+    notes: str = Form(""),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    video_suffix = Path(video.filename or "").suffix.lower()
+    if video_suffix not in FLOORPLAN_NAV_VIDEO_SUFFIXES:
+        return JSONResponse({"error": "请上传 mp4、mov、m4v 或 webm 视频"}, status_code=400)
+    if not floorplans:
+        return JSONResponse({"error": "请至少上传一张户型图"}, status_code=400)
+    for item in floorplans:
+        if Path(item.filename or "").suffix.lower() not in FLOORPLAN_NAV_IMAGE_SUFFIXES:
+            return JSONResponse({"error": "户型图仅支持 jpg、jpeg、png、webp"}, status_code=400)
+    job = create_floorplan_nav_job(
+        jobs_root=FLOORPLAN_NAV_JOBS_DIR,
+        video_file=video,
+        floorplan_files=floorplans,
+        notes=notes,
+        owner=user,
+    )
+    run_floorplan_nav_job_async(FLOORPLAN_NAV_JOBS_DIR, str(job["job_id"]))
+    return _floorplan_nav_job_payload(job)
+
+
+@app.get("/api/admin/floorplan-nav/jobs/{job_id}")
+async def admin_floorplan_nav_status(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    job = load_floorplan_nav_job(FLOORPLAN_NAV_JOBS_DIR, job_id)
+    if not job:
+        return JSONResponse({"error": "户型图联动任务不存在"}, status_code=404)
+    return _floorplan_nav_job_payload(job)
+
+
+@app.post("/api/admin/floorplan-nav/jobs/{job_id}/points")
+async def admin_floorplan_nav_save_points(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    job = load_floorplan_nav_job(FLOORPLAN_NAV_JOBS_DIR, job_id)
+    if not job:
+        return JSONResponse({"error": "户型图联动任务不存在"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    points = body.get("points")
+    if not isinstance(points, list):
+        return JSONResponse({"error": "点位数据格式错误"}, status_code=400)
+    normalized = []
+    for item in points:
+        if not isinstance(item, dict):
+            continue
+        normalized.append({
+            "segment_index": int(item.get("segment_index") or 0),
+            "floorplan_index": int(item.get("floorplan_index") or 0),
+            "x": max(0.0, min(1.0, float(item.get("x") or 0))),
+            "y": max(0.0, min(1.0, float(item.get("y") or 0))),
+            "room": str(item.get("room") or ""),
+        })
+    job["points"] = normalized
+    job["message"] = "户型图点位已保存"
+    save_floorplan_nav_job(FLOORPLAN_NAV_JOBS_DIR, job)
+    return _floorplan_nav_job_payload(job)
+
+
+@app.get("/api/admin/floorplan-nav/jobs/{job_id}/file/{kind}/{index}")
+async def admin_floorplan_nav_file_indexed(job_id: str, kind: str, index: int, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    job = load_floorplan_nav_job(FLOORPLAN_NAV_JOBS_DIR, job_id)
+    if not job:
+        return JSONResponse({"error": "户型图联动任务不存在"}, status_code=404)
+    path = None
+    if kind == "floorplan":
+        items = job.get("floorplans") or []
+        if 0 <= index < len(items):
+            path = Path(str(items[index].get("path") or ""))
+    elif kind == "frame":
+        items = (job.get("analysis") or {}).get("frames") or []
+        if 0 <= index < len(items):
+            path = Path(str(items[index].get("path") or ""))
+    if not path or not path.exists():
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    return FileResponse(str(path))
+
+
+@app.get("/api/admin/floorplan-nav/jobs/{job_id}/file/video")
+async def admin_floorplan_nav_video(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    job = load_floorplan_nav_job(FLOORPLAN_NAV_JOBS_DIR, job_id)
+    if not job:
+        return JSONResponse({"error": "户型图联动任务不存在"}, status_code=404)
+    path = Path(str((job.get("video") or {}).get("path") or ""))
+    if not path.exists():
+        return JSONResponse({"error": "视频不存在"}, status_code=404)
+    return FileResponse(str(path), media_type="video/mp4")
+
+
 def _admin_avatar_job_snapshot(job: dict) -> dict:
     return {
         "job_id": job.get("job_id", ""),
@@ -4314,6 +4651,7 @@ async def start_property_video_job(
     target_market: str = Form("cn"),
     bgm_item_id: str = Form(""),
     bgm_volume: float = Form(0.10),
+    timeline_segments: str = Form(""),
 ):
     user, error = _require_user(request)
     if error:
@@ -4332,6 +4670,14 @@ async def start_property_video_job(
     if bgm_item_id and not _get_approved_bgm_path(bgm_item_id):
         return JSONResponse({"error": "选择的背景音乐不存在或还未审核通过"}, status_code=400)
     bgm_volume = max(0.0, min(float(bgm_volume or 0.10), 0.30))
+    parsed_timeline_segments: list[dict] = []
+    if str(timeline_segments or "").strip():
+        try:
+            parsed = json.loads(timeline_segments)
+            if isinstance(parsed, list):
+                parsed_timeline_segments = [item for item in parsed if isinstance(item, dict)]
+        except Exception:
+            return JSONResponse({"error": "一镜到底分段文案格式错误，请重新分析视频后再试"}, status_code=400)
 
     task_id = str(uuid.uuid4())[:8]
     output_dir = Path(_create_output_dir("property_video", "房源实拍成片"))
@@ -4377,7 +4723,8 @@ async def start_property_video_job(
             "voice_preset": voice_preset,
             "bgm_item_id": bgm_item_id,
             "bgm_volume": bgm_volume,
-            "property_video_mode": "real_shot_voiceover",
+            "property_video_mode": "one_take_timeline" if parsed_timeline_segments else "real_shot_voiceover",
+            "timeline_segments": parsed_timeline_segments,
         },
         "cost_entries": [],
         "cost_summary": _empty_cost_summary(),
@@ -4386,7 +4733,7 @@ async def start_property_video_job(
     _push_live_event("task_created", "创建了房源实拍成片任务", tasks[task_id])
     thread = threading.Thread(
         target=run_property_video_with_progress,
-        args=(task_id, saved_paths, script_text, voice_preset, target_market, speed, bgm_item_id, bgm_volume),
+        args=(task_id, saved_paths, script_text, voice_preset, target_market, speed, bgm_item_id, bgm_volume, parsed_timeline_segments),
         daemon=True,
     )
     thread.start()
@@ -4454,6 +4801,7 @@ async def analyze_property_video(
         "target_script_chars": analysis.get("target_script_chars", ""),
         "estimated_narration_seconds": analysis.get("estimated_narration_seconds", 0),
         "clip_durations": analysis.get("clip_durations", []),
+        "timeline_segments": analysis.get("timeline_segments", []),
         "clips": analysis.get("clips", []),
         "warnings": analysis.get("warnings", []),
         "model": analysis.get("model", ""),
