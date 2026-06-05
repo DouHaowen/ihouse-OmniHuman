@@ -66,10 +66,25 @@ from floorplan_nav import (
 )
 from opennews_admin import (
     build_opennews_script_data,
+    category_payloads as opennews_category_payloads,
     generate_opennews_draft,
     save_opennews_payload,
     search_opennews_candidates,
+    search_opennews_candidates_with_stats,
     source_payloads as opennews_source_payloads,
+)
+from opennews_trends import (
+    search_english_trends,
+    trend_category_payloads as opennews_trend_category_payloads,
+    trend_time_range_payloads as opennews_trend_time_range_payloads,
+)
+from opennews_scheduler import (
+    list_auto_candidates as list_opennews_auto_candidates,
+    load_auto_config as load_opennews_auto_config,
+    run_auto_fetch_once,
+    save_auto_config as save_opennews_auto_config,
+    start_opennews_auto_scheduler,
+    update_auto_candidate_status,
 )
 from source_ingest import analyze_topic_fields, analyze_topic_input
 
@@ -85,6 +100,11 @@ app.add_middleware(
     same_site=SESSION_SAME_SITE,
     https_only=SESSION_HTTPS_ONLY,
 )
+
+
+@app.on_event("startup")
+async def start_background_workers():
+    start_opennews_auto_scheduler(OPENNEWS_AUTO_DIR)
 
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -169,7 +189,9 @@ OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 FLOORPLAN_NAV_JOBS_DIR = OUTPUT_DIR / "admin_floorplan_nav_jobs"
 OPENNEWS_ADMIN_DIR = OUTPUT_DIR / "admin_opennews"
+OPENNEWS_AUTO_DIR = OUTPUT_DIR / "opennews_auto"
 FLOORPLAN_NAV_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+OPENNEWS_AUTO_DIR.mkdir(parents=True, exist_ok=True)
 
 VOICE_PRESETS = [
     {
@@ -859,6 +881,8 @@ def _is_avatar_voice_compatible(avatar_option: Optional[dict], voice_preset: Opt
 
 def _normalize_digital_human_engine(engine_id: str | None, user: Optional[dict] = None) -> str:
     requested = (engine_id or VOLC_ENGINE_ID).strip()
+    if requested == "opennews_material_only":
+        return "opennews_material_only"
     if not _is_admin(user):
         return INFINITETALK_ENGINE_ID
     if requested == HUNYUAN_ENGINE_ID and _is_admin(user):
@@ -869,6 +893,8 @@ def _normalize_digital_human_engine(engine_id: str | None, user: Optional[dict] 
 
 
 def _digital_human_engine_label(engine_id: str | None) -> str:
+    if (engine_id or "").strip() == "opennews_material_only":
+        return "无数字人（素材成片）"
     admin_user = {"role": "admin"} if engine_id in {HUNYUAN_ENGINE_ID, INFINITETALK_ENGINE_ID} else None
     normalized = _normalize_digital_human_engine(engine_id, admin_user)
     for item in DIGITAL_HUMAN_ENGINES:
@@ -1312,13 +1338,15 @@ def run_pipeline_with_progress(
         }
         _persist_production_checkpoint(task, checkpoint_result, stage="digital_human")
 
-        tracker.log("正在生成数字人视频...", step=3)
-        if not image_url:
+        dh_segments = [seg for seg in audio_segments if seg.get("type") == "digital_human"]
+        tracker.log("正在生成数字人视频..." if dh_segments else "当前脚本无数字人段，跳过数字人生成", step=3)
+        if not dh_segments:
+            segments_with_dh = audio_segments
+        elif not image_url:
             tracker.log("未选择数字人主播图，跳过数字人视频生成")
             segments_with_dh = audio_segments
         else:
             segments_with_dh = []
-            dh_segments = [seg for seg in audio_segments if seg.get("type") == "digital_human"]
             completed = 0
             for index, seg in enumerate(audio_segments):
                 _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续生成后续数字人片段")
@@ -3377,7 +3405,20 @@ async def admin_opennews_sources(request: Request):
         return error
     if not _is_admin(user):
         return _forbidden_error()
-    return {"sources": opennews_source_payloads()}
+    return {"sources": opennews_source_payloads(), "categories": opennews_category_payloads()}
+
+
+@app.get("/api/opennews/sources")
+async def opennews_sources(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    return {
+        "sources": opennews_source_payloads(),
+        "categories": opennews_category_payloads(),
+        "trend_categories": opennews_trend_category_payloads(),
+        "trend_time_ranges": opennews_trend_time_range_payloads(),
+    }
 
 
 @app.post("/api/admin/opennews/search")
@@ -3393,11 +3434,156 @@ async def admin_opennews_search(request: Request):
         payload = {}
     query = str(payload.get("query") or "").strip()
     source_ids = payload.get("source_ids") or []
+    category = str(payload.get("category") or "all").strip() or "all"
     if isinstance(source_ids, str):
         source_ids = [part.strip() for part in source_ids.split(",") if part.strip()]
-    candidates = search_opennews_candidates(query, source_ids=source_ids)
-    save_opennews_payload(OPENNEWS_ADMIN_DIR, "search", {"query": query, "source_ids": source_ids, "candidates": candidates, "user": user.get("username")})
+    search_result = search_opennews_candidates_with_stats(query, source_ids=source_ids, category=category)
+    candidates = search_result.get("candidates", [])
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "search", {"query": query, "source_ids": source_ids, "category": category, "candidates": candidates, "stats": search_result.get("stats", []), "recent_window": search_result.get("recent_window", ""), "user": user.get("username")})
+    return {"candidates": candidates, "count": len(candidates), "stats": search_result.get("stats", []), "raw_count": search_result.get("raw_count", 0), "deduped_count": search_result.get("deduped_count", 0), "recent_count": search_result.get("recent_count", 0), "recent_window": search_result.get("recent_window", ""), "missing_timestamp_checked": search_result.get("missing_timestamp_checked", 0)}
+
+
+@app.post("/api/opennews/search")
+async def opennews_search(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    query = str(payload.get("query") or "").strip()
+    source_ids = payload.get("source_ids") or []
+    category = str(payload.get("category") or "all").strip() or "all"
+    if isinstance(source_ids, str):
+        source_ids = [part.strip() for part in source_ids.split(",") if part.strip()]
+    search_result = search_opennews_candidates_with_stats(query, source_ids=source_ids, category=category)
+    candidates = search_result.get("candidates", [])
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "search", {"query": query, "source_ids": source_ids, "category": category, "candidates": candidates, "stats": search_result.get("stats", []), "recent_window": search_result.get("recent_window", ""), "user": user.get("username")})
+    return {"candidates": candidates, "count": len(candidates), "stats": search_result.get("stats", []), "raw_count": search_result.get("raw_count", 0), "deduped_count": search_result.get("deduped_count", 0), "recent_count": search_result.get("recent_count", 0), "recent_window": search_result.get("recent_window", ""), "missing_timestamp_checked": search_result.get("missing_timestamp_checked", 0)}
+
+
+@app.post("/api/opennews/trends/search")
+async def opennews_trends_search(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    category = str(payload.get("category") or "all").strip() or "all"
+    time_range = str(payload.get("time_range") or "6h").strip() or "6h"
+    keyword = str(payload.get("query") or payload.get("keyword") or "").strip()
+    try:
+        search_result = search_english_trends(category=category, time_range=time_range, keyword=keyword)
+    except Exception as exc:
+        return JSONResponse({"error": f"英文热点抓取失败：{exc}"}, status_code=500)
+    candidates = search_result.get("candidates", [])
+    save_opennews_payload(
+        OPENNEWS_ADMIN_DIR,
+        "trends",
+        {
+            "query": keyword,
+            "category": category,
+            "time_range": time_range,
+            "candidates": candidates,
+            "stats": search_result.get("stats", []),
+            "recent_window": search_result.get("recent_window", ""),
+            "user": user.get("username"),
+        },
+    )
+    return {
+        "candidates": candidates,
+        "count": len(candidates),
+        "stats": search_result.get("stats", []),
+        "raw_count": search_result.get("raw_count", 0),
+        "deduped_count": search_result.get("deduped_count", 0),
+        "recent_count": search_result.get("recent_count", 0),
+        "recent_window": search_result.get("recent_window", ""),
+        "time_range": search_result.get("time_range", ""),
+        "source_errors": search_result.get("source_errors", []),
+    }
+
+
+@app.get("/api/opennews/auto/config")
+async def opennews_auto_config(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    config = load_opennews_auto_config(OPENNEWS_AUTO_DIR)
+    return {"config": config, "is_admin": _is_admin(user)}
+
+
+@app.post("/api/opennews/auto/config")
+async def opennews_auto_config_update(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    config = save_opennews_auto_config(
+        OPENNEWS_AUTO_DIR,
+        {
+            "enabled": bool(payload.get("enabled")),
+            "interval_minutes": payload.get("interval_minutes"),
+            "categories": payload.get("categories") or [],
+            "time_range": payload.get("time_range") or "6h",
+            "limit": payload.get("limit") or 20,
+        },
+    )
+    return {"config": config}
+
+
+@app.post("/api/opennews/auto/run-now")
+async def opennews_auto_run_now(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    result = run_auto_fetch_once(OPENNEWS_AUTO_DIR, triggered_by=user.get("username") or "manual")
+    status_code = 202 if result.get("running") else 200
+    return JSONResponse(result, status_code=status_code)
+
+
+@app.get("/api/opennews/auto/candidates")
+async def opennews_auto_candidates(request: Request, status: str = "pending"):
+    user, error = _require_user(request)
+    if error:
+        return error
+    candidates = list_opennews_auto_candidates(OPENNEWS_AUTO_DIR, status=status or "pending", limit=160)
     return {"candidates": candidates, "count": len(candidates)}
+
+
+@app.post("/api/opennews/auto/candidates/{candidate_id}/status")
+async def opennews_auto_candidate_status(candidate_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    status = str(payload.get("status") or "").strip()
+    try:
+        candidate = update_auto_candidate_status(
+            OPENNEWS_AUTO_DIR,
+            candidate_id,
+            status,
+            username=user.get("username") or "",
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not candidate:
+        return JSONResponse({"error": "自动候选不存在"}, status_code=404)
+    return {"candidate": candidate}
 
 
 @app.post("/api/admin/opennews/draft")
@@ -3418,6 +3604,30 @@ async def admin_opennews_draft(request: Request):
         draft = generate_opennews_draft(
             article=article,
             target_market=str(payload.get("target_market") or "cn"),
+            notes=str(payload.get("notes") or ""),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "draft", {"article": article, "draft": draft, "user": user.get("username")})
+    return {"draft": draft}
+
+
+@app.post("/api/opennews/draft")
+async def opennews_draft(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    article = payload.get("article") or {}
+    if not article.get("url"):
+        return JSONResponse({"error": "缺少新闻链接"}, status_code=400)
+    try:
+        draft = generate_opennews_draft(
+            article=article,
+            target_market=str(payload.get("target_market") or user.get("target_market") or "cn"),
             notes=str(payload.get("notes") or ""),
         )
     except Exception as exc:
@@ -3461,29 +3671,27 @@ async def admin_opennews_produce(request: Request):
         voice_preset_id = _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female"
     voice_preset = _get_voice_preset(voice_preset_id, target_market)
     voice_preset["selected_speed"] = float(payload.get("speed") or voice_preset.get("default_speed") or 1.1)
-    avatar_option = _pick_compatible_avatar_for_opennews(target_market, voice_preset, str(payload.get("avatar_id") or ""))
-    if not avatar_option or not _is_avatar_voice_compatible(avatar_option, voice_preset):
-        return JSONResponse({"error": "没有找到与新闻音色兼容的数字人主播"}, status_code=400)
-
+    aspect_ratio = str(payload.get("aspect_ratio") or "vertical").strip().lower()
+    if aspect_ratio not in {"vertical", "horizontal"}:
+        aspect_ratio = "vertical"
     try:
         script_data = build_opennews_script_data(draft=draft, article=article, target_market=target_market)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
     topic = f"OpenNews：{script_data.get('title') or article.get('title') or '新闻视频'}"
-    selected_digital_human_engine = _normalize_digital_human_engine(str(payload.get("digital_human_engine") or INFINITETALK_ENGINE_ID), user)
     submission_key = _make_produce_submission_key(
         owner_username=user.get("username", ""),
         topic=topic,
         script_data=script_data,
         voice_preset_id=voice_preset.get("id", voice_preset_id),
-        avatar_id=avatar_option.get("id", ""),
+        avatar_id="",
         speed=float(voice_preset.get("selected_speed") or 1.1),
         web_search_enabled=False,
         target_market=target_market,
         department_id=department_id,
         script_model=SCRIPT_MODEL_CHATGPT,
-        digital_human_engine=selected_digital_human_engine,
+        digital_human_engine="opennews_material_only",
     )
     reusable_task = _find_reusable_running_task(owner_username=user.get("username", ""), submission_key=submission_key)
     if reusable_task:
@@ -3497,7 +3705,7 @@ async def admin_opennews_produce(request: Request):
         "owner_role": user.get("role"),
         "id": task_id,
         "topic": topic,
-        "image_path": avatar_option.get("image_path", ""),
+        "image_path": "",
         "tracker": tracker,
         "output_dir": None,
         "result": None,
@@ -3508,26 +3716,122 @@ async def admin_opennews_produce(request: Request):
         "submission_key": submission_key,
         "workflow_config": {
             "voice_preset_id": voice_preset.get("id", voice_preset_id),
-            "avatar_id": avatar_option.get("id", ""),
+            "avatar_id": "",
             "speed": voice_preset.get("selected_speed", 1.1),
             "web_search_enabled": False,
             "target_market": target_market,
             "department_id": department_id,
             "compose_transition_id": "fade",
-            "subtitle_template_id": "classic",
+            "subtitle_template_id": "property_clear",
+            "compose_aspect_ratio": aspect_ratio,
             "source": {"kind": "opennews", "article": article},
             "script_model": SCRIPT_MODEL_CHATGPT,
-            "digital_human_engine": selected_digital_human_engine,
+            "digital_human_engine": "opennews_material_only",
             "opennews": True,
+            "opennews_material_only": True,
         },
         "cost_entries": [],
         "cost_summary": _empty_cost_summary(),
     }
-    tracker.log("OpenNews 新闻视频任务已创建，准备进入数字人生产链路...")
+    tracker.log("OpenNews 新闻视频任务已创建，准备进入素材成片链路...")
     save_opennews_payload(OPENNEWS_ADMIN_DIR, "produce", {"article": article, "draft": draft, "script": script_data, "task_id": task_id, "user": user.get("username")})
     thread = threading.Thread(
         target=run_pipeline_with_progress,
-        args=(task_id, topic, avatar_option.get("image_path", ""), tasks[task_id]["public_base_url"], script_data, voice_preset, avatar_option),
+        args=(task_id, topic, "", tasks[task_id]["public_base_url"], script_data, voice_preset, None),
+        daemon=True,
+    )
+    thread.start()
+    return {"task_id": task_id, "reused_existing": False, "script": script_data}
+
+
+@app.post("/api/opennews/produce")
+async def opennews_produce(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    article = payload.get("article") or {}
+    draft = payload.get("draft") or {}
+    target_market = str(payload.get("target_market") or user.get("target_market") or "cn").strip() or "cn"
+    if target_market not in {item["id"] for item in TARGET_MARKETS}:
+        target_market = "cn"
+    department_id = str(payload.get("department_id") or user.get("department_id") or "real_estate").strip() or "real_estate"
+    voice_preset_id = str(payload.get("voice_preset_id") or _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female").strip()
+    if voice_preset_id not in _get_visible_voice_preset_ids(target_market):
+        voice_preset_id = _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female"
+    voice_preset = _get_voice_preset(voice_preset_id, target_market)
+    voice_preset["selected_speed"] = float(payload.get("speed") or voice_preset.get("default_speed") or 1.1)
+    aspect_ratio = str(payload.get("aspect_ratio") or "vertical").strip().lower()
+    if aspect_ratio not in {"vertical", "horizontal"}:
+        aspect_ratio = "vertical"
+    try:
+        script_data = build_opennews_script_data(draft=draft, article=article, target_market=target_market)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    topic = f"OpenNews：{script_data.get('title') or article.get('title') or '新闻视频'}"
+    submission_key = _make_produce_submission_key(
+        owner_username=user.get("username", ""),
+        topic=topic,
+        script_data=script_data,
+        voice_preset_id=voice_preset.get("id", voice_preset_id),
+        avatar_id="",
+        speed=float(voice_preset.get("selected_speed") or 1.1),
+        web_search_enabled=False,
+        target_market=target_market,
+        department_id=department_id,
+        script_model=SCRIPT_MODEL_CHATGPT,
+        digital_human_engine="opennews_material_only",
+    )
+    reusable_task = _find_reusable_running_task(owner_username=user.get("username", ""), submission_key=submission_key)
+    if reusable_task:
+        return {"task_id": reusable_task.get("id", ""), "reused_existing": True, "message": "OpenNews 新闻视频任务已在后台执行"}
+
+    task_id = str(uuid.uuid4())[:8]
+    tracker = ProgressTracker(task_id)
+    tasks[task_id] = {
+        "owner_username": user.get("username"),
+        "owner_display_name": user.get("display_name"),
+        "owner_role": user.get("role"),
+        "id": task_id,
+        "topic": topic,
+        "image_path": "",
+        "tracker": tracker,
+        "output_dir": None,
+        "result": None,
+        "public_base_url": _get_public_base_url(request),
+        "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "submission_key": submission_key,
+        "workflow_config": {
+            "voice_preset_id": voice_preset.get("id", voice_preset_id),
+            "avatar_id": "",
+            "speed": voice_preset.get("selected_speed", 1.1),
+            "web_search_enabled": False,
+            "target_market": target_market,
+            "department_id": department_id,
+            "compose_transition_id": "fade",
+            "subtitle_template_id": "property_clear",
+            "compose_aspect_ratio": aspect_ratio,
+            "source": {"kind": "opennews", "article": article},
+            "script_model": SCRIPT_MODEL_CHATGPT,
+            "digital_human_engine": "opennews_material_only",
+            "opennews": True,
+            "opennews_material_only": True,
+        },
+        "cost_entries": [],
+        "cost_summary": _empty_cost_summary(),
+    }
+    tracker.log("OpenNews 新闻视频任务已创建，准备进入素材成片链路...")
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "produce", {"article": article, "draft": draft, "script": script_data, "task_id": task_id, "user": user.get("username")})
+    thread = threading.Thread(
+        target=run_pipeline_with_progress,
+        args=(task_id, topic, "", tasks[task_id]["public_base_url"], script_data, voice_preset, None),
         daemon=True,
     )
     thread.start()
@@ -5621,8 +5925,12 @@ async def compose_history_video_endpoint(history_id: str, request: Request):
     if access_error:
         return access_error
 
-    transition_id = "fade"
-    subtitle_template_id = "classic"
+    workflow_config = result.get("workflow_config") or {}
+    transition_id = str(workflow_config.get("compose_transition_id") or "fade")
+    subtitle_template_id = str(workflow_config.get("subtitle_template_id") or "classic")
+    compose_aspect_ratio = str(workflow_config.get("compose_aspect_ratio") or workflow_config.get("aspect_ratio") or "vertical")
+    if workflow_config.get("opennews") or workflow_config.get("opennews_material_only"):
+        subtitle_template_id = "property_clear"
 
     try:
         from video_composer import compose_history_video
@@ -5631,13 +5939,14 @@ async def compose_history_video_endpoint(history_id: str, request: Request):
             result,
             transition_id=transition_id,
             subtitle_template_id=subtitle_template_id,
+            aspect_ratio=compose_aspect_ratio,
         )
     except Exception as exc:
         return JSONResponse({"error": f"自动成片失败：{exc}"}, status_code=500)
 
-    workflow_config = result.get("workflow_config") or {}
     workflow_config["compose_transition_id"] = transition_id
     workflow_config["subtitle_template_id"] = subtitle_template_id
+    workflow_config["compose_aspect_ratio"] = compose_aspect_ratio
     result["workflow_config"] = workflow_config
     result.update(compose_result)
     _record_history_cost(

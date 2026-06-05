@@ -13,9 +13,12 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, parse_qsl, quote_plus, unquote, urlencode, urljoin, urlparse, urlunparse
 from xml.etree import ElementTree as ET
 
 import requests
@@ -31,84 +34,198 @@ DEFAULT_HEADERS = {
 class OpenNewsSource:
     id: str
     name: str
+    category: str
     country: str
     url: str
     license: str
     content_type: str
     search_url: str = ""
     rss_url: str = ""
+    latest_url: str = ""
 
 
 OPENNEWS_SOURCES: list[OpenNewsSource] = [
     OpenNewsSource(
         id="dvids",
         name="DVIDS 美军媒体素材库",
+        category="military",
         country="美国",
         url="https://www.dvidshub.net/",
         license="Public Domain",
         content_type="军事公开视频/图片/新闻",
         search_url="https://www.dvidshub.net/search?q={query}",
+        latest_url="https://www.dvidshub.net/news/list/most-recent",
     ),
     OpenNewsSource(
         id="dod",
         name="美国国防部",
+        category="military",
         country="美国",
         url="https://www.defense.gov/",
         license="Public Domain",
         content_type="国防声明/新闻/图片",
         search_url="https://www.defense.gov/Search-Results/?query={query}",
+        latest_url="https://www.defense.gov/News/Releases/",
     ),
     OpenNewsSource(
         id="indopacom",
         name="美国印太司令部",
+        category="military",
         country="美国",
         url="https://www.pacom.mil/",
         license="Public Domain",
         content_type="印太/台海/南海军事动态",
         search_url="https://www.pacom.mil/Search/?query={query}",
+        latest_url="https://www.pacom.mil/Media/News/",
     ),
     OpenNewsSource(
         id="mod_jp",
         name="日本防卫省",
+        category="military",
         country="日本",
         url="https://www.mod.go.jp/",
         license="PDL 1.0 / CC BY 4.0 equivalent",
         content_type="防卫省/自卫队动态",
         search_url="https://www.mod.go.jp/j/search/?q={query}",
+        latest_url="https://www.mod.go.jp/j/press/news/",
     ),
     OpenNewsSource(
         id="mofa_jp",
         name="日本外务省",
+        category="politics",
         country="日本",
         url="https://www.mofa.go.jp/",
         license="PDL 1.0 / CC BY 4.0 equivalent",
         content_type="外交声明/政策新闻",
         search_url="https://www.mofa.go.jp/search.html?q={query}",
+        latest_url="https://www.mofa.go.jp/press/release/pressite_000001_00001.html",
     ),
     OpenNewsSource(
         id="mnd_tw",
         name="台湾国防部",
+        category="military",
         country="台湾",
         url="https://www.mnd.gov.tw/",
         license="OGDL-Taiwan / CC BY 4.0 equivalent",
         content_type="国防新闻/共机绕台数据",
         search_url="https://www.mnd.gov.tw/Search.aspx?query={query}",
+        latest_url="https://www.mnd.gov.tw/News.aspx",
     ),
     OpenNewsSource(
         id="voa_zh",
         name="VOA 中文",
+        category="politics",
         country="美国",
         url="https://www.voachinese.com/",
         license="Public Domain",
         content_type="中文新闻参考",
         rss_url="https://www.voachinese.com/api/",
         search_url="https://www.voachinese.com/s?k={query}",
+        latest_url="https://www.voachinese.com/z/1739",
     ),
 ]
+
+OPENNEWS_CATEGORIES = [
+    {"id": "all", "name": "全部"},
+    {"id": "military", "name": "军事类"},
+    {"id": "politics", "name": "政治类"},
+    {"id": "technology", "name": "科技类"},
+    {"id": "finance", "name": "金融类"},
+    {"id": "society", "name": "社会类"},
+]
+
+
+OPENNEWS_KEYWORD_EXPANSIONS = {
+    "SpaceX": ["SpaceX"],
+    "spacex": ["SpaceX"],
+    "Meta": ["Meta", "Meta AI", "Meta company"],
+    "mate": ["Meta", "Meta AI", "Meta company"],
+    "facebook": ["Meta", "Facebook"],
+    "微软": ["Microsoft"],
+    "谷歌": ["Google", "Alphabet"],
+    "英伟达": ["Nvidia"],
+    "苹果": ["Apple"],
+    "亚马逊": ["Amazon"],
+    "马斯克": ["Elon Musk", "Musk"],
+    "埃隆": ["Elon Musk"],
+    "IPO": ["IPO", "initial public offering"],
+    "上市": ["IPO", "initial public offering"],
+    "万亿富翁": ["trillionaire", "Elon Musk trillionaire"],
+    "生物技术": ["biotechnology", "biotech"],
+    "投资": ["investment", "investors"],
+    "白宫": ["White House", "White House press briefing"],
+    "发言人": ["press briefing", "spokesperson"],
+    "发布会": ["press briefing", "press conference"],
+    "中国科技": ["China technology", "Chinese technology"],
+    "中国": ["China"],
+    "台海": ["Taiwan Strait", "Taiwan"],
+    "台湾": ["Taiwan"],
+    "印太": ["Indo-Pacific", "INDOPACOM"],
+    "南海": ["South China Sea"],
+    "军演": ["military exercise", "joint exercise", "training"],
+    "演习": ["military exercise", "training"],
+    "舰艇": ["ship", "navy", "destroyer", "vessel"],
+    "军舰": ["warship", "navy ship", "destroyer"],
+    "航母": ["aircraft carrier", "carrier strike group"],
+    "飞机": ["aircraft", "fighter jet"],
+    "战机": ["fighter jet", "aircraft"],
+    "无人机": ["drone", "UAV", "unmanned aircraft"],
+    "导弹": ["missile"],
+    "防卫省": ["Japan Ministry of Defense", "JSDF"],
+    "自卫队": ["JSDF", "Japan Self-Defense Force"],
+    "美军": ["U.S. military", "U.S. Navy", "U.S. Air Force"],
+    "国防部": ["Department of Defense", "DoD"],
+    "芯片": ["chip", "semiconductor"],
+    "半导体": ["semiconductor", "chip"],
+    "人工智能": ["artificial intelligence", "AI"],
+    "机器人": ["robot", "robotics"],
+    "金融": ["finance", "market", "economy"],
+    "股市": ["stock market"],
+    "汇率": ["exchange rate"],
+}
+
+
+OPENNEWS_CATEGORY_MEDIA_TERMS = {
+    "military": ["military exercise", "navy ship", "aircraft", "troops", "defense ministry", "fighter jet", "warship", "missile", "drone UAV"],
+    "politics": ["press briefing", "government meeting", "diplomacy", "White House", "parliament", "cabinet meeting", "foreign ministry"],
+    "technology": ["technology", "AI", "semiconductor", "robotics", "chip factory", "data center", "laboratory", "electronics manufacturing"],
+    "finance": ["financial market", "economy", "stock market", "central bank", "currency exchange", "trading floor", "business district"],
+    "society": ["city street", "public service", "community", "school", "hospital", "public transport", "local government"],
+}
+
+
+GENERAL_WEB_SEARCH_URLS = (
+    "https://duckduckgo.com/html/?q={query}",
+    "https://www.bing.com/search?q={query}",
+)
+
+
+GENERAL_WEB_MEDIA_SEARCH_URLS = (
+    "https://www.bing.com/images/search?q={query}",
+    "https://www.bing.com/videos/search?q={query}",
+)
+
+
+GENERAL_WEB_BLOCKED_HOST_TOKENS = (
+    "facebook.com",
+    "instagram.com",
+    "tiktok.com",
+    "x.com",
+    "twitter.com",
+    "youtube.com",
+    "youtu.be",
+    "linkedin.com",
+    "pinterest.",
+    "reddit.com",
+)
 
 
 def source_payloads() -> list[dict]:
     return [source.__dict__ for source in OPENNEWS_SOURCES]
+
+
+def category_payloads() -> list[dict]:
+    return list(OPENNEWS_CATEGORIES)
 
 
 def _strip_tags(value: str) -> str:
@@ -119,35 +236,1002 @@ def _strip_tags(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _extract_html_candidates(page_html: str, source: OpenNewsSource, limit: int = 8) -> list[dict]:
-    candidates: list[dict] = []
+def _compact_query(value: str, max_chars: int = 90) -> str:
+    value = _strip_tags(value or "")
+    value = re.sub(r"[，。！？、；：,.!?;:（）()【】\[\]「」\"']", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:max_chars]
+
+
+def _expanded_media_queries(*parts: str, category: str = "all", limit: int = 8) -> list[str]:
+    text = " ".join(_strip_tags(part or "") for part in parts if part)
+    queries: list[str] = []
+    for key, expansions in OPENNEWS_KEYWORD_EXPANSIONS.items():
+        if key in text:
+            queries.extend(expansions)
+    for part in parts:
+        compact = _compact_query(part or "")
+        if compact:
+            queries.append(compact)
+    # 分类通用词只能作为最后兜底，不能盖过新闻实体本身。
+    queries.extend(OPENNEWS_CATEGORY_MEDIA_TERMS.get(category, []))
+    deduped: list[str] = []
     seen: set[str] = set()
-    for match in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>([\s\S]{8,260}?)</a>', page_html or "", flags=re.I):
+    for query in queries:
+        query = _compact_query(query, max_chars=80)
+        key = query.lower()
+        if len(query) < 2 or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(query)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _opennews_entity_search_query(keywords: list[str], article: dict, draft: dict, *, limit: int = 8) -> str:
+    parts = [
+        " ".join(str(item).strip() for item in keywords if str(item).strip()),
+        str(draft.get("video_title") or ""),
+        str(article.get("title") or ""),
+        str(draft.get("summary") or ""),
+    ]
+    queries = _expanded_media_queries(*parts, category="all", limit=limit)
+    # 只取前面的实体/标题相关词，避免把分类兜底词暴露成主检索词。
+    blocked_generic = {
+        "press briefing", "government meeting", "diplomacy", "white house",
+        "parliament", "cabinet meeting", "foreign ministry", "military exercise",
+        "navy ship", "aircraft", "troops", "defense ministry",
+    }
+    filtered = []
+    for query in queries:
+        key = query.lower().strip()
+        if key in blocked_generic:
+            continue
+        filtered.append(query)
+        if len(filtered) >= limit:
+            break
+    if not filtered:
+        filtered = [str(item).strip() for item in keywords if str(item).strip()][:limit]
+    return " ".join(filtered).strip() or str(article.get("title") or draft.get("video_title") or "news")
+
+
+def _parse_timestamp(value: str) -> float:
+    value = (value or "").strip()
+    if not value:
+        return 0.0
+    value = html.unescape(value)
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", r"\1-\2-\3", value)
+    value = re.sub(r"(\d{4})/(\d{1,2})/(\d{1,2})", r"\1-\2-\3", value)
+    try:
+        return parsedate_to_datetime(value).timestamp()
+    except Exception:
+        pass
+    date_match = re.search(r"(20\d{2})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?", value)
+    if date_match:
+        y, m, d, hh, mm, ss = date_match.groups()
+        normalized = f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+        if hh is not None:
+            normalized += f" {int(hh):02d}:{int(mm or 0):02d}:{int(ss or 0):02d}"
+        value = normalized
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return time.mktime(time.strptime(value[:19] if " " in fmt or "T" in fmt else value[:10], fmt))
+        except Exception:
+            continue
+    return 0.0
+
+
+def _recent_news_window_start_ts(days: int = 2) -> float:
+    """Local midnight of yesterday when days=2, i.e. today + previous day only."""
+    jst = timezone(timedelta(hours=9))
+    now = datetime.now(jst)
+    today_midnight = datetime(now.year, now.month, now.day, tzinfo=jst)
+    return (today_midnight - timedelta(days=max(0, days - 1))).timestamp()
+
+
+def _recent_news_window_label(days: int = 2) -> str:
+    start_ts = _recent_news_window_start_ts(days)
+    end_ts = time.time()
+    jst = timezone(timedelta(hours=9))
+    start_label = datetime.fromtimestamp(start_ts, jst).strftime("%Y-%m-%d")
+    end_label = datetime.fromtimestamp(end_ts, jst).strftime("%Y-%m-%d")
+    return f"{start_label} 至 {end_label}"
+
+
+def _is_recent_news_candidate(candidate: dict, *, days: int = 2) -> bool:
+    published_ts = float(candidate.get("published_ts") or 0)
+    return bool(published_ts and published_ts >= _recent_news_window_start_ts(days) and published_ts <= time.time() + 86400)
+
+
+def _source_by_id(source_id: str) -> OpenNewsSource | None:
+    for source in OPENNEWS_SOURCES:
+        if source.id == source_id:
+            return source
+    return None
+
+
+def _canonical_news_url(url: str) -> str:
+    parsed = urlparse((url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return (url or "").strip()
+    ignored_params = {
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "fbclid", "gclid", "mc_cid", "mc_eid", "cmp", "cid", "output",
+    }
+    query_items = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=False)
+        if key.lower() not in ignored_params
+    ]
+    path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    return urlunparse((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        path,
+        "",
+        urlencode(query_items, doseq=True),
+        "",
+    ))
+
+
+def _normalized_news_title(title: str) -> str:
+    title = _strip_tags(title or "").lower()
+    title = re.sub(r"\s*[-|｜_]\s*(voa|美国之音|dvids|defense\.gov|防衛省|外務省).*$", "", title, flags=re.I)
+    title = re.sub(r"[^\w\u3040-\u30ff\u3400-\u9fff]+", "", title)
+    return title[:90]
+
+
+def _title_tokens(title: str) -> set[str]:
+    raw = _strip_tags(title or "").lower()
+    tokens = set(re.findall(r"[a-z0-9]{3,}|[\u3040-\u30ff]{2,}|[\u3400-\u9fff]{2,4}", raw))
+    generic = {
+        "新闻", "最新", "报道", "消息", "视频", "图片", "全文", "美国", "中国", "日本",
+        "voa", "dvids", "news", "press", "release", "video", "photo", "image",
+    }
+    return {token for token in tokens if token not in generic and len(token) >= 2}
+
+
+def _titles_are_similar(left: str, right: str) -> bool:
+    left_key = _normalized_news_title(left)
+    right_key = _normalized_news_title(right)
+    if not left_key or not right_key:
+        return False
+    if left_key in right_key or right_key in left_key:
+        return min(len(left_key), len(right_key)) >= 14
+    if min(len(left_key), len(right_key)) >= 18 and SequenceMatcher(None, left_key, right_key).ratio() >= 0.58:
+        return True
+    left_tokens = _title_tokens(left)
+    right_tokens = _title_tokens(right)
+    if len(left_tokens) < 3 or len(right_tokens) < 3:
+        return False
+    overlap = len(left_tokens & right_tokens)
+    ratio = overlap / max(1, min(len(left_tokens), len(right_tokens)))
+    return overlap >= 3 and ratio >= 0.72
+
+
+def _candidate_dedupe_key(candidate: dict) -> str:
+    canonical = _canonical_news_url(str(candidate.get("url") or ""))
+    title_key = _normalized_news_title(str(candidate.get("title") or ""))
+    if canonical:
+        parsed = urlparse(canonical)
+        path = parsed.path.rstrip("/")
+        if path and path != "/":
+            return f"url:{parsed.netloc}{path}"
+    if title_key:
+        return f"title:{candidate.get('source_id') or ''}:{title_key}"
+    return f"id:{candidate.get('id') or uuid.uuid4().hex}"
+
+
+def _dedupe_opennews_candidates(candidates: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: dict[str, int] = {}
+    title_seen: dict[str, int] = {}
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        item = dict(item)
+        item["canonical_url"] = _canonical_news_url(str(item.get("url") or ""))
+        item["dedupe_key"] = _candidate_dedupe_key(item)
+        title_key = _normalized_news_title(str(item.get("title") or ""))
+        keys = [item["dedupe_key"]]
+        if title_key and len(title_key) >= 12:
+            keys.append(f"title:{item.get('source_id') or ''}:{title_key}")
+
+        existing_index = None
+        for key in keys:
+            if key in seen:
+                existing_index = seen[key]
+                break
+            if key in title_seen:
+                existing_index = title_seen[key]
+                break
+        if existing_index is None and title_key:
+            for index, existing in enumerate(deduped):
+                if item.get("source_id") != existing.get("source_id"):
+                    continue
+                if _titles_are_similar(str(item.get("title") or ""), str(existing.get("title") or "")):
+                    existing_index = index
+                    break
+        if existing_index is None:
+            seen[item["dedupe_key"]] = len(deduped)
+            if title_key and len(title_key) >= 12:
+                title_seen[f"title:{item.get('source_id') or ''}:{title_key}"] = len(deduped)
+            deduped.append(item)
+            continue
+
+        existing = deduped[existing_index]
+        if not existing.get("published_at") and item.get("published_at"):
+            existing["published_at"] = item.get("published_at")
+            existing["published_ts"] = item.get("published_ts") or 0
+            existing["is_latest"] = item.get("is_latest", False)
+        if not existing.get("summary") and item.get("summary"):
+            existing["summary"] = item.get("summary")
+        if item.get("published_ts", 0) > existing.get("published_ts", 0):
+            existing["published_ts"] = item.get("published_ts")
+            existing["published_at"] = item.get("published_at")
+            existing["is_latest"] = item.get("is_latest", False)
+    return deduped
+
+
+def _candidate_from_source(source: OpenNewsSource, **kwargs) -> dict:
+    published_at = _strip_tags(str(kwargs.get("published_at") or ""))[:100]
+    source_url = str(kwargs.get("url") or source.url)
+    canonical_url = _canonical_news_url(source_url)
+    return {
+        "id": kwargs.get("id") or uuid.uuid4().hex[:12],
+        "source_id": source.id,
+        "source_name": source.name,
+        "category": source.category,
+        "category_name": next((item["name"] for item in OPENNEWS_CATEGORIES if item["id"] == source.category), source.category),
+        "title": _strip_tags(str(kwargs.get("title") or ""))[:180],
+        "url": source_url,
+        "canonical_url": canonical_url,
+        "summary": _strip_tags(str(kwargs.get("summary") or ""))[:420],
+        "published_at": published_at,
+        "published_ts": _parse_timestamp(published_at),
+        "license": source.license,
+        "content_type": source.content_type,
+        "is_latest": bool(_parse_timestamp(published_at) and time.time() - _parse_timestamp(published_at) <= 3 * 86400),
+        "dedupe_key": "",
+        **({"error": kwargs.get("error")} if kwargs.get("error") else {}),
+    }
+
+
+def _extract_meta_content(page_html: str, names: tuple[str, ...]) -> str:
+    for name in names:
+        patterns = [
+            rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']',
+            rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']',
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']{re.escape(name)}["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, page_html or "", flags=re.I)
+            if match:
+                return html.unescape(match.group(1)).strip()
+    return ""
+
+
+OPENNEWS_MEDIA_BAD_TOKENS = (
+    "favicon",
+    "apple-touch-icon",
+    "sprite",
+    "/icons/",
+    "/icon/",
+    "logo",
+    "avatar",
+    "author",
+    "profile",
+    "social",
+    "share",
+    "tracking",
+    "pixel",
+    "spacer",
+    "blank",
+    "placeholder",
+    "advert",
+    "/ads/",
+    "banner-ad",
+)
+
+
+OPENNEWS_MEDIA_PAGE_TOKENS = (
+    "/video/",
+    "/videos/",
+    "/image/",
+    "/images/",
+    "/photo/",
+    "/photos/",
+    "/media/",
+    "/gallery/",
+)
+
+
+def _media_dedupe_key(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.lower()}"
+
+
+def _normalized_media_basename(path: str) -> str:
+    name = os.path.basename((path or "").lower())
+    if not name:
+        return ""
+    stem, ext = os.path.splitext(name)
+    stem = re.sub(r"[-_@](?:\d{2,5}x\d{2,5}|\d{2,5}w|large|medium|small|thumb|thumbnail|preview|orig|original)$", "", stem)
+    stem = re.sub(r"(?:[-_](?:copy|scaled|resize|crop|web|mobile))+$", "", stem)
+    return f"{stem}{ext}" if stem and ext else name
+
+
+def _media_identity_keys(url: str) -> set[str]:
+    parsed = urlparse(url or "")
+    url_key = _media_dedupe_key(url)
+    basename = _normalized_media_basename(parsed.path)
+    keys = {url_key} if url_key else set()
+    if parsed.netloc and basename:
+        keys.add(f"basename:{parsed.netloc.lower()}:{basename}")
+    return keys
+
+
+def _prefer_large_news_media_url(url: str) -> str:
+    url = str(url or "").strip()
+    if "gdb.voanews.com" in url.lower() or "gdb.rferl.org" in url.lower():
+        return re.sub(r"_w\d+_", "_w1200_", url)
+    return url
+
+
+def _looks_like_low_quality_media(url: str, title: str, kind: str) -> bool:
+    text = f"{url} {title}".lower()
+    if any(token in text for token in OPENNEWS_MEDIA_BAD_TOKENS):
+        return True
+    path = urlparse(url).path.lower()
+    if kind == "image" and re.search(r"\.(svg|gif|ico)(?:$|\?)", path):
+        return True
+    return False
+
+
+def _merge_media_items(*groups: Iterable[dict], limit: int = 24) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group or []:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            identity_keys = _media_identity_keys(str(item.get("url") or ""))
+            if not identity_keys or identity_keys & seen:
+                continue
+            if _looks_like_low_quality_media(str(item.get("url") or ""), str(item.get("title") or ""), str(item.get("kind") or "image")):
+                continue
+            seen.update(identity_keys)
+            merged.append(dict(item))
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
+def _best_srcset_url(srcset: str) -> str:
+    candidates = []
+    for part in (srcset or "").split(","):
+        bits = part.strip().split()
+        if not bits:
+            continue
+        url = bits[0]
+        width = 0
+        if len(bits) > 1 and bits[1].endswith("w"):
+            try:
+                width = int(bits[1][:-1])
+            except Exception:
+                width = 0
+        candidates.append((width, url))
+    if not candidates:
+        return ""
+    return sorted(candidates, key=lambda item: item[0], reverse=True)[0][1]
+
+
+def _extract_media_page_links(page_html: str, base_url: str, limit: int = 8) -> list[str]:
+    links: list[str] = []
+    seen: set[str] = set()
+    base_host = urlparse(base_url).netloc.lower()
+    for match in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>([\s\S]{0,260}?)</a>', page_html or "", flags=re.I):
+        href, label_html = match.groups()
+        full_url = urljoin(base_url, html.unescape(href or "").strip())
+        parsed = urlparse(full_url)
+        if not parsed.scheme.startswith("http") or parsed.netloc.lower() != base_host:
+            continue
+        lowered = full_url.lower()
+        if not any(token in lowered for token in OPENNEWS_MEDIA_PAGE_TOKENS):
+            continue
+        label = _strip_tags(label_html).lower()
+        if any(token in f"{lowered} {label}" for token in OPENNEWS_MEDIA_BAD_TOKENS):
+            continue
+        key = _media_dedupe_key(full_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append(full_url)
+        if len(links) >= limit:
+            break
+    return links
+
+
+def extract_article_media(page_html: str, base_url: str, limit: int = 12) -> list[dict]:
+    media: list[dict] = []
+    seen: set[str] = set()
+
+    def add(url: str, kind: str, title: str = "", score: int = 0):
+        url = html.unescape((url or "").strip())
+        if not url:
+            return
+        full_url = urljoin(base_url, url)
+        full_url = _prefer_large_news_media_url(full_url)
+        dedupe_key = _media_dedupe_key(full_url)
+        if not full_url.startswith("http") or dedupe_key in seen:
+            return
+        if _looks_like_low_quality_media(full_url, title, kind):
+            return
+        parsed_path = urlparse(full_url).path.lower()
+        if kind == "image" and not re.search(r"\.(jpg|jpeg|png|webp)(?:$|\?)", parsed_path):
+            if "image" not in full_url.lower():
+                return
+        if kind == "video" and not re.search(r"\.(mp4|mov|m4v|webm)(?:$|\?)", parsed_path):
+            if not any(token in full_url.lower() for token in ("video", "download")):
+                return
+        seen.add(dedupe_key)
+        media.append({
+            "url": full_url,
+            "kind": kind,
+            "title": title[:120] or kind,
+            "source_url": base_url,
+            "score": score + (100 if kind == "video" else 0),
+        })
+
+    og_image = _extract_meta_content(page_html, ("og:image", "twitter:image"))
+    if og_image:
+        add(og_image, "image", "OpenGraph image", score=45)
+    og_video = _extract_meta_content(page_html, ("og:video", "og:video:url", "twitter:player:stream"))
+    if og_video:
+        add(og_video, "video", "OpenGraph video", score=70)
+
+    for match in re.finditer(r'<img([^>]*)>', page_html or "", flags=re.I):
+        attrs = match.group(1) or ""
+        srcset_match = re.search(r'(?:srcset|data-srcset)=["\']([^"\']+)["\']', attrs, flags=re.I)
+        if srcset_match:
+            add(_best_srcset_url(srcset_match.group(1)), "image", "article image", score=42)
+        for attr in ("data-original", "data-lazy-src", "data-src", "src"):
+            attr_match = re.search(rf'{attr}=["\']([^"\']+)["\']', attrs, flags=re.I)
+            if attr_match:
+                add(attr_match.group(1), "image", "article image", score=35)
+    for match in re.finditer(r'<(?:source|video)[^>]+src=["\']([^"\']+)["\'][^>]*>', page_html or "", flags=re.I):
+        add(match.group(1), "video", "article video", score=80)
+    for match in re.finditer(r'<video[^>]+poster=["\']([^"\']+)["\'][^>]*>', page_html or "", flags=re.I):
+        add(match.group(1), "image", "video poster", score=55)
+    for match in re.finditer(r'href=["\']([^"\']+\.(?:mp4|mov|m4v|webm)(?:\?[^"\']*)?)["\']', page_html or "", flags=re.I):
+        add(match.group(1), "video", "linked video", score=65)
+    for match in re.finditer(r'["\'](?:contentUrl|thumbnailUrl|embedUrl)["\']\s*:\s*["\']([^"\']+)["\']', page_html or "", flags=re.I):
+        url = match.group(1)
+        kind = "video" if re.search(r"\.(mp4|mov|m4v|webm)(?:$|\?)", url, flags=re.I) else "image"
+        add(url, kind, "structured media", score=60)
+    media.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+    for item in media:
+        item.pop("score", None)
+    return media[:limit]
+
+
+def _extract_nested_source_media(page_html: str, base_url: str, limit: int = 8) -> list[dict]:
+    nested_media: list[dict] = []
+    for link in _extract_media_page_links(page_html, base_url, limit=limit):
+        try:
+            response = requests.get(link, headers=DEFAULT_HEADERS, timeout=12)
+        except Exception:
+            continue
+        if response.status_code >= 400:
+            continue
+        nested_media.extend(extract_article_media(response.text, link, limit=limit))
+        if len(nested_media) >= limit:
+            break
+    return _merge_media_items(nested_media, limit=limit)
+
+
+def discover_related_opennews_media(source_id: str, query: str, *, article_url: str = "", limit: int = 16) -> list[dict]:
+    source = _source_by_id(source_id)
+    if not source or not query.strip():
+        return []
+    query = re.sub(r"\s+", " ", query).strip()
+    search_targets: list[str] = []
+    if source.search_url:
+        search_targets.append(source.search_url.format(query=quote_plus(query)))
+    if source.id == "dvids":
+        search_targets.extend([
+            f"https://www.dvidshub.net/search?q={quote_plus(query)}&type=video",
+            f"https://www.dvidshub.net/search?q={quote_plus(query)}&type=image",
+        ])
+    related: list[dict] = []
+    for search_url in search_targets:
+        try:
+            response = requests.get(search_url, headers=DEFAULT_HEADERS, timeout=15)
+        except Exception:
+            continue
+        if response.status_code >= 400:
+            continue
+        related.extend(extract_article_media(response.text, search_url, limit=limit))
+        for link in _extract_media_page_links(response.text, search_url, limit=6):
+            if article_url and _media_dedupe_key(link) == _media_dedupe_key(article_url):
+                continue
+            try:
+                detail_response = requests.get(link, headers=DEFAULT_HEADERS, timeout=12)
+            except Exception:
+                continue
+            if detail_response.status_code >= 400:
+                continue
+            related.extend(extract_article_media(detail_response.text, link, limit=limit))
+            if len(related) >= limit:
+                break
+        if len(related) >= limit:
+            break
+    return _merge_media_items(related, limit=limit)
+
+
+def discover_broad_opennews_media(
+    *,
+    source_id: str = "",
+    category: str = "all",
+    queries: Iterable[str] = (),
+    article_url: str = "",
+    limit: int = 32,
+) -> list[dict]:
+    """按文案语义跨新闻源补找公开视频/图片素材。"""
+    source_ids: list[str] = []
+    if source_id:
+        source_ids.append(source_id)
+    for source in OPENNEWS_SOURCES:
+        if category != "all" and source.category != category:
+            continue
+        if source.id not in source_ids:
+            source_ids.append(source.id)
+    if category == "military" and "dvids" not in source_ids:
+        source_ids.insert(0, "dvids")
+
+    collected: list[dict] = []
+    for query in queries:
+        if len(collected) >= limit:
+            break
+        for sid in source_ids[:5]:
+            if len(collected) >= limit:
+                break
+            media = discover_related_opennews_media(
+                sid,
+                query,
+                article_url=article_url,
+                limit=max(6, min(12, limit - len(collected))),
+            )
+            for item in media:
+                item = dict(item)
+                item["related_query"] = query
+                item["related_source_id"] = sid
+                collected.append(item)
+    return _merge_media_items(collected, limit=limit)
+
+
+def _decode_search_result_url(url: str) -> str:
+    url = html.unescape(url or "").strip()
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key in ("uddg", "url", "u"):
+        value = query.get(key, [""])[0]
+        if value:
+            return unquote(value)
+    return url
+
+
+def _is_allowed_general_web_url(url: str) -> bool:
+    parsed = urlparse(url or "")
+    if not parsed.scheme.startswith("http") or not parsed.netloc:
+        return False
+    host = parsed.netloc.lower()
+    if any(token in host for token in GENERAL_WEB_BLOCKED_HOST_TOKENS):
+        return False
+    if any(token in url.lower() for token in ("login", "signup", "account", "subscribe")):
+        return False
+    return True
+
+
+def _extract_general_search_links(page_html: str, base_url: str, limit: int = 8) -> list[str]:
+    links: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>([\s\S]{4,260}?)</a>', page_html or "", flags=re.I):
         href, label_html = match.groups()
         label = _strip_tags(label_html)
-        if len(label) < 8:
+        if len(label) < 4:
             continue
-        if href.startswith("/"):
-            href = source.url.rstrip("/") + href
-        if not href.startswith("http") or href in seen:
+        full_url = _decode_search_result_url(urljoin(base_url, href))
+        if not _is_allowed_general_web_url(full_url):
             continue
-        lowered = href.lower()
-        if not any(token in lowered for token in ("news", "article", "releases", "press", "video", "image", "story", "search")):
+        if any(skip in full_url.lower() for skip in ("duckduckgo.com", "bing.com/search", "microsoft.com")):
             continue
-        seen.add(href)
-        candidates.append(
-            {
-                "id": uuid.uuid4().hex[:12],
-                "source_id": source.id,
-                "source_name": source.name,
-                "title": label[:160],
-                "url": href,
-                "summary": "",
-                "published_at": "",
-                "license": source.license,
-                "content_type": source.content_type,
-            }
+        key = _media_dedupe_key(full_url)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        links.append(full_url)
+        if len(links) >= limit:
+            break
+    return links
+
+
+def _decode_embedded_media_url(raw_url: str) -> str:
+    value = html.unescape(raw_url or "").strip()
+    if not value:
+        return ""
+    try:
+        value = bytes(value, "utf-8").decode("unicode_escape")
+    except Exception:
+        pass
+    return value.replace("\\/", "/").strip()
+
+
+def _extract_direct_search_media(page_html: str, search_url: str, search_terms: str, limit: int = 60) -> list[dict]:
+    """Extract direct media links embedded in public image/video search result pages."""
+    media: list[dict] = []
+    seen: set[str] = set()
+    patterns = (
+        r'"(?:murl|mediaurl|contentUrl|thumbnailUrl|imgurl|poster)"\s*:\s*"([^"]+)"',
+        r'&quot;(?:murl|mediaurl|contentUrl|thumbnailUrl|imgurl|poster)&quot;\s*:\s*&quot;([^&]+)&quot;',
+        r'(https?://[^"\'>\s]+?\.(?:jpg|jpeg|png|webp|mp4|mov|m4v|webm)(?:\?[^"\'>\s]*)?)',
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, page_html or "", flags=re.I):
+            raw_url = match.group(1)
+            url = _decode_embedded_media_url(raw_url)
+            if not url.startswith("http") or not _is_allowed_general_web_url(url):
+                continue
+            lower_path = urlparse(url).path.lower()
+            kind = "video" if re.search(r"\.(mp4|mov|m4v|webm)(?:$|\?)", lower_path, flags=re.I) else "image"
+            if kind == "image" and not re.search(r"\.(jpg|jpeg|png|webp)(?:$|\?)", lower_path, flags=re.I):
+                continue
+            if _looks_like_low_quality_media(url, search_terms, kind):
+                continue
+            identity_keys = _media_identity_keys(url)
+            if not identity_keys or identity_keys & seen:
+                continue
+            seen.update(identity_keys)
+            media.append({
+                "url": url,
+                "kind": kind,
+                "title": f"search media: {search_terms}"[:120],
+                "source_url": search_url,
+                "source": "general_web_search_media",
+                "related_query": search_terms,
+            })
+            if len(media) >= limit:
+                return media
+    return media
+
+
+def discover_general_search_media(queries: Iterable[str], *, limit: int = 180) -> list[dict]:
+    """直接从公开图片/视频搜索结果中提取媒体直链，作为网页爬取的补充。"""
+    collected: list[dict] = []
+    query_variants: list[str] = []
+    for query in queries:
+        query = _compact_query(str(query or ""), max_chars=80)
+        if not query:
+            continue
+        for suffix in ("news photo", "official photo", "press photo", "news image", "news video", "footage", "b-roll"):
+            variant = f"{query} {suffix}".strip()
+            if variant.lower() not in {item.lower() for item in query_variants}:
+                query_variants.append(variant)
+    for search_terms in query_variants:
+        if len(collected) >= limit:
+            break
+        for template in GENERAL_WEB_MEDIA_SEARCH_URLS:
+            if len(collected) >= limit:
+                break
+            search_url = template.format(query=quote_plus(search_terms))
+            try:
+                response = requests.get(search_url, headers=DEFAULT_HEADERS, timeout=12)
+            except Exception:
+                continue
+            if response.status_code >= 400:
+                continue
+            collected.extend(_extract_direct_search_media(response.text, search_url, search_terms, limit=80))
+    return _merge_media_items(collected, limit=limit)
+
+
+def discover_general_web_media(queries: Iterable[str], *, article_url: str = "", limit: int = 220) -> list[dict]:
+    """从普通公开网页搜索结果里抓取图片/视频候选，保留来源供人工审核。"""
+    collected: list[dict] = []
+    visited_pages: set[str] = set()
+    source_host = urlparse(article_url or "").netloc.lower()
+    query_variants: list[str] = []
+    for query in queries:
+        query = _compact_query(str(query or ""), max_chars=80)
+        if not query:
+            continue
+        for suffix in (
+            "news photo video official",
+            "image",
+            "footage",
+            "press photo",
+            "b-roll",
+            "latest photos",
+            "official video",
+            "official photo",
+            "archive footage",
+            "news footage",
+            "public domain",
+        ):
+            variant = f"{query} {suffix}".strip()
+            if variant.lower() not in {item.lower() for item in query_variants}:
+                query_variants.append(variant)
+    for search_terms in query_variants:
+        if len(collected) >= limit:
+            break
+        for search_url_template in GENERAL_WEB_SEARCH_URLS:
+            if len(collected) >= limit:
+                break
+            search_url = search_url_template.format(query=quote_plus(search_terms))
+            try:
+                response = requests.get(search_url, headers=DEFAULT_HEADERS, timeout=12)
+            except Exception:
+                continue
+            if response.status_code >= 400:
+                continue
+            links = _extract_general_search_links(response.text, search_url, limit=28)
+            for link in links:
+                if len(collected) >= limit:
+                    break
+                page_key = _media_dedupe_key(link)
+                if not page_key or page_key in visited_pages:
+                    continue
+                if source_host and urlparse(link).netloc.lower() == source_host:
+                    continue
+                visited_pages.add(page_key)
+                try:
+                    page_response = requests.get(link, headers=DEFAULT_HEADERS, timeout=14)
+                except Exception:
+                    continue
+                if page_response.status_code >= 400 or "text/html" not in (page_response.headers.get("Content-Type", "").lower()):
+                    continue
+                media = extract_article_media(page_response.text, link, limit=36)
+                if len(media) < 8:
+                    media = _merge_media_items(media, _extract_nested_source_media(page_response.text, link, limit=18), limit=36)
+                for item in media:
+                    item = dict(item)
+                    item["source_url"] = link
+                    item["source"] = "general_web"
+                    item["related_query"] = search_terms
+                    collected.append(item)
+                    if len(collected) >= limit:
+                        break
+    return _merge_media_items(collected, limit=limit)
+
+
+NEWS_LINK_POSITIVE_TOKENS = (
+    "news",
+    "article",
+    "release",
+    "releases",
+    "press",
+    "statement",
+    "briefing",
+    "story",
+    "media",
+    "video",
+    "image",
+    "photo",
+    "content",
+    "view",
+    "pressite",
+    "news_content",
+    "news-article",
+    "/a/",
+)
+
+
+NEWS_LINK_NEGATIVE_TOKENS = (
+    "javascript:",
+    "mailto:",
+    "#",
+    "/search",
+    "login",
+    "signup",
+    "subscribe",
+    "privacy",
+    "terms",
+    "contact",
+    "sitemap",
+    ".css",
+    ".js",
+    ".pdf",
+    ".zip",
+)
+
+
+def _looks_like_news_candidate_link(url: str, label: str, source: OpenNewsSource) -> bool:
+    lowered_url = (url or "").lower()
+    lowered_label = (label or "").lower()
+    if not lowered_url.startswith("http"):
+        return False
+    if any(token in lowered_url for token in NEWS_LINK_NEGATIVE_TOKENS):
+        return False
+    parsed = urlparse(lowered_url)
+    source_host = urlparse(source.url).netloc.lower()
+    if parsed.netloc and source_host and source_host not in parsed.netloc and parsed.netloc not in source_host:
+        return False
+    if any(token in lowered_url for token in NEWS_LINK_POSITIVE_TOKENS):
+        return True
+    if re.search(r"/20\d{2}/\d{1,2}/\d{1,2}/", lowered_url) or re.search(r"/20\d{2}[-_/]\d{1,2}[-_/]\d{1,2}", lowered_url):
+        return True
+    if re.search(r"(?:article|release|news)[-_]?\d{4,}", lowered_url):
+        return True
+    if source.id == "voa_zh" and re.search(r"/a/[^/]+/\d+\.html", lowered_url):
+        return True
+    if source.id == "mnd_tw" and ("news" in lowered_url or "publishing" in lowered_url):
+        return True
+    if len(_title_tokens(label)) >= 3:
+        return True
+    return False
+
+
+def _extract_json_ld_candidates(page_html: str, source: OpenNewsSource, base_url: str, limit: int = 24) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    for match in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>([\s\S]*?)</script>', page_html or "", flags=re.I):
+        raw = html.unescape(match.group(1) or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        queue = data if isinstance(data, list) else [data]
+        while queue:
+            item = queue.pop(0)
+            if isinstance(item, list):
+                queue.extend(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                queue.extend(graph)
+            item_type = item.get("@type") or ""
+            item_types = item_type if isinstance(item_type, list) else [item_type]
+            type_text = " ".join(str(t) for t in item_types).lower()
+            if not any(token in type_text for token in ("newsarticle", "article", "reportage", "blogposting")):
+                continue
+            title = str(item.get("headline") or item.get("name") or "").strip()
+            url = str(item.get("url") or item.get("mainEntityOfPage") or "").strip()
+            if isinstance(item.get("mainEntityOfPage"), dict):
+                url = str(item["mainEntityOfPage"].get("@id") or item["mainEntityOfPage"].get("url") or url)
+            if not title or not url:
+                continue
+            full_url = urljoin(base_url, url)
+            if not _looks_like_news_candidate_link(full_url, title, source):
+                continue
+            key = _canonical_news_url(full_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            published = str(item.get("datePublished") or item.get("dateModified") or "")
+            summary = str(item.get("description") or "")
+            candidates.append(_candidate_from_source(source, title=title, url=full_url, summary=summary, published_at=published))
+            if len(candidates) >= limit:
+                return candidates
+    return candidates
+
+
+def _extract_published_from_page(page_html: str) -> str:
+    published = _extract_meta_content(
+        page_html,
+        (
+            "article:published_time",
+            "article:modified_time",
+            "date",
+            "pubdate",
+            "publishdate",
+            "dc.date",
+            "dc:date",
+            "dcterms.created",
+            "dcterms.modified",
+            "sailthru.date",
+        ),
+    )
+    if published:
+        return published
+    for match in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>([\s\S]*?)</script>', page_html or "", flags=re.I):
+        raw = html.unescape(match.group(1) or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        queue = data if isinstance(data, list) else [data]
+        while queue:
+            item = queue.pop(0)
+            if isinstance(item, list):
+                queue.extend(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            graph = item.get("@graph")
+            if isinstance(graph, list):
+                queue.extend(graph)
+            published = str(item.get("datePublished") or item.get("dateModified") or "").strip()
+            if published:
+                return published
+    text = _strip_tags(page_html or "")
+    match = re.search(
+        r"(20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}(?:日)?(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)",
+        text,
+    )
+    return match.group(1) if match else ""
+
+
+def _enrich_candidate_timestamp(candidate: dict) -> dict:
+    item = dict(candidate)
+    if item.get("published_ts"):
+        return item
+    url = str(item.get("url") or "")
+    if not url.startswith("http"):
+        return item
+    try:
+        response = requests.get(url, headers=DEFAULT_HEADERS, timeout=12)
+    except Exception:
+        return item
+    if response.status_code >= 400 or "text/html" not in (response.headers.get("Content-Type", "").lower()):
+        return item
+    published = _extract_published_from_page(response.text)
+    published_ts = _parse_timestamp(published)
+    if published_ts:
+        item["published_at"] = _strip_tags(published)[:100]
+        item["published_ts"] = published_ts
+        item["is_latest"] = _is_recent_news_candidate(item, days=2)
+    if not item.get("summary"):
+        summary = _extract_meta_content(response.text, ("og:description", "description", "twitter:description"))
+        if summary:
+            item["summary"] = _strip_tags(summary)[:420]
+    return item
+
+
+def _extract_html_candidates(page_html: str, source: OpenNewsSource, limit: int = 24, base_url: str | None = None) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    base_url = base_url or source.latest_url or source.url
+    candidates.extend(_extract_json_ld_candidates(page_html, source, base_url, limit=limit))
+    for item in candidates:
+        key = _canonical_news_url(str(item.get("url") or ""))
+        if key:
+            seen.add(key)
+    for match in re.finditer(r'<a([^>]*)href=["\']([^"\']+)["\']([^>]*)>([\s\S]{4,360}?)</a>', page_html or "", flags=re.I):
+        before_attrs, href, after_attrs, label_html = match.groups()
+        attrs = f"{before_attrs or ''} {after_attrs or ''}"
+        label = _strip_tags(label_html)
+        title_match = re.search(r'(?:title|aria-label)=["\']([^"\']+)["\']', attrs or "", flags=re.I)
+        if title_match and len(_strip_tags(title_match.group(1))) > len(label):
+            label = _strip_tags(title_match.group(1))
+        if len(label) < 4:
+            continue
+        href = urljoin(base_url, html.unescape(href or "").strip())
+        if not _looks_like_news_candidate_link(href, label, source):
+            continue
+        key = _canonical_news_url(href)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        context_start = max(0, match.start() - 420)
+        context_end = min(len(page_html or ""), match.end() + 420)
+        context = page_html[context_start:context_end]
+        published_match = re.search(
+            r'(20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}(?:日)?(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)',
+            _strip_tags(context),
         )
+        published_at = published_match.group(1) if published_match else ""
+        candidates.append(_candidate_from_source(source, title=label[:180], url=href, published_at=published_at))
         if len(candidates) >= limit:
             break
     return candidates
@@ -178,63 +1262,231 @@ def _fetch_rss_candidates(source: OpenNewsSource, limit: int = 8) -> list[dict]:
         published = item.findtext("pubDate") or item.findtext("published") or ""
         if not title or not link:
             continue
-        results.append(
-            {
-                "id": uuid.uuid4().hex[:12],
-                "source_id": source.id,
-                "source_name": source.name,
-                "title": _strip_tags(title)[:180],
-                "url": link,
-                "summary": _strip_tags(description)[:360],
-                "published_at": _strip_tags(published)[:80],
-                "license": source.license,
-                "content_type": source.content_type,
-            }
-        )
+        results.append(_candidate_from_source(source, title=title, url=link, summary=description, published_at=published))
     return results
 
 
-def search_opennews_candidates(query: str, source_ids: Iterable[str] | None = None, limit_per_source: int = 6) -> list[dict]:
+def _source_crawl_urls(source: OpenNewsSource, query: str, *, pages: int = 5) -> list[str]:
+    if query and source.search_url:
+        base_url = source.search_url.format(query=quote_plus(query))
+    else:
+        base_url = source.latest_url
+    if not base_url:
+        return []
+    extra_latest_urls = {
+        "dvids": [
+            "https://www.dvidshub.net/news",
+            "https://www.dvidshub.net/news/list/most-recent",
+            "https://www.dvidshub.net/video",
+            "https://www.dvidshub.net/image",
+        ],
+        "dod": [
+            "https://www.defense.gov/News/Releases/",
+            "https://www.defense.gov/News/News-Stories/",
+            "https://www.defense.gov/News/Transcripts/",
+            "https://www.defense.gov/News/Contracts/",
+        ],
+        "indopacom": [
+            "https://www.pacom.mil/Media/News/",
+            "https://www.pacom.mil/Media/News/News-Article-View/",
+            "https://www.pacom.mil/Media/News/Tag/46565/indopacific/",
+        ],
+        "mod_jp": [
+            "https://www.mod.go.jp/j/press/news/",
+            "https://www.mod.go.jp/j/press/kisha/",
+            "https://www.mod.go.jp/j/press/press_release/",
+        ],
+        "mofa_jp": [
+            "https://www.mofa.go.jp/press/release/index.html",
+            "https://www.mofa.go.jp/press/kaiken/index.html",
+            "https://www.mofa.go.jp/mofaj/press/release/index.html",
+        ],
+        "mnd_tw": [
+            "https://www.mnd.gov.tw/News.aspx",
+            "https://www.mnd.gov.tw/Publish.aspx",
+            "https://www.mnd.gov.tw/NewUpload/News.aspx",
+        ],
+        "voa_zh": [
+            "https://www.voachinese.com/z/1739",
+            "https://www.voachinese.com/z/1754",
+            "https://www.voachinese.com/z/1779",
+            "https://www.voachinese.com/z/1785",
+        ],
+    }
+    urls: list[str] = []
+    seen: set[str] = set()
+    base_urls = [base_url]
+    if not query:
+        base_urls.extend(extra_latest_urls.get(source.id, []))
+    for base in base_urls:
+        parsed = urlparse(base)
+        for page in range(1, max(1, pages) + 1):
+            candidates = [base]
+            if page > 1:
+                query_items = parse_qsl(parsed.query, keep_blank_values=True)
+                query_items_with_page = [(key, value) for key, value in query_items if key.lower() not in {"page", "p", "pg"}]
+                query_items_with_page.append(("page", str(page)))
+                candidates.append(urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", urlencode(query_items_with_page), "")))
+                if parsed.path and not parsed.path.rstrip("/").endswith(str(page)):
+                    candidates.append(urlunparse((parsed.scheme, parsed.netloc, f"{parsed.path.rstrip('/')}/page/{page}", "", parsed.query, "")))
+                candidates.append(urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", urlencode(query_items_with_page[:-1] + [("Page", str(page))]), "")))
+                candidates.append(urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", urlencode(query_items_with_page[:-1] + [("start", str((page - 1) * 20))]), "")))
+            for url in candidates:
+                key = _canonical_news_url(url)
+                if key and key not in seen:
+                    seen.add(key)
+                    urls.append(url)
+    return urls
+
+
+def search_opennews_candidates_with_stats(
+    query: str,
+    source_ids: Iterable[str] | None = None,
+    *,
+    category: str = "all",
+    limit_per_source: int = 32,
+) -> dict:
     query = (query or "").strip()
     selected = set(source_ids or [])
-    sources = [source for source in OPENNEWS_SOURCES if not selected or source.id in selected]
+    category = (category or "all").strip() or "all"
+    sources = [
+        source
+        for source in OPENNEWS_SOURCES
+        if (not selected or source.id in selected) and (category == "all" or source.category == category)
+    ]
     all_candidates: list[dict] = []
+    stats: list[dict] = []
     for source in sources:
+        source_raw_count = 0
+        source_error = ""
+        skipped_error_count = 0
+        crawled_urls: list[str] = []
         if source.rss_url and not query:
-            all_candidates.extend(_fetch_rss_candidates(source, limit=limit_per_source))
-            continue
-        if not source.search_url:
-            continue
-        url = source.search_url.format(query=quote_plus(query or "news"))
-        try:
-            response = requests.get(url, headers=DEFAULT_HEADERS, timeout=18)
-        except Exception as exc:
-            all_candidates.append(
-                {
-                    "id": uuid.uuid4().hex[:12],
-                    "source_id": source.id,
-                    "source_name": source.name,
-                    "title": f"{source.name} 抓取失败",
-                    "url": source.url,
-                    "summary": str(exc),
-                    "published_at": "",
-                    "license": source.license,
-                    "content_type": source.content_type,
-                    "error": str(exc),
-                }
-            )
-            continue
-        if response.status_code >= 400:
-            continue
-        all_candidates.extend(_extract_html_candidates(response.text, source, limit=limit_per_source))
-    return all_candidates[:60]
+            rss_candidates = _fetch_rss_candidates(source, limit=limit_per_source * 4)
+            source_raw_count += len(rss_candidates)
+            all_candidates.extend(rss_candidates)
+
+        crawl_urls = _source_crawl_urls(source, query, pages=5)
+        for crawl_url in crawl_urls:
+            crawled_urls.append(crawl_url)
+            try:
+                response = requests.get(crawl_url, headers=DEFAULT_HEADERS, timeout=18)
+            except Exception as exc:
+                skipped_error_count += 1
+                if source_raw_count <= 0:
+                    source_error = str(exc)
+                continue
+            if response.status_code >= 400:
+                skipped_error_count += 1
+                if source_raw_count <= 0:
+                    source_error = f"HTTP {response.status_code}"
+                continue
+            page_candidates = _extract_html_candidates(response.text, source, limit=limit_per_source, base_url=crawl_url)
+            source_raw_count += len(page_candidates)
+            all_candidates.extend(page_candidates)
+        stats.append({
+            "source_id": source.id,
+            "source_name": source.name,
+            "raw_count": source_raw_count,
+            "crawled_pages": len(crawled_urls),
+            "skipped_error_count": skipped_error_count,
+            "error": source_error if source_raw_count <= 0 else "",
+        })
+    deduped = _dedupe_opennews_candidates(all_candidates)
+    enriched: list[dict] = []
+    missing_timestamp_checked = 0
+    for item in sorted(deduped, key=lambda value: float(value.get("published_ts") or 0), reverse=True):
+        if not item.get("published_ts") and missing_timestamp_checked < 90:
+            item = _enrich_candidate_timestamp(item)
+            missing_timestamp_checked += 1
+        enriched.append(item)
+    recent_items = [item for item in enriched if _is_recent_news_candidate(item, days=2)]
+    final_items = sorted(recent_items, key=lambda item: float(item.get("published_ts") or 0), reverse=True)[:150]
+    final_counts: dict[str, int] = {}
+    for item in final_items:
+        sid = str(item.get("source_id") or "")
+        final_counts[sid] = final_counts.get(sid, 0) + 1
+    for stat in stats:
+        stat["deduped_count"] = final_counts.get(stat["source_id"], 0)
+        stat["recent_window"] = _recent_news_window_label(days=2)
+    return {
+        "candidates": final_items,
+        "stats": stats,
+        "raw_count": len(all_candidates),
+        "deduped_count": len(deduped),
+        "recent_count": len(recent_items),
+        "recent_window": _recent_news_window_label(days=2),
+        "missing_timestamp_checked": missing_timestamp_checked,
+    }
+
+
+def search_opennews_candidates(
+    query: str,
+    source_ids: Iterable[str] | None = None,
+    *,
+    category: str = "all",
+    limit_per_source: int = 32,
+) -> list[dict]:
+    return search_opennews_candidates_with_stats(
+        query,
+        source_ids=source_ids,
+        category=category,
+        limit_per_source=limit_per_source,
+    ).get("candidates", [])
+
+
+def fetch_article_bundle(url: str, source_id: str = "") -> dict:
+    response = requests.get(url, headers=DEFAULT_HEADERS, timeout=20)
+    response.raise_for_status()
+    page_html = response.text
+    source = _source_by_id(source_id) if source_id else None
+    published = _extract_meta_content(page_html, ("article:published_time", "date", "pubdate", "publishdate", "dc.date"))
+    title = _extract_meta_content(page_html, ("og:title", "twitter:title"))
+    summary = _extract_meta_content(page_html, ("og:description", "description", "twitter:description"))
+    article_media = _merge_media_items(
+        extract_article_media(page_html, url, limit=16),
+        _extract_nested_source_media(page_html, url, limit=8),
+        limit=24,
+    )
+    return {
+        "text": _strip_tags(page_html)[:12000],
+        "media": article_media,
+        "published_at": published,
+        "published_ts": _parse_timestamp(published),
+        "title": title,
+        "summary": summary,
+        "source": source.__dict__ if source else {},
+    }
 
 
 def fetch_article_text(url: str) -> str:
-    response = requests.get(url, headers=DEFAULT_HEADERS, timeout=20)
-    response.raise_for_status()
-    text = _strip_tags(response.text)
-    return text[:12000]
+    return str(fetch_article_bundle(url).get("text") or "")
+
+
+def _collect_related_article_media(related_articles: list[dict], *, limit: int = 48) -> list[dict]:
+    collected: list[dict] = []
+    for item in related_articles or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            bundle = fetch_article_bundle(url, str(item.get("source_id") or ""))
+        except Exception:
+            continue
+        for media in bundle.get("media") or []:
+            if not isinstance(media, dict):
+                continue
+            enriched = dict(media)
+            enriched["source_url"] = url
+            enriched["source"] = enriched.get("source") or "related_article"
+            enriched["title"] = enriched.get("title") or item.get("title") or item.get("source_name") or ""
+            enriched["related_query"] = item.get("title") or ""
+            collected.append(enriched)
+            if len(collected) >= limit:
+                return _merge_media_items(collected, limit=limit)
+    return _merge_media_items(collected, limit=limit)
 
 
 def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: str = "") -> dict:
@@ -242,37 +1494,69 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
     if not api_key:
         raise RuntimeError("未配置 OPENAI_API_KEY，无法生成新闻稿")
     url = str(article.get("url") or "")
-    article_text = fetch_article_text(url) if url else ""
-    language = "繁體中文" if target_market == "tw" else "简体中文"
+    article_bundle = fetch_article_bundle(url, str(article.get("source_id") or "")) if url else {}
+    article_text = str(article_bundle.get("text") or "")
+    article_media = list(article_bundle.get("media") or [])
+    published_at = article.get("published_at") or article_bundle.get("published_at") or ""
+    related_articles = article.get("related_articles") if isinstance(article.get("related_articles"), list) else []
+    related_article_media = _collect_related_article_media(related_articles, limit=64)
+    related_context = "\n".join(
+        f"- {item.get('source_name') or item.get('trend_domain') or 'source'}｜{item.get('published_at') or ''}｜{item.get('title') or ''}｜{item.get('url') or ''}"
+        for item in related_articles[:8]
+        if isinstance(item, dict)
+    )
+    language = "繁體中文" if target_market == "tw" else ("日本語" if target_market == "jp" else "简体中文")
     model = (os.getenv("OPENAI_TEXT_MODEL") or os.getenv("OPENAI_VISION_MODEL") or "gpt-4o-mini").strip()
     prompt = f"""
-你是 iHouse 的 OpenNews 新闻视频编辑。请根据公开新闻源生成中文短视频新闻口播稿。
+你是 iHouse 的 OpenNews 新闻视频编辑。请根据公开新闻源生成短视频新闻口播稿。
 
 输出语言：{language}
 目标长度：1-3 分钟口播。
 来源名称：{article.get("source_name")}
 授权：{article.get("license")}
 标题：{article.get("title")}
+新闻发布时间：{published_at or "未知"}
 链接：{url}
 管理员补充要求：{notes or "无"}
 
 原始网页正文节选：
 {article_text or article.get("summary") or "无正文。"}
 
+相关英文报道列表（如果有，用于判断热点是否被多源报道，不要把未证实内容写成确定事实）：
+{related_context or "无"}
+
 要求：
 1. 只根据来源正文和管理员补充写，不要编造未出现的事实。
 2. 涉及军事、外交、台海、战争议题时，语气保持新闻说明，不煽动，不下定论。
-3. 必须输出：标题、摘要、口播稿、素材关键词、事实核验提醒、来源标注。
+3. 必须明确体现新闻来源和发布时间；如果发布时间未知，要写“来源页面未标注明确发布时间”。
 4. 口播稿适合直接配音，结构为：事件一句话、背景、影响、结尾提醒。
-5. 输出 JSON：
+5. 必须全部使用“输出语言”生成：标题、摘要、口播稿、素材关键词、事实核验提醒、来源标注、新闻时间标注。
+6. 输出 JSON：
 {{
   "video_title": "...",
   "summary": "...",
   "script": "...",
   "material_keywords": ["舰艇", "军演"],
+  "material_visual_plan": [
+    {{
+      "title": "这一组画面的中文名称",
+      "script_context": "对应哪一句或哪一段口播内容",
+      "visual_need": "要找什么具体画面，不要写抽象概念",
+      "queries": ["英文检索词1", "英文检索词2", "英文检索词3"]
+    }}
+  ],
   "fact_check_notes": ["..."],
-  "source_credit": "..."
+  "source_credit": "...",
+  "news_time_label": "..."
 }}
+
+素材计划要求：
+- material_visual_plan 必须围绕口播顺序拆成 4-8 组具体画面。
+- 每组 queries 必须是具体英文画面检索词，优先包含人物、机构、地点、产品、装备、事件名。
+- 不要使用泛化词，例如 generic politics、government meeting、press briefing，除非文案确实在讲发布会。
+- 如果文案讲 SpaceX/IPO/马斯克，画面计划应包含 SpaceX rocket、Elon Musk、IPO stock market、investors 等，不要写 White House。
+- 如果文案讲中国芯片/科技，画面计划应包含 semiconductor、chip factory、technology company、China tech 等。
+- 如果文案讲白宫发言人，才使用 White House press briefing、spokesperson 等。
 """.strip()
     response = requests.post(
         OPENAI_CHAT_COMPLETIONS_URL,
@@ -299,11 +1583,51 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
         if not match:
             raise
         draft = json.loads(match.group(0))
+    keyword_values = draft.get("material_keywords") or []
+    if not isinstance(keyword_values, list):
+        keyword_values = [str(keyword_values)]
+    related_query = " ".join(
+        part
+        for part in [
+            str(article.get("title") or ""),
+            str(article.get("summary") or ""),
+            " ".join(str(item).strip() for item in keyword_values[:4] if str(item).strip()),
+        ]
+        if part.strip()
+    )
+    category = str(article.get("category") or "all")
+    broad_queries = _expanded_media_queries(
+        str(article.get("title") or ""),
+        str(article.get("summary") or ""),
+        str(draft.get("summary") or ""),
+        " ".join(str(item).strip() for item in keyword_values if str(item).strip()),
+        str(draft.get("script") or "")[:600],
+        category=category,
+        limit=12,
+    )
+    related_media = discover_broad_opennews_media(
+        source_id=str(article.get("source_id") or ""),
+        category=category,
+        queries=broad_queries or [related_query],
+        article_url=url,
+        limit=80,
+    )
+    article_media = _merge_media_items(article_media, related_article_media, related_media, limit=180)
     draft["_meta"] = {
         "model": model,
         "source_url": url,
         "source_name": article.get("source_name"),
         "license": article.get("license"),
+        "category": article.get("category"),
+        "category_name": article.get("category_name"),
+        "published_at": published_at,
+        "article_media": article_media,
+        "material_search_queries": broad_queries,
+        "related_article_media_count": len(related_article_media),
+        "related_source_media_count": len(related_media),
+        "general_web_media_count": 0,
+        "direct_search_media_count": 0,
+        "strict_news_media_only": True,
         "created_at": time.time(),
     }
     return draft
@@ -329,79 +1653,286 @@ def _estimate_duration_seconds(text: str, *, minimum: int = 6, maximum: int = 38
     return max(minimum, min(maximum, int(round(visible_chars / 4.2)) or minimum))
 
 
+def _rank_media_for_segment(media: list[dict], *, segment_text: str, keyword_text: str, limit: int = 24) -> list[dict]:
+    segment_terms = _expanded_media_queries(segment_text, keyword_text, category="all", limit=12)
+    lowered_terms = [term.lower() for term in segment_terms if term]
+    compact_terms = [re.sub(r"[^a-z0-9\u4e00-\u9fffぁ-んァ-ヶ一-龯]+", "", term.lower()) for term in lowered_terms]
+    ranked: list[tuple[int, dict]] = []
+    for index, item in enumerate(media or []):
+        haystack = " ".join(
+            str(item.get(field) or "")
+            for field in ("url", "title", "source_url", "related_query", "theme_title")
+        ).lower()
+        compact_haystack = re.sub(r"[^a-z0-9\u4e00-\u9fffぁ-んァ-ヶ一-龯]+", "", haystack)
+        score = 100 if str(item.get("kind") or "").lower() == "video" else 0
+        for term in lowered_terms:
+            if term and term in haystack:
+                score += 55
+        for term in compact_terms:
+            if term and len(term) >= 4 and term in compact_haystack:
+                score += 35
+        related_query = str(item.get("related_query") or "").lower()
+        if related_query:
+            score += 18
+            for term in lowered_terms:
+                if term and (term in related_query or related_query in term):
+                    score += 65
+        source = str(item.get("source") or "")
+        if source == "general_web_search_media":
+            score += 20
+        if source == "general_web":
+            score += 12
+        score -= index
+        ranked.append((score, dict(item)))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [item for _, item in ranked[:limit]]
+
+
+def _dedupe_media_items(media: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[str] = set()
+    for item in media or []:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        identity_keys = _media_identity_keys(str(item.get("url") or ""))
+        if not identity_keys or identity_keys & seen:
+            continue
+        seen.update(identity_keys)
+        deduped.append(dict(item))
+    return deduped
+
+
+def _strict_news_media_items(media: list[dict]) -> list[dict]:
+    blocked_sources = {"general_web", "general_web_search_media"}
+    kept: list[dict] = []
+    for item in media or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip().lower()
+        if source in blocked_sources:
+            continue
+        kept.append(dict(item))
+    return kept
+
+
+def _build_opennews_theme_plan(script: str, keyword_text: str, category: str, *, max_themes: int = 6) -> list[dict]:
+    sentences = _split_script_sentences(script)
+    if not sentences:
+        return []
+    theme_count = min(max_themes, max(3, len(sentences)))
+    chunk_size = max(1, round(len(sentences) / theme_count))
+    themes: list[dict] = []
+    cursor = 0
+    while cursor < len(sentences):
+        chunk = "".join(sentences[cursor:cursor + chunk_size]).strip()
+        cursor += chunk_size
+        if not chunk:
+            continue
+        queries = _expanded_media_queries(chunk, category=category, limit=5)
+        if not queries:
+            queries = _expanded_media_queries(chunk, keyword_text, category=category, limit=5)
+        themes.append({
+            "title": queries[0] if queries else _compact_query(chunk, max_chars=24),
+            "script": chunk,
+            "queries": queries,
+        })
+        if len(themes) >= max_themes:
+            if cursor < len(sentences):
+                tail = "".join(sentences[cursor:]).strip()
+                if tail:
+                    themes[-1]["script"] = f"{themes[-1]['script']}{tail}"
+            break
+    return themes
+
+
+def _theme_plan_from_visual_plan(draft: dict, category: str) -> list[dict]:
+    visual_plan = draft.get("material_visual_plan") or draft.get("visual_plan") or []
+    if not isinstance(visual_plan, list):
+        return []
+    themes: list[dict] = []
+    for item in visual_plan[:10]:
+        if not isinstance(item, dict):
+            continue
+        title = _compact_query(str(item.get("title") or item.get("visual_need") or ""), max_chars=36)
+        script_context = _strip_tags(str(item.get("script_context") or item.get("script") or ""))
+        visual_need = _strip_tags(str(item.get("visual_need") or item.get("description") or ""))
+        raw_queries = item.get("queries") or item.get("search_queries") or []
+        if not isinstance(raw_queries, list):
+            raw_queries = [str(raw_queries)]
+        queries: list[str] = []
+        seen: set[str] = set()
+        for query in raw_queries:
+            compact = _compact_query(str(query or ""), max_chars=70)
+            key = compact.lower()
+            if compact and key not in seen:
+                seen.add(key)
+                queries.append(compact)
+        if len(queries) < 2:
+            queries.extend(_expanded_media_queries(title, visual_need, script_context, category=category, limit=5))
+        deduped_queries: list[str] = []
+        seen.clear()
+        for query in queries:
+            key = query.lower()
+            if len(query) < 2 or key in seen:
+                continue
+            seen.add(key)
+            deduped_queries.append(query)
+            if len(deduped_queries) >= 6:
+                break
+        if not deduped_queries:
+            continue
+        themes.append({
+            "title": title or deduped_queries[0],
+            "script": script_context or visual_need or title or deduped_queries[0],
+            "visual_need": visual_need,
+            "queries": deduped_queries,
+            "source": "ai_visual_plan",
+        })
+    return themes
+
+
+def _rank_media_by_theme_plan(media: list[dict], theme_plan: list[dict], keyword_text: str, *, per_theme_limit: int = 4) -> list[dict]:
+    if not theme_plan:
+        return _dedupe_media_items(_rank_media_for_segment(media, segment_text=keyword_text, keyword_text=keyword_text, limit=40))
+    used: set[str] = set()
+    ordered: list[dict] = []
+    for theme_index, theme in enumerate(theme_plan):
+        theme_text = " ".join([str(theme.get("script") or ""), str(theme.get("visual_need") or ""), " ".join(theme.get("queries") or [])])
+        ranked = _rank_media_for_segment(media, segment_text=theme_text, keyword_text=keyword_text, limit=60)
+        picked = 0
+        for item in ranked:
+            identity_keys = _media_identity_keys(str(item.get("url") or ""))
+            if not identity_keys or identity_keys & used:
+                continue
+            used.update(identity_keys)
+            enriched = dict(item)
+            enriched["theme_index"] = theme_index
+            enriched["theme_title"] = theme.get("title") or ""
+            ordered.append(enriched)
+            picked += 1
+            if picked >= per_theme_limit:
+                break
+    for item in _rank_media_for_segment(media, segment_text=keyword_text, keyword_text=keyword_text, limit=120):
+        identity_keys = _media_identity_keys(str(item.get("url") or ""))
+        if not identity_keys or identity_keys & used:
+            continue
+        used.update(identity_keys)
+        ordered.append(dict(item))
+    return ordered
+
+
+def _enrich_theme_plan_media(
+    theme_plan: list[dict],
+    category: str,
+    *,
+    article_url: str = "",
+    source_id: str = "",
+    limit_per_theme: int = 28,
+) -> list[dict]:
+    """For each script theme, crawl only configured news/official sources."""
+    collected: list[dict] = []
+    for theme_index, theme in enumerate(theme_plan or []):
+        queries = [str(query).strip() for query in (theme.get("queries") or []) if str(query).strip()]
+        if not queries:
+            queries = _expanded_media_queries(str(theme.get("script") or ""), category=category, limit=3)
+        if not queries:
+            continue
+        theme_media = _merge_media_items(
+            discover_broad_opennews_media(
+                source_id=source_id,
+                category=category,
+                queries=queries[:3],
+                article_url=article_url,
+                limit=max(10, limit_per_theme // 2),
+            ),
+            discover_general_search_media(queries[:4], limit=limit_per_theme),
+            discover_general_web_media(queries[:3], article_url=article_url, limit=limit_per_theme),
+            limit=limit_per_theme,
+        )
+        for item in theme_media:
+            enriched = dict(item)
+            enriched["theme_index"] = theme_index
+            enriched["theme_title"] = theme.get("title") or ""
+            collected.append(enriched)
+    return _merge_media_items(collected, limit=max(limit_per_theme, len(theme_plan or []) * limit_per_theme))
+
+
+def _distribute_ranked_media(ranked_groups: list[list[dict]], *, per_segment_limit: int = 12) -> list[list[dict]]:
+    """把同一个媒体 URL 尽量只分配给一个素材段。"""
+    used: set[str] = set()
+    normalized_groups = [_dedupe_media_items(group) for group in ranked_groups]
+    assigned_groups: list[list[dict]] = [[] for _ in normalized_groups]
+    cursors = [0 for _ in normalized_groups]
+    while True:
+        changed = False
+        for group_index, group in enumerate(normalized_groups):
+            if len(assigned_groups[group_index]) >= per_segment_limit:
+                continue
+            while cursors[group_index] < len(group):
+                item = group[cursors[group_index]]
+                cursors[group_index] += 1
+                identity_keys = _media_identity_keys(str(item.get("url") or ""))
+                if not identity_keys or identity_keys & used:
+                    continue
+                used.update(identity_keys)
+                assigned_groups[group_index].append(item)
+                changed = True
+                break
+        if not changed:
+            break
+    return assigned_groups
+
+
 def build_opennews_script_data(*, draft: dict, article: dict | None = None, target_market: str = "cn") -> dict:
-    """把 OpenNews 新闻稿转换成主生产流水线能消费的标准脚本结构。"""
+    """把 OpenNews 新闻稿转换成纯素材新闻视频脚本。"""
     article = article or {}
     script = str(draft.get("script") or "").strip()
     if not script:
         raise ValueError("新闻稿草稿缺少口播稿，无法生成视频")
 
-    sentences = _split_script_sentences(script)
-    if len(sentences) < 5:
-        sentences = sentences + ["请继续关注官方公开信息和后续进展。"]
-
-    total = len(sentences)
-    opening_end = max(1, min(total, round(total * 0.16)))
-    background_end = max(opening_end + 1, min(total, round(total * 0.48)))
-    transition_end = max(background_end + 1, min(total, background_end + 1))
-    detail_end = max(transition_end + 1, min(total, round(total * 0.84)))
-    if detail_end >= total:
-        detail_end = max(transition_end + 1, total - 1)
-
-    chunks = {
-        "opening": _join_sentences(sentences, 0, opening_end),
-        "background": _join_sentences(sentences, opening_end, background_end),
-        "transition": _join_sentences(sentences, background_end, transition_end),
-        "detail": _join_sentences(sentences, transition_end, detail_end),
-        "closing": _join_sentences(sentences, detail_end, total),
-    }
-
     keywords = draft.get("material_keywords") or []
     if not isinstance(keywords, list):
         keywords = [str(keywords)]
     keyword_text = "、".join(str(item).strip() for item in keywords if str(item).strip()) or str(draft.get("video_title") or article.get("title") or "news")
-    search_keyword = " ".join(str(item).strip() for item in keywords[:4] if str(item).strip()) or "military news official footage"
+    expanded_queries = list(draft.get("_meta", {}).get("material_search_queries") or [])
+    search_keyword = _opennews_entity_search_query(keywords, article, draft, limit=6)
+    if not search_keyword:
+        search_keyword = " ".join(str(item).strip() for item in keywords[:4] if str(item).strip()) or str(article.get("title") or "news")
     source_name = article.get("source_name") or draft.get("_meta", {}).get("source_name") or "OpenNews"
+    article_media = _strict_news_media_items(list(draft.get("_meta", {}).get("article_media") or article.get("media") or []))
+    news_time_label = str(draft.get("news_time_label") or article.get("published_at") or draft.get("_meta", {}).get("published_at") or "来源页面未标注明确发布时间").strip()
+    category_name = str(article.get("category_name") or draft.get("_meta", {}).get("category_name") or "新闻").strip()
+    category_id = str(article.get("category") or draft.get("_meta", {}).get("category") or "all")
+    theme_plan = _theme_plan_from_visual_plan(draft, category_id) or _build_opennews_theme_plan(script, keyword_text, category_id, max_themes=10)
+    theme_extra_media = _enrich_theme_plan_media(
+        theme_plan,
+        category_id,
+        article_url=str(article.get("url") or draft.get("_meta", {}).get("source_url") or ""),
+        source_id=str(article.get("source_id") or ""),
+        limit_per_theme=28,
+    )
+    ranked_media = _rank_media_by_theme_plan(
+        _merge_media_items(article_media, theme_extra_media, limit=240),
+        theme_plan,
+        keyword_text,
+        per_theme_limit=8,
+    )
 
     segments = [
         {
-            "type": "digital_human",
-            "start": 0,
-            "duration": _estimate_duration_seconds(chunks["opening"], minimum=7, maximum=16),
-            "script": chunks["opening"],
-            "action": "新闻主播正对镜头，语气冷静，开场交代事件核心。",
-        },
-        {
             "type": "material",
             "start": 0,
-            "duration": _estimate_duration_seconds(chunks["background"], minimum=14, maximum=36),
-            "script": chunks["background"],
+            "duration": _estimate_duration_seconds(script, minimum=35, maximum=180),
+            "script": script,
             "material_keyword": keyword_text,
             "material_search_keyword": search_keyword,
-            "material_desc": f"与 {source_name} 新闻相关的公开新闻画面、官方发布画面、地图、舰艇、飞机、军演或外交会晤素材。",
-        },
-        {
-            "type": "digital_human",
-            "start": 0,
-            "duration": _estimate_duration_seconds(chunks["transition"], minimum=5, maximum=9),
-            "script": chunks["transition"],
-            "action": "新闻主播短暂出镜，用一句话承上启下，提示接下来关注影响。",
-        },
-        {
-            "type": "material",
-            "start": 0,
-            "duration": _estimate_duration_seconds(chunks["detail"], minimum=16, maximum=38),
-            "script": chunks["detail"],
-            "material_keyword": keyword_text,
-            "material_search_keyword": search_keyword,
-            "material_desc": "新闻细节说明所需的公开视频、资料画面、地区背景、军事装备、现场或机构发布素材。",
-        },
-        {
-            "type": "digital_human",
-            "start": 0,
-            "duration": _estimate_duration_seconds(chunks["closing"], minimum=7, maximum=16),
-            "script": chunks["closing"],
-            "action": "新闻主播收尾，总结事实并提醒关注后续官方信息。",
+            "material_desc": f"严格使用与 {source_name} 这条新闻正文、相关报道或同类官方新闻源直接相关的图片/视频素材；宁可素材少，也不要使用和新闻事实不对应的泛化画面。",
+            "source_materials": ranked_media,
+            "material_theme_plan": theme_plan,
+            "theme_extra_media_count": len(theme_extra_media),
+            "disable_free_material_fallback": True,
+            "opennews_material_only": True,
+            "strict_news_media_only": True,
         },
     ]
 
@@ -414,7 +1945,7 @@ def build_opennews_script_data(*, draft: dict, article: dict | None = None, targ
     title = str(draft.get("video_title") or article.get("title") or "OpenNews 新闻视频").strip()
     summary = str(draft.get("summary") or "").strip()
     source_credit = str(draft.get("source_credit") or article.get("url") or "").strip()
-    social_post = "\n".join(part for part in [title, summary, f"来源：{source_credit}" if source_credit else ""] if part)
+    social_post = "\n".join(part for part in [title, f"类别：{category_name}", f"时间：{news_time_label}", summary, f"来源：{source_credit}" if source_credit else ""] if part)
     return {
         "title": title,
         "cover_title": title[:28],
@@ -425,8 +1956,11 @@ def build_opennews_script_data(*, draft: dict, article: dict | None = None, targ
             "article": article,
             "draft_meta": draft.get("_meta") or {},
             "source_credit": source_credit,
+            "news_time_label": news_time_label,
+            "category_name": category_name,
             "fact_check_notes": draft.get("fact_check_notes") or [],
             "material_keywords": keywords,
+            "article_media": article_media,
         },
     }
 

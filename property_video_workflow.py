@@ -338,7 +338,7 @@ def _property_subtitle_filter(subtitle_path: Path) -> str:
         "border_style": 1,
         "outline_width": 2.2,
         "shadow": 0.9,
-        "margin_v": 92,
+        "margin_v": 64,
         "margin_l": 112,
         "margin_r": 112,
     }

@@ -64,6 +64,22 @@ SUBTITLE_TEMPLATE_STYLES = {
         "margin_l": 72,
         "margin_r": 72,
     },
+    "property_clear": {
+        "font": SUBTITLE_FONT,
+        "size": 16,
+        "primary": "&H00FFFFFF",
+        "outline": "&H0013202C",
+        "back": "&H00000000",
+        "border_style": 1,
+        "outline_width": 2.2,
+        "shadow": 0.9,
+        "alignment": 2,
+        "margin_v": 64,
+        "margin_l": 112,
+        "margin_r": 112,
+        "bold": 1,
+        "spacing": 0.4,
+    },
 }
 
 WHISPER_LANGUAGE_MAP = {
@@ -189,6 +205,8 @@ def _subtitle_filter(subtitle_path: Path, template_id: str) -> str:
     style = (
         f"FontName={style_config['font']},"
         f"FontSize={style_config['size']},"
+        f"Bold={style_config.get('bold', 0)},"
+        f"Spacing={style_config.get('spacing', 0)},"
         f"PrimaryColour={style_config['primary']},"
         f"OutlineColour={style_config['outline']},"
         f"BackColour={style_config['back']},"
@@ -874,10 +892,23 @@ def _write_subtitles(segments: list[dict], output_path: Path) -> None:
     output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
-def compose_history_video(output_dir: str, result: dict, transition_id: str = "fade", subtitle_template_id: str = "classic") -> dict:
+def compose_history_video(
+    output_dir: str,
+    result: dict,
+    transition_id: str = "fade",
+    subtitle_template_id: str = "classic",
+    aspect_ratio: str = "vertical",
+) -> dict:
+    global WIDTH, HEIGHT
     output_root = Path(output_dir)
     if not output_root.exists():
         raise RuntimeError("输出目录不存在")
+
+    original_size = (WIDTH, HEIGHT)
+    if str(aspect_ratio or "").strip().lower() in {"horizontal", "16:9", "landscape"}:
+        WIDTH, HEIGHT = 1920, 1080
+    else:
+        WIDTH, HEIGHT = 1080, 1920
 
     work_dir = Path(tempfile.mkdtemp(prefix="ihouse_compose_"))
     build_dir = output_root / "final_edit"
@@ -1017,4 +1048,5 @@ def compose_history_video(output_dir: str, result: dict, transition_id: str = "f
             "subtitle_path": str(stored_subtitle),
         }
     finally:
+        WIDTH, HEIGHT = original_size
         shutil.rmtree(work_dir, ignore_errors=True)
