@@ -1649,7 +1649,7 @@
                   <label for="openNewsAspectSelect">视频画幅</label>
                   <select id="openNewsAspectSelect" class="select-input">
                     <option value="vertical">竖屏 9:16</option>
-                    <option value="horizontal">横屏 16:9</option>
+                    <option value="horizontal" selected>横屏 16:9</option>
                   </select>
                 </div>
               </div>
@@ -1963,7 +1963,7 @@
       previewData: null,
       selectedVoiceId: null,
       selectedAvatarId: null,
-      selectedScriptModel: 'claude',
+      selectedScriptModel: 'api_relay',
       selectedDigitalHumanEngine: 'volc_omnihuman',
       currentTaskId: null,
       currentHistoryId: null,
@@ -2429,6 +2429,25 @@
       `;
     }
 
+    function isOpenNewsResultLike(item = {}) {
+      const workflow = item.workflow_config || {};
+      const topicText = `${item.topic || ''} ${item.title || ''}`;
+      return Boolean(
+        workflow.opennews
+        || workflow.opennews_material_only
+        || workflow.digital_human_engine === 'opennews_material_only'
+        || /OpenNews/.test(topicText)
+      );
+    }
+
+    function composeRequestBodyForResult(item = {}) {
+      const workflow = item.workflow_config || {};
+      const aspect = isOpenNewsResultLike(item)
+        ? (els.openNewsAspectSelect?.value || workflow.compose_aspect_ratio || 'horizontal')
+        : (workflow.compose_aspect_ratio || workflow.aspect_ratio || 'vertical');
+      return { aspect_ratio: aspect === 'vertical' ? 'vertical' : 'horizontal' };
+    }
+
     function closeProduceConfirm() {
       if (!els.produceConfirmOverlay) return;
       els.produceConfirmOverlay.style.display = 'none';
@@ -2442,7 +2461,7 @@
       const digitalHumanEngine = currentDigitalHumanEngineObject();
       const rows = [
         { label: copyText('previewLabelMarket', '目标市场'), value: localizedTargetMarketName(state.selectedTargetMarket, market?.name || '-') },
-        { label: copyText('previewLabelScriptModel', '文案模型'), value: scriptModel?.name || 'Claude' },
+        { label: copyText('previewLabelScriptModel', '文案模型'), value: scriptModel?.name || 'API中转模型' },
         { label: copyText('workflowLabelVoice', '本次配音方案'), value: voice ? localizedVoicePreset(voice).name : '-' },
         { label: copyText('workflowLabelAvatar', '本次主播图片'), value: avatar ? localizedAvatarName(avatar) : '-' },
         { label: copyText('workflowLabelDigitalHumanEngine', '数字人生成方式'), value: digitalHumanEngine?.name || '火山 OmniHuman' },
@@ -3171,13 +3190,18 @@
 
     async function composeHistoryFromList(historyId, button) {
       if (!historyId) return;
+      const historyItem = (state.historyItems || []).find(item => item.history_id === historyId) || {};
       const originalText = button?.textContent || copyText('historyContinueCompose', '继续成片');
       if (button) {
         button.disabled = true;
         button.textContent = copyText('composingVideo', '正在生成成片...');
       }
       try {
-        const res = await fetch(`/api/history/${historyId}/compose`, { method: 'POST' });
+        const res = await fetch(`/api/history/${historyId}/compose`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(composeRequestBodyForResult(historyItem)),
+        });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || copyText('composeVideoFailed', '生成成片失败'));
         state.currentHistoryId = historyId;
@@ -3236,6 +3260,8 @@
         setHeroStatus(copyText('composingVideo', '正在生成成片...'));
         const res = await fetch(`/api/history/${state.currentHistoryId}/compose`, {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(composeRequestBodyForResult(state.resultData || {})),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || copyText('composeVideoFailed', '生成成片失败'));
@@ -4278,7 +4304,7 @@
             draft,
             target_market: els.openNewsMarketSelect?.value || state.selectedTargetMarket || 'cn',
             voice_preset_id: els.openNewsVoiceSelect?.value || '',
-            aspect_ratio: els.openNewsAspectSelect?.value || 'vertical',
+            aspect_ratio: els.openNewsAspectSelect?.value || 'horizontal',
           }),
         });
         const data = await res.json().catch(() => ({}));
@@ -4660,7 +4686,7 @@
       state.selectedComposeTransitionId = state.options?.composition_transitions?.[0]?.id || 'fade';
       state.selectedSubtitleTemplateId = state.options?.subtitle_templates?.[0]?.id || 'classic';
       const scriptModels = state.options?.script_models || [];
-      state.selectedScriptModel = (scriptModels.find(item => item.default)?.id || scriptModels[0]?.id || 'claude');
+      state.selectedScriptModel = (scriptModels.find(item => item.default)?.id || scriptModels[0]?.id || 'api_relay');
       const engines = state.options?.digital_human_engines || [];
       state.selectedDigitalHumanEngine = (engines.find(item => item.default)?.id || engines[0]?.id || 'volc_omnihuman');
       renderVoicePresets();
@@ -4885,7 +4911,7 @@
 
     function syncWebSearchAvailability() {
       if (els.scriptModelHint) {
-        const currentName = currentScriptModelObject()?.name || 'Claude';
+        const currentName = currentScriptModelObject()?.name || 'API中转模型';
         els.scriptModelHint.textContent = `仅管理员可切换文案模型。实时联网检索会跟随当前模型 ${currentName} 一起生效。`;
       }
     }
@@ -4895,14 +4921,14 @@
       const isAdmin = state.currentUser?.role === 'admin';
       if (!els.scriptModelField || !els.scriptModelGrid) return;
       if (!isAdmin || models.length <= 1) {
-        state.selectedScriptModel = models[0]?.id || 'claude';
+        state.selectedScriptModel = models[0]?.id || 'api_relay';
         els.scriptModelField.style.display = 'none';
         els.scriptModelGrid.innerHTML = '';
         syncWebSearchAvailability();
         return;
       }
       if (!models.some(item => item.id === state.selectedScriptModel)) {
-        state.selectedScriptModel = models.find(item => item.default)?.id || models[0]?.id || 'claude';
+        state.selectedScriptModel = models.find(item => item.default)?.id || models[0]?.id || 'api_relay';
       }
       els.scriptModelField.style.display = 'grid';
       els.scriptModelGrid.innerHTML = models.map(model => `
@@ -4919,9 +4945,9 @@
       `).join('');
       els.scriptModelGrid.querySelectorAll('[data-script-model]').forEach(card => {
         card.addEventListener('click', () => {
-          state.selectedScriptModel = card.dataset.scriptModel || 'claude';
+          state.selectedScriptModel = card.dataset.scriptModel || 'api_relay';
           renderScriptModels();
-          setHeroStatus(`文案模型：${currentScriptModelObject()?.name || 'Claude'}`);
+          setHeroStatus(`文案模型：${currentScriptModelObject()?.name || 'API中转模型'}`);
         });
       });
       syncWebSearchAvailability();
@@ -5006,7 +5032,7 @@
         formData.append('instruction', instruction.trim());
         formData.append('target_market', state.selectedTargetMarket);
         formData.append('department_id', state.selectedDepartmentId);
-        formData.append('script_model', state.selectedScriptModel || 'claude');
+        formData.append('script_model', state.selectedScriptModel || 'api_relay');
         formData.append('use_web_search', els.webSearchToggle.checked ? 'true' : 'false');
         const res = await fetch('/api/script-preview/revise', { method: 'POST', body: formData });
         const data = await res.json();
@@ -5162,7 +5188,7 @@
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelTitle || '视频标题')}</div><div class="value">${escapeHtml(preview.title || copyText('statusNotGenerated', '未生成'))}</div></div>
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelCover || '封面标题')}</div><div class="value">${escapeHtml(preview.cover_title || copyText('statusNotGenerated', '未生成'))}</div></div>
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelDuration || '预计总时长')}</div><div class="value">${escapeHtml(String(preview.total_duration || 0))} ${escapeHtml(copyText('unitSeconds', '秒'))}</div></div>
-        <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelScriptModel || '文案模型')}</div><div class="value">${escapeHtml(preview.script_model_name || currentScriptModelObject()?.name || 'Claude')}</div></div>
+        <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelScriptModel || '文案模型')}</div><div class="value">${escapeHtml(preview.script_model_name || currentScriptModelObject()?.name || 'API中转模型')}</div></div>
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelWebSearch || '实时联网检索')}</div><div class="value">${preview.web_search_enabled ? copyText('statusOn', '已开启') : copyText('statusOff', '未开启')}</div></div>
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelMarket || '目标市场')}</div><div class="value">${escapeHtml(localizedTargetMarketName(preview.target_market, ((state.options?.target_markets || []).find(item => item.id === preview.target_market)?.name) || copyText('statusUnset', '未设置')))}</div></div>
         <div class="summary-card"><div class="label">${escapeHtml(currentCopy().previewLabelDepartment || '业务部门')}</div><div class="value">${escapeHtml(localizedDepartmentName(preview.department_id, ((state.options?.departments || []).find(item => item.id === preview.department_id)?.name) || copyText('statusUnset', '未设置')))}</div></div>
@@ -5420,7 +5446,7 @@
       const webSearchEnabled = !!result.workflow_config?.web_search_enabled;
       const targetMarket = (state.options?.target_markets || []).find(item => item.id === result.workflow_config?.target_market);
       const department = (state.options?.departments || []).find(item => item.id === result.workflow_config?.department_id);
-      const scriptModelName = result.workflow_config?.script_model_name || 'Claude';
+      const scriptModelName = result.workflow_config?.script_model_name || 'API中转模型';
       const engineId = result.workflow_config?.digital_human_engine || 'volc_omnihuman';
       const engineOption = (state.options?.digital_human_engines || []).find(item => item.id === engineId);
       const engineName = result.workflow_config?.digital_human_engine_name || engineOption?.name || '火山 OmniHuman';
@@ -5697,7 +5723,7 @@
         formData.append('use_web_search', els.webSearchToggle.checked ? 'true' : 'false');
         formData.append('target_market', state.selectedTargetMarket);
         formData.append('department_id', state.selectedDepartmentId);
-        formData.append('script_model', state.selectedScriptModel || 'claude');
+        formData.append('script_model', state.selectedScriptModel || 'api_relay');
         const res = await fetch('/api/script-preview', { method: 'POST', body: formData });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || copyText('previewFailed', '文案生成失败'));
@@ -5764,7 +5790,7 @@
       formData.append('department_id', state.selectedDepartmentId);
       formData.append('voice_preset_id', state.selectedVoiceId);
       formData.append('avatar_id', state.selectedAvatarId);
-      formData.append('script_model', state.selectedScriptModel || 'claude');
+      formData.append('script_model', state.selectedScriptModel || 'api_relay');
       formData.append('digital_human_engine', state.selectedDigitalHumanEngine || 'volc_omnihuman');
       formData.append('speed', els.speedRange.value);
       setProductionLock(true, copyText('produceCreating', '正在创建生产任务...'));
@@ -5918,7 +5944,7 @@
       state.selectedDepartmentId = defaults.departmentId;
       state.selectedTargetMarket = defaults.targetMarket;
       const scriptModels = state.options?.script_models || [];
-      state.selectedScriptModel = scriptModels.find(item => item.default)?.id || scriptModels[0]?.id || 'claude';
+      state.selectedScriptModel = scriptModels.find(item => item.default)?.id || scriptModels[0]?.id || 'api_relay';
       state.productionLocked = false;
       state.expandedPreviewSegment = 1;
       state.activeTasksExpanded = false;

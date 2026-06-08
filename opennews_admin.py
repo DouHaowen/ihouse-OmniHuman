@@ -24,10 +24,183 @@ from xml.etree import ElementTree as ET
 import requests
 
 
-OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_HEADERS = {
     "User-Agent": "iHouse-OpenNews-Test/0.1 (+https://aiagent.office.ihousejapan.cn)",
 }
+
+
+def _get_openai_relay_api_key() -> str:
+    return (
+        os.getenv("OPENAI_RELAY_API_KEY")
+        or os.getenv("SUB2API_API_KEY")
+        or os.getenv("API_RELAY_OPENAI_API_KEY")
+        or ""
+    ).strip()
+
+
+def _get_openai_relay_base_url() -> str:
+    return (os.getenv("OPENAI_RELAY_BASE_URL") or "https://sub2api.ihousejapan.cn").strip().rstrip("/")
+
+
+def _get_openai_relay_responses_url() -> str:
+    base_url = _get_openai_relay_base_url()
+    if base_url.endswith("/responses"):
+        return base_url
+    if base_url.endswith("/v1"):
+        return f"{base_url}/responses"
+    return f"{base_url}/v1/responses"
+
+
+def _get_openai_relay_model() -> str:
+    return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.5").strip() or "gpt-5.5"
+
+
+def _get_openai_relay_reasoning_effort() -> str:
+    return (os.getenv("OPENAI_RELAY_REASONING_EFFORT") or "xhigh").strip() or "xhigh"
+
+
+def _get_opennews_relay_reasoning_effort() -> str:
+    # OpenNews draft generation is user-facing and synchronous; keep it lighter
+    # than the main long-form script model so the page does not sit on timeouts.
+    return (
+        os.getenv("OPENAI_RELAY_OPENNEWS_REASONING_EFFORT")
+        or os.getenv("OPENNEWS_RELAY_REASONING_EFFORT")
+        or "medium"
+    ).strip() or "medium"
+
+
+def _get_opennews_relay_timeout_seconds() -> int:
+    raw_value = (
+        os.getenv("OPENAI_RELAY_OPENNEWS_TIMEOUT_SECONDS")
+        or os.getenv("OPENNEWS_RELAY_TIMEOUT_SECONDS")
+        or "240"
+    )
+    try:
+        return max(60, min(420, int(float(raw_value))))
+    except (TypeError, ValueError):
+        return 240
+
+
+def _extract_openai_relay_text(payload: dict) -> str:
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+    chunks: list[str] = []
+    for item in payload.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []) or []:
+            if isinstance(content, dict):
+                text = content.get("text") or content.get("output_text")
+                if isinstance(text, str):
+                    chunks.append(text)
+    return "\n".join(chunks).strip()
+
+
+def _extract_json_object_text(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*```$", "", text).strip()
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        return match.group(0)
+    start = text.find("{")
+    end = text.rfind("}")
+    if 0 <= start < end:
+        return text[start : end + 1]
+    return ""
+
+
+def _repair_opennews_relay_json(raw: str) -> dict:
+    api_key = _get_openai_relay_api_key()
+    if not api_key:
+        raise RuntimeError("未配置 OPENAI_RELAY_API_KEY，无法修复新闻稿 JSON")
+    repair_prompt = f"""
+下面是一个 OpenNews 新闻稿模型输出，但它不是合法 JSON。请把它修复成严格 JSON。
+
+必须只返回 JSON，不要解释。字段必须包含：
+video_title, summary, script, material_keywords, material_visual_plan, fact_check_notes, source_credit, news_time_label
+
+原始输出：
+{(raw or "")[:12000]}
+""".strip()
+    response = requests.post(
+        _get_openai_relay_responses_url(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": _get_openai_relay_model(),
+            "input": repair_prompt,
+            "instructions": "你只输出可解析 JSON。",
+            "max_output_tokens": 4096,
+            "reasoning": {"effort": "minimal"},
+            "text": {"format": {"type": "json_object"}},
+            "store": False,
+        },
+        timeout=_get_opennews_relay_timeout_seconds(),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"API 中转新闻稿 JSON 修复失败：{response.status_code} {response.text[:500]}")
+    repaired_raw = _extract_openai_relay_text(response.json())
+    candidate = _extract_json_object_text(repaired_raw)
+    if not candidate:
+        raise RuntimeError("API 中转新闻稿生成失败：JSON 修复后仍未返回可解析 JSON")
+    return json.loads(candidate)
+
+
+def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
+    api_key = _get_openai_relay_api_key()
+    if not api_key:
+        raise RuntimeError("未配置 OPENAI_RELAY_API_KEY，无法生成新闻稿")
+    efforts = [_get_opennews_relay_reasoning_effort()]
+    if efforts[0] != "minimal":
+        efforts.append("minimal")
+    last_error: Exception | None = None
+    for attempt, effort in enumerate(efforts, start=1):
+        try:
+            response = requests.post(
+                _get_openai_relay_responses_url(),
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": _get_openai_relay_model(),
+                    "input": prompt,
+                    "instructions": "你只输出可解析 JSON。",
+                    "max_output_tokens": max_output_tokens,
+                    "reasoning": {"effort": effort},
+                    "text": {"format": {"type": "json_object"}},
+                    "store": False,
+                },
+                timeout=_get_opennews_relay_timeout_seconds(),
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(f"API 中转新闻稿生成失败：{response.status_code} {response.text[:500]}")
+            raw = _extract_openai_relay_text(response.json())
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                candidate = _extract_json_object_text(raw)
+                if candidate:
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError as exc:
+                        last_error = exc
+                else:
+                    last_error = RuntimeError("模型未返回 JSON 对象")
+                if attempt < len(efforts):
+                    time.sleep(1.5)
+                    continue
+                return _repair_opennews_relay_json(raw)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            if attempt < len(efforts):
+                time.sleep(1.5)
+                continue
+            raise RuntimeError(
+                "API 中转模型生成 OpenNews 新闻稿超时，请稍后重试；系统已改用更轻推理强度重试但仍未返回。"
+            ) from exc
+    raise RuntimeError(f"API 中转新闻稿生成失败：{last_error}")
 
 
 @dataclass(frozen=True)
@@ -1437,7 +1610,8 @@ def search_opennews_candidates(
 
 def fetch_article_bundle(url: str, source_id: str = "") -> dict:
     response = requests.get(url, headers=DEFAULT_HEADERS, timeout=20)
-    response.raise_for_status()
+    if response.status_code >= 400:
+        raise RuntimeError(f"新闻正文抓取失败：HTTP {response.status_code} {url}")
     page_html = response.text
     source = _source_by_id(source_id) if source_id else None
     published = _extract_meta_content(page_html, ("article:published_time", "date", "pubdate", "publishdate", "dc.date"))
@@ -1490,11 +1664,16 @@ def _collect_related_article_media(related_articles: list[dict], *, limit: int =
 
 
 def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: str = "") -> dict:
-    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    api_key = _get_openai_relay_api_key()
     if not api_key:
-        raise RuntimeError("未配置 OPENAI_API_KEY，无法生成新闻稿")
+        raise RuntimeError("未配置 OPENAI_RELAY_API_KEY，无法生成新闻稿")
     url = str(article.get("url") or "")
-    article_bundle = fetch_article_bundle(url, str(article.get("source_id") or "")) if url else {}
+    article_fetch_warning = ""
+    try:
+        article_bundle = fetch_article_bundle(url, str(article.get("source_id") or "")) if url else {}
+    except Exception as exc:
+        article_fetch_warning = str(exc)
+        article_bundle = {}
     article_text = str(article_bundle.get("text") or "")
     article_media = list(article_bundle.get("media") or [])
     published_at = article.get("published_at") or article_bundle.get("published_at") or ""
@@ -1506,12 +1685,11 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
         if isinstance(item, dict)
     )
     language = "繁體中文" if target_market == "tw" else ("日本語" if target_market == "jp" else "简体中文")
-    model = (os.getenv("OPENAI_TEXT_MODEL") or os.getenv("OPENAI_VISION_MODEL") or "gpt-4o-mini").strip()
     prompt = f"""
 你是 iHouse 的 OpenNews 新闻视频编辑。请根据公开新闻源生成短视频新闻口播稿。
 
 输出语言：{language}
-目标长度：1-3 分钟口播。
+目标长度：短新闻口播，约 30-45 秒。简体/繁体中文约 120-180 字；日语约 220-320 字。
 来源名称：{article.get("source_name")}
 授权：{article.get("license")}
 标题：{article.get("title")}
@@ -1520,18 +1698,24 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
 管理员补充要求：{notes or "无"}
 
 原始网页正文节选：
-{article_text or article.get("summary") or "无正文。"}
+{article_text or article.get("summary") or article.get("title") or "无正文。"}
+
+正文抓取状态：
+{article_fetch_warning or "正文抓取成功。"}
 
 相关英文报道列表（如果有，用于判断热点是否被多源报道，不要把未证实内容写成确定事实）：
 {related_context or "无"}
 
 要求：
-1. 只根据来源正文和管理员补充写，不要编造未出现的事实。
+1. 只根据来源正文、候选摘要、相关报道和管理员补充写，不要编造未出现的事实。
 2. 涉及军事、外交、台海、战争议题时，语气保持新闻说明，不煽动，不下定论。
 3. 必须明确体现新闻来源和发布时间；如果发布时间未知，要写“来源页面未标注明确发布时间”。
-4. 口播稿适合直接配音，结构为：事件一句话、背景、影响、结尾提醒。
-5. 必须全部使用“输出语言”生成：标题、摘要、口播稿、素材关键词、事实核验提醒、来源标注、新闻时间标注。
-6. 输出 JSON：
+4. 口播稿只写一段短文案，像短新闻主播口播一样，把事件讲清楚即可，不要扩展成长篇分析。
+5. 口播稿不要写成提纲、栏目、小节或说明文，不要出现“一句话看事件”“背景方面”“影响方面”“首先/其次/最后”这类结构提示语，也不要用项目符号。
+6. 新闻来源和发布时间要自然融入口播正文里；事实边界只用一句轻轻带过，不要单独分成“来源标注”“背景分析”“影响分析”式段落。
+7. 句子要短而顺，适合字幕切分；整篇读起来要像完整短文案，不要像摘要拼接，也不要超过目标长度。
+8. 必须全部使用“输出语言”生成：标题、摘要、口播稿、素材关键词、事实核验提醒、来源标注、新闻时间标注。
+9. 输出 JSON：
 {{
   "video_title": "...",
   "summary": "...",
@@ -1558,31 +1742,7 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
 - 如果文案讲中国芯片/科技，画面计划应包含 semiconductor、chip factory、technology company、China tech 等。
 - 如果文案讲白宫发言人，才使用 White House press briefing、spokesperson 等。
 """.strip()
-    response = requests.post(
-        OPENAI_CHAT_COMPLETIONS_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "你只输出可解析 JSON。"},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.35,
-            "max_tokens": 4096,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=120,
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"OpenAI 新闻稿生成失败：{response.status_code} {response.text[:500]}")
-    raw = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-    try:
-        draft = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            raise
-        draft = json.loads(match.group(0))
+    draft = _request_opennews_relay_json(prompt, max_output_tokens=4096)
     keyword_values = draft.get("material_keywords") or []
     if not isinstance(keyword_values, list):
         keyword_values = [str(keyword_values)]
@@ -1614,7 +1774,7 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
     )
     article_media = _merge_media_items(article_media, related_article_media, related_media, limit=180)
     draft["_meta"] = {
-        "model": model,
+        "model": _get_openai_relay_model(),
         "source_url": url,
         "source_name": article.get("source_name"),
         "license": article.get("license"),

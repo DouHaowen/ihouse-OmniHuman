@@ -477,10 +477,7 @@ OMNIHUMAN_RUNNING_ITEMS: list[dict] = []
 HUNYUAN_ENGINE_ID = "hunyuan_local"
 INFINITETALK_ENGINE_ID = "infinitetalk_local"
 VOLC_ENGINE_ID = "volc_omnihuman"
-SCRIPT_MODEL_CLAUDE = "claude"
-SCRIPT_MODEL_GLM = "glm_5_1"
-SCRIPT_MODEL_CHATGPT = "chatgpt"
-SCRIPT_MODEL_QWEN_LOCAL = "qwen_local"
+SCRIPT_MODEL_API_RELAY = "api_relay"
 DIGITAL_HUMAN_ENGINES = [
     {
         "id": VOLC_ENGINE_ID,
@@ -506,32 +503,11 @@ DIGITAL_HUMAN_ENGINES = [
 ]
 SCRIPT_MODEL_OPTIONS = [
     {
-        "id": SCRIPT_MODEL_CLAUDE,
-        "name": "Claude",
-        "description": "当前默认，支持实时联网检索，适合最新资讯与结构化脚本生成。",
+        "id": SCRIPT_MODEL_API_RELAY,
+        "name": "API中转模型",
+        "description": "系统唯一主文案模型：走 sub2api 中转站 Responses 接口，默认 gpt-5.5。",
         "admin_only": False,
         "default": True,
-    },
-    {
-        "id": SCRIPT_MODEL_GLM,
-        "name": "GLM-5.1",
-        "description": "智谱旗舰模型，中文写作和结构化输出更强，适合内容文案测试。",
-        "admin_only": True,
-        "default": False,
-    },
-    {
-        "id": SCRIPT_MODEL_CHATGPT,
-        "name": "ChatGPT",
-        "description": "OpenAI GPT-5 mini 路线，作为管理员可选文案模型保留。",
-        "admin_only": True,
-        "default": False,
-    },
-    {
-        "id": SCRIPT_MODEL_QWEN_LOCAL,
-        "name": "本地 Qwen 122B",
-        "description": "管理员测试：走本地 OpenAI 兼容端点，适合对比中文文案生成效果。",
-        "admin_only": True,
-        "default": False,
     },
 ]
 SCRIPT_AI_MAX_CONCURRENT = max(1, int(os.getenv("SCRIPT_AI_MAX_CONCURRENT", "1")))
@@ -918,20 +894,11 @@ def _digital_human_engine_options_for_user(user: Optional[dict]) -> list[dict]:
 
 
 def _normalize_script_model(model_id: str | None, user: Optional[dict] = None) -> str:
-    requested = str(model_id or "").strip().lower()
-    if requested == SCRIPT_MODEL_CLAUDE:
-        return SCRIPT_MODEL_CLAUDE
-    if requested in {SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT, SCRIPT_MODEL_QWEN_LOCAL} and _is_admin(user):
-        return requested
-    return SCRIPT_MODEL_CLAUDE
+    return SCRIPT_MODEL_API_RELAY
 
 
 def _script_model_label(model_id: str | None) -> str:
-    normalized = _normalize_script_model(model_id, {"role": "admin"} if model_id in {SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT, SCRIPT_MODEL_QWEN_LOCAL} else None)
-    for item in SCRIPT_MODEL_OPTIONS:
-        if item["id"] == normalized:
-            return item["name"]
-    return "Claude"
+    return "API中转模型"
 
 
 def _script_model_options_for_user(user: Optional[dict]) -> list[dict]:
@@ -1245,6 +1212,10 @@ def run_pipeline_with_progress(
                 "script_model_name": _script_model_label(script_model),
                 "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
                 "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+                "compose_aspect_ratio": workflow_config.get("compose_aspect_ratio") or workflow_config.get("aspect_ratio") or "vertical",
+                "source": workflow_config.get("source") or {},
+                "opennews": bool(workflow_config.get("opennews")),
+                "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
                 "digital_human_engine": digital_human_engine,
                 "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
             },
@@ -1328,6 +1299,10 @@ def run_pipeline_with_progress(
                 "script_model_name": _script_model_label(script_model),
                 "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
                 "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+                "compose_aspect_ratio": workflow_config.get("compose_aspect_ratio") or workflow_config.get("aspect_ratio") or "vertical",
+                "source": workflow_config.get("source") or {},
+                "opennews": bool(workflow_config.get("opennews")),
+                "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
                 "digital_human_engine": digital_human_engine,
                 "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
             },
@@ -1736,6 +1711,10 @@ def run_resume_pipeline_with_progress(task_id: str):
             },
             "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
             "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+            "compose_aspect_ratio": workflow_config.get("compose_aspect_ratio") or workflow_config.get("aspect_ratio") or "vertical",
+            "source": workflow_config.get("source") or {},
+            "opennews": bool(workflow_config.get("opennews")),
+            "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
             "digital_human_engine": digital_human_engine,
             "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
         }
@@ -2677,8 +2656,9 @@ def _make_produce_submission_key(
     web_search_enabled: bool,
     target_market: str,
     department_id: str,
-    script_model: str = SCRIPT_MODEL_CLAUDE,
+    script_model: str = SCRIPT_MODEL_API_RELAY,
     digital_human_engine: str = VOLC_ENGINE_ID,
+    compose_aspect_ratio: str = "",
 ) -> str:
     payload = {
         "owner_username": owner_username or "",
@@ -2692,6 +2672,7 @@ def _make_produce_submission_key(
         "department_id": department_id or "",
         "script_model": _normalize_script_model(script_model),
         "digital_human_engine": digital_human_engine or VOLC_ENGINE_ID,
+        "compose_aspect_ratio": (compose_aspect_ratio or "").strip().lower(),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -2895,7 +2876,7 @@ def _build_script_preview_payload(
     web_search_enabled: bool = False,
     target_market: str = "cn",
     department_id: str = "real_estate",
-    script_model: str = SCRIPT_MODEL_CLAUDE,
+    script_model: str = SCRIPT_MODEL_API_RELAY,
     source_info: Optional[dict] = None,
     input_topic: str = "",
 ) -> dict:
@@ -3671,7 +3652,7 @@ async def admin_opennews_produce(request: Request):
         voice_preset_id = _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female"
     voice_preset = _get_voice_preset(voice_preset_id, target_market)
     voice_preset["selected_speed"] = float(payload.get("speed") or voice_preset.get("default_speed") or 1.1)
-    aspect_ratio = str(payload.get("aspect_ratio") or "vertical").strip().lower()
+    aspect_ratio = str(payload.get("aspect_ratio") or "horizontal").strip().lower()
     if aspect_ratio not in {"vertical", "horizontal"}:
         aspect_ratio = "vertical"
     try:
@@ -3690,8 +3671,9 @@ async def admin_opennews_produce(request: Request):
         web_search_enabled=False,
         target_market=target_market,
         department_id=department_id,
-        script_model=SCRIPT_MODEL_CHATGPT,
+        script_model=SCRIPT_MODEL_API_RELAY,
         digital_human_engine="opennews_material_only",
+        compose_aspect_ratio=aspect_ratio,
     )
     reusable_task = _find_reusable_running_task(owner_username=user.get("username", ""), submission_key=submission_key)
     if reusable_task:
@@ -3721,11 +3703,11 @@ async def admin_opennews_produce(request: Request):
             "web_search_enabled": False,
             "target_market": target_market,
             "department_id": department_id,
-            "compose_transition_id": "fade",
-            "subtitle_template_id": "property_clear",
-            "compose_aspect_ratio": aspect_ratio,
-            "source": {"kind": "opennews", "article": article},
-            "script_model": SCRIPT_MODEL_CHATGPT,
+                "compose_transition_id": "fade",
+                "subtitle_template_id": "property_clear",
+                "compose_aspect_ratio": aspect_ratio,
+                "source": {"kind": "opennews", "article": article},
+            "script_model": SCRIPT_MODEL_API_RELAY,
             "digital_human_engine": "opennews_material_only",
             "opennews": True,
             "opennews_material_only": True,
@@ -3734,7 +3716,7 @@ async def admin_opennews_produce(request: Request):
         "cost_summary": _empty_cost_summary(),
     }
     tracker.log("OpenNews 新闻视频任务已创建，准备进入素材成片链路...")
-    save_opennews_payload(OPENNEWS_ADMIN_DIR, "produce", {"article": article, "draft": draft, "script": script_data, "task_id": task_id, "user": user.get("username")})
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "produce", {"article": article, "draft": draft, "script": script_data, "task_id": task_id, "user": user.get("username"), "aspect_ratio": aspect_ratio})
     thread = threading.Thread(
         target=run_pipeline_with_progress,
         args=(task_id, topic, "", tasks[task_id]["public_base_url"], script_data, voice_preset, None),
@@ -3765,7 +3747,7 @@ async def opennews_produce(request: Request):
         voice_preset_id = _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female"
     voice_preset = _get_voice_preset(voice_preset_id, target_market)
     voice_preset["selected_speed"] = float(payload.get("speed") or voice_preset.get("default_speed") or 1.1)
-    aspect_ratio = str(payload.get("aspect_ratio") or "vertical").strip().lower()
+    aspect_ratio = str(payload.get("aspect_ratio") or "horizontal").strip().lower()
     if aspect_ratio not in {"vertical", "horizontal"}:
         aspect_ratio = "vertical"
     try:
@@ -3784,8 +3766,9 @@ async def opennews_produce(request: Request):
         web_search_enabled=False,
         target_market=target_market,
         department_id=department_id,
-        script_model=SCRIPT_MODEL_CHATGPT,
+        script_model=SCRIPT_MODEL_API_RELAY,
         digital_human_engine="opennews_material_only",
+        compose_aspect_ratio=aspect_ratio,
     )
     reusable_task = _find_reusable_running_task(owner_username=user.get("username", ""), submission_key=submission_key)
     if reusable_task:
@@ -3815,11 +3798,11 @@ async def opennews_produce(request: Request):
             "web_search_enabled": False,
             "target_market": target_market,
             "department_id": department_id,
-            "compose_transition_id": "fade",
-            "subtitle_template_id": "property_clear",
-            "compose_aspect_ratio": aspect_ratio,
-            "source": {"kind": "opennews", "article": article},
-            "script_model": SCRIPT_MODEL_CHATGPT,
+                "compose_transition_id": "fade",
+                "subtitle_template_id": "property_clear",
+                "compose_aspect_ratio": aspect_ratio,
+                "source": {"kind": "opennews", "article": article},
+            "script_model": SCRIPT_MODEL_API_RELAY,
             "digital_human_engine": "opennews_material_only",
             "opennews": True,
             "opennews_material_only": True,
@@ -3828,7 +3811,7 @@ async def opennews_produce(request: Request):
         "cost_summary": _empty_cost_summary(),
     }
     tracker.log("OpenNews 新闻视频任务已创建，准备进入素材成片链路...")
-    save_opennews_payload(OPENNEWS_ADMIN_DIR, "produce", {"article": article, "draft": draft, "script": script_data, "task_id": task_id, "user": user.get("username")})
+    save_opennews_payload(OPENNEWS_ADMIN_DIR, "produce", {"article": article, "draft": draft, "script": script_data, "task_id": task_id, "user": user.get("username"), "aspect_ratio": aspect_ratio})
     thread = threading.Thread(
         target=run_pipeline_with_progress,
         args=(task_id, topic, "", tasks[task_id]["public_base_url"], script_data, voice_preset, None),
@@ -4780,7 +4763,7 @@ async def script_preview(
     use_web_search: str = Form("false"),
     target_market: str = Form("cn"),
     department_id: str = Form("real_estate"),
-    script_model: str = Form(SCRIPT_MODEL_CLAUDE),
+    script_model: str = Form(SCRIPT_MODEL_API_RELAY),
     digital_human_engine: str = Form(VOLC_ENGINE_ID),
 ):
     user, error = _require_user(request)
@@ -4839,7 +4822,7 @@ async def produce_video(
     use_web_search: str = Form("false"),
     target_market: str = Form("cn"),
     department_id: str = Form("real_estate"),
-    script_model: str = Form(SCRIPT_MODEL_CLAUDE),
+    script_model: str = Form(SCRIPT_MODEL_API_RELAY),
     digital_human_engine: str = Form(VOLC_ENGINE_ID),
 ):
     user, error = _require_user(request)
@@ -5369,6 +5352,10 @@ def _start_resume_task_for_result(user: dict, result: dict, output_dir: Path, re
             "department_id": workflow_config.get("department_id", "real_estate"),
             "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
             "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+            "compose_aspect_ratio": workflow_config.get("compose_aspect_ratio") or workflow_config.get("aspect_ratio") or "vertical",
+            "source": workflow_config.get("source") or {},
+            "opennews": bool(workflow_config.get("opennews")),
+            "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
             "voice_preset": voice_cfg,
             "avatar": avatar_cfg,
             "digital_human_engine": _normalize_digital_human_engine(workflow_config.get("digital_human_engine"), user),
@@ -5529,7 +5516,7 @@ async def revise_script_preview_segment(
     use_web_search: str = Form("false"),
     target_market: str = Form("cn"),
     department_id: str = Form("real_estate"),
-    script_model: str = Form(SCRIPT_MODEL_CLAUDE),
+    script_model: str = Form(SCRIPT_MODEL_API_RELAY),
 ):
     user, error = _require_user(request)
     if error:
@@ -5926,10 +5913,31 @@ async def compose_history_video_endpoint(history_id: str, request: Request):
         return access_error
 
     workflow_config = result.get("workflow_config") or {}
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
     transition_id = str(workflow_config.get("compose_transition_id") or "fade")
     subtitle_template_id = str(workflow_config.get("subtitle_template_id") or "classic")
-    compose_aspect_ratio = str(workflow_config.get("compose_aspect_ratio") or workflow_config.get("aspect_ratio") or "vertical")
-    if workflow_config.get("opennews") or workflow_config.get("opennews_material_only"):
+    requested_aspect_ratio = str((payload or {}).get("aspect_ratio") or "").strip().lower()
+    if requested_aspect_ratio not in {"vertical", "horizontal"}:
+        requested_aspect_ratio = ""
+    is_opennews_result = bool(
+        workflow_config.get("opennews")
+        or workflow_config.get("opennews_material_only")
+        or str(workflow_config.get("digital_human_engine") or "") == "opennews_material_only"
+        or str(result.get("topic") or "").startswith("OpenNews")
+    )
+    default_aspect_ratio = "horizontal" if is_opennews_result else "vertical"
+    compose_aspect_ratio = str(
+        requested_aspect_ratio
+        or workflow_config.get("compose_aspect_ratio")
+        or workflow_config.get("aspect_ratio")
+        or default_aspect_ratio
+    ).strip().lower()
+    if compose_aspect_ratio not in {"vertical", "horizontal"}:
+        compose_aspect_ratio = default_aspect_ratio
+    if is_opennews_result:
         subtitle_template_id = "property_clear"
 
     try:

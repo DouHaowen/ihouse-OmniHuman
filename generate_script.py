@@ -17,10 +17,7 @@ load_dotenv(override=True)
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-SCRIPT_MODEL_CLAUDE = "claude"
-SCRIPT_MODEL_GLM = "glm_5_1"
-SCRIPT_MODEL_CHATGPT = "chatgpt"
-SCRIPT_MODEL_QWEN_LOCAL = "qwen_local"
+SCRIPT_MODEL_API_RELAY = "api_relay"
 
 MAX_DIGITAL_HUMAN_TOTAL_SECONDS = 35
 TARGET_DIGITAL_HUMAN_TOTAL_SECONDS = 30
@@ -560,7 +557,7 @@ def _find_cn_marketing_hits(data: dict) -> list[str]:
     return hits
 
 
-def _rewrite_script_for_cn_safety(topic: str, data: dict, enable_web_search: bool, target_market: str, department_id: str, provider: str = SCRIPT_MODEL_CLAUDE) -> tuple[dict, dict]:
+def _rewrite_script_for_cn_safety(topic: str, data: dict, enable_web_search: bool, target_market: str, department_id: str, provider: str = SCRIPT_MODEL_API_RELAY) -> tuple[dict, dict]:
     hits = _find_cn_marketing_hits(data)
     prompt = f"""
 下面是一份已经生成好的短视频 JSON 脚本，但它面向中国市场，需要进一步改成“小红书知识科普安全模式”。
@@ -587,7 +584,7 @@ def _rewrite_script_for_cn_safety(topic: str, data: dict, enable_web_search: boo
     return rewritten, usage
 
 
-def _rewrite_segment_for_cn_safety(topic: str, script_data: dict, segment_index: int, segment: dict, enable_web_search: bool, target_market: str, department_id: str, provider: str = SCRIPT_MODEL_CLAUDE) -> tuple[dict, dict]:
+def _rewrite_segment_for_cn_safety(topic: str, script_data: dict, segment_index: int, segment: dict, enable_web_search: bool, target_market: str, department_id: str, provider: str = SCRIPT_MODEL_API_RELAY) -> tuple[dict, dict]:
     prompt = f"""
 下面是一条面向中国市场的小红书知识型短视频脚本中的单个段落，请你把它改成更安全、更中立的科普表达。
 
@@ -652,6 +649,46 @@ def _merge_usage(base: dict | None, extra: dict | None) -> dict:
 
 def _get_openai_api_key() -> str:
     return (os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def _get_openai_relay_api_key() -> str:
+    return (
+        os.getenv("OPENAI_RELAY_API_KEY")
+        or os.getenv("SUB2API_API_KEY")
+        or os.getenv("API_RELAY_OPENAI_API_KEY")
+        or ""
+    ).strip()
+
+
+def _get_openai_relay_base_url() -> str:
+    return (os.getenv("OPENAI_RELAY_BASE_URL") or "https://sub2api.ihousejapan.cn").strip().rstrip("/")
+
+
+def _get_openai_relay_responses_url() -> str:
+    base_url = _get_openai_relay_base_url()
+    if base_url.endswith("/responses"):
+        return base_url
+    if base_url.endswith("/v1"):
+        return f"{base_url}/responses"
+    return f"{base_url}/v1/responses"
+
+
+def _get_openai_relay_model() -> str:
+    return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.5").strip() or "gpt-5.5"
+
+
+def _get_openai_relay_reasoning_effort() -> str:
+    return (os.getenv("OPENAI_RELAY_REASONING_EFFORT") or "xhigh").strip() or "xhigh"
+
+
+def _openai_relay_reasoning_attempts() -> list[str]:
+    configured = _get_openai_relay_reasoning_effort()
+    attempts: list[str] = []
+    for effort in (configured, "medium", "minimal"):
+        value = str(effort or "").strip()
+        if value and value not in attempts:
+            attempts.append(value)
+    return attempts or ["minimal"]
 
 
 def _get_glm_api_key() -> str:
@@ -915,6 +952,43 @@ def _repair_schema_with_openai(raw_payload: dict, max_tokens: int, target_market
     return data, repair_usage
 
 
+def _repair_schema_with_openai_relay(raw_payload: dict, max_tokens: int, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
+    api_key = _get_openai_relay_api_key()
+    if not api_key:
+        raise OpenAIFallbackUnavailableError("未配置 OPENAI_RELAY_API_KEY")
+    repair_prompt = f"""
+下面这份 JSON 不是 iHouse 系统需要的最终结构。请你在保留原始主题信息的前提下，把它重写成 iHouse 规定的严格 JSON 结构。
+
+必须满足：
+1. 顶层只允许包含：title, cover_title, total_duration, segments, social_post
+2. segments 必须是数组，且每一段只允许是以下两种结构之一：
+   - digital_human: type/start/end/duration/script/action
+   - material: type/start/end/duration/script/material_keyword/material_search_keyword/material_desc
+3. 开头、中间短过渡、结尾固定为 3 段数字人，其余内容优先为素材段
+4. 数字全部使用整数
+5. 只返回合法 JSON，不要解释
+
+原始 JSON：
+{json.dumps(raw_payload, ensure_ascii=False, indent=2)}
+"""
+    data, repair_usage = _request_json_from_openai_responses(
+        api_key=api_key,
+        model_name=_get_openai_relay_model(),
+        user_prompt=repair_prompt,
+        max_tokens=max_tokens,
+        enable_web_search=False,
+        target_market=target_market,
+        department_id=department_id,
+        endpoint_url=_get_openai_relay_responses_url(),
+        reasoning_effort=_get_openai_relay_reasoning_effort(),
+        store_response=False,
+        merge_instructions_into_input=True,
+    )
+    if not _has_expected_script_shape(data):
+        raise ValueError("API 中转 schema repair 后仍未返回符合要求的脚本结构")
+    return data, repair_usage
+
+
 def _repair_schema_with_claude(raw_payload: dict, max_tokens: int, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
     repair_prompt = f"""
 下面这份 JSON 不是 iHouse 系统需要的最终结构。请你在保留原始主题信息的前提下，把它重写成 iHouse 规定的严格 JSON 结构。
@@ -953,10 +1027,7 @@ def _ensure_script_schema(data: Any, max_tokens: int, target_market: str = "cn",
     if _has_expected_script_shape(data):
         return data, {}
     if isinstance(data, dict):
-        if _get_openai_api_key():
-            repaired, usage = _repair_schema_with_openai(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
-        else:
-            repaired, usage = _repair_schema_with_claude(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+        repaired, usage = _repair_schema_with_openai_relay(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
         if _has_expected_script_shape(repaired):
             return repaired, usage
     raise ValueError("文案模型未返回符合要求的脚本结构")
@@ -1009,24 +1080,35 @@ def _request_json_from_openai_responses(
     enable_web_search: bool,
     target_market: str,
     department_id: str,
+    endpoint_url: str = "https://api.openai.com/v1/responses",
+    reasoning_effort: str = "minimal",
+    store_response: bool | None = None,
+    merge_instructions_into_input: bool = False,
 ) -> tuple[dict, dict]:
+    instruction_text = SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)
+    input_text = user_prompt
+    if merge_instructions_into_input:
+        input_text = f"{instruction_text}\n\n用户任务：\n{user_prompt}"
     payload = {
         "model": model_name,
-        "input": user_prompt,
-        "instructions": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id),
+        "input": input_text,
         "max_output_tokens": max_tokens,
-        "reasoning": {"effort": "minimal"},
+        "reasoning": {"effort": reasoning_effort},
         "text": {
             "format": {
                 "type": "json_object"
             }
         },
     }
+    if not merge_instructions_into_input:
+        payload["instructions"] = instruction_text
+    if store_response is not None:
+        payload["store"] = bool(store_response)
     if enable_web_search:
         payload["tools"] = [{"type": "web_search"}]
         payload["tool_choice"] = "auto"
     response = requests.post(
-        "https://api.openai.com/v1/responses",
+        endpoint_url,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -1040,6 +1122,43 @@ def _request_json_from_openai_responses(
     raw = _extract_openai_responses_text(body)
     data, repair_usage = _parse_json_response(raw)
     usage = _merge_usage(_extract_usage_from_openai_responses_payload(body), repair_usage)
+    return data, usage
+
+
+def _request_json_from_openai_relay(user_prompt: str, max_tokens: int, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
+    api_key = _get_openai_relay_api_key()
+    if not api_key:
+        raise OpenAIFallbackUnavailableError("未配置 OPENAI_RELAY_API_KEY")
+    last_error: Exception | None = None
+    data: dict | None = None
+    usage: dict = {}
+    for attempt_index, reasoning_effort in enumerate(_openai_relay_reasoning_attempts()):
+        try:
+            data, usage = _request_json_from_openai_responses(
+                api_key=api_key,
+                model_name=_get_openai_relay_model(),
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+                enable_web_search=enable_web_search,
+                target_market=target_market,
+                department_id=department_id,
+                endpoint_url=_get_openai_relay_responses_url(),
+                reasoning_effort=reasoning_effort,
+                store_response=False,
+                merge_instructions_into_input=True,
+            )
+            break
+        except (requests.HTTPError, requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            print(f"[api_relay_retry] attempt={attempt_index + 1} reasoning={reasoning_effort} error={exc!r}")
+            continue
+    if data is None:
+        if last_error:
+            raise RuntimeError(f"API 中转模型暂时不可用：{last_error}") from last_error
+        raise RuntimeError("API 中转模型未返回有效文案")
+    if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
+        data, schema_usage = _repair_schema_with_openai_relay(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+        usage = _merge_usage(usage, schema_usage)
     return data, usage
 
 
@@ -1291,7 +1410,7 @@ def _attempt_simple_json_repairs(raw: str) -> dict | None:
     return None
 
 
-def _repair_json_with_claude(raw: str) -> tuple[dict, dict]:
+def _repair_json_with_openai_relay(raw: str) -> tuple[dict, dict]:
     current = raw
     last_error = None
     usage_total = {}
@@ -1311,20 +1430,37 @@ def _repair_json_with_claude(raw: str) -> tuple[dict, dict]:
 原始内容：
 {current}
 """
-        message = _create_message_with_retry(
-            model='claude-sonnet-4-6',
-            max_tokens=2600,
-            messages=[{'role': 'user', 'content': repair_prompt}],
-            system=REPAIR_SYSTEM_PROMPT,
+        api_key = _get_openai_relay_api_key()
+        if not api_key:
+            raise OpenAIFallbackUnavailableError("未配置 OPENAI_RELAY_API_KEY")
+        response = requests.post(
+            _get_openai_relay_responses_url(),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": _get_openai_relay_model(),
+                "input": repair_prompt,
+                "instructions": REPAIR_SYSTEM_PROMPT,
+                "max_output_tokens": 2600,
+                "reasoning": {"effort": _get_openai_relay_reasoning_effort()},
+                "text": {"format": {"type": "json_object"}},
+                "store": False,
+            },
+            timeout=180,
         )
-        usage_total = _merge_usage(usage_total, _extract_usage_from_message(message))
-        repaired_text = _extract_json_candidate(_extract_message_text(message))
+        if response.status_code >= 400:
+            raise requests.HTTPError(response.text[:500], response=response)
+        body = response.json()
+        usage_total = _merge_usage(usage_total, _extract_usage_from_openai_responses_payload(body))
+        repaired_text = _extract_json_candidate(_extract_openai_responses_text(body))
         try:
             return json.loads(repaired_text), usage_total
         except json.JSONDecodeError as exc:
             current = repaired_text
             last_error = exc
-    raise ValueError(f'Claude 联网返回内容无法修复为合法 JSON: {last_error}')
+    raise ValueError(f'API 中转模型返回内容无法修复为合法 JSON: {last_error}')
 
 
 def _parse_json_response(raw: str) -> tuple[dict, dict]:
@@ -1335,7 +1471,7 @@ def _parse_json_response(raw: str) -> tuple[dict, dict]:
         repaired = _attempt_simple_json_repairs(candidate)
         if repaired is not None:
             return repaired, {}
-        return _repair_json_with_claude(candidate)
+        return _repair_json_with_openai_relay(candidate)
 
 
 def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_search: bool, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
@@ -1374,10 +1510,7 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
 
 
 def _normalize_script_model_provider(provider: str | None) -> str:
-    requested = str(provider or "").strip().lower()
-    if requested in {SCRIPT_MODEL_CLAUDE, SCRIPT_MODEL_GLM, SCRIPT_MODEL_CHATGPT, SCRIPT_MODEL_QWEN_LOCAL}:
-        return requested
-    return SCRIPT_MODEL_CLAUDE
+    return SCRIPT_MODEL_API_RELAY
 
 
 def _request_json_by_provider(
@@ -1389,14 +1522,7 @@ def _request_json_by_provider(
     target_market: str = "cn",
     department_id: str = "real_estate",
 ) -> tuple[dict, dict]:
-    normalized = _normalize_script_model_provider(provider)
-    if normalized == SCRIPT_MODEL_GLM:
-        return _request_json_from_glm(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
-    if normalized == SCRIPT_MODEL_QWEN_LOCAL:
-        return _request_json_from_local_qwen(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
-    if normalized == SCRIPT_MODEL_CHATGPT:
-        return _request_json_from_openai(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
-    return _request_json_from_claude(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    return _request_json_from_openai_relay(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
 
 def _build_message_kwargs(user_prompt: str, max_tokens: int, enable_web_search: bool, target_market: str = "cn", department_id: str = "real_estate") -> dict:
     kwargs = {
@@ -1417,7 +1543,7 @@ def _build_message_kwargs(user_prompt: str, max_tokens: int, enable_web_search: 
     return kwargs
 
 
-def revise_script_segment(topic: str, script_data: dict, segment_index: int, instruction: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_CLAUDE) -> dict:
+def revise_script_segment(topic: str, script_data: dict, segment_index: int, instruction: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_API_RELAY) -> dict:
     target = script_data.get('segments', [])[segment_index]
     segment_type = target.get('type', 'material')
     prompt = f"""
@@ -1477,7 +1603,7 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
     }
 
 
-def generate_script(topic: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_CLAUDE) -> dict:
+def generate_script(topic: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_API_RELAY) -> dict:
     """
     输入选题，生成完整视频文案
     """
