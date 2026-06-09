@@ -1530,8 +1530,54 @@
             </div>
 
             <div class="actions" style="justify-content:flex-start; margin-bottom:14px;">
-              <button class="btn btn-primary" id="openNewsSourceModeBtn" type="button">新闻源最新</button>
-              <button class="btn btn-secondary" id="openNewsTrendModeBtn" type="button">英文热点雷达</button>
+              <button class="btn btn-primary" id="openNewsQuickHotBtn" type="button">一键抓取全球热点</button>
+            </div>
+
+            <div class="panel" style="padding:16px; gap:12px; margin-bottom:16px;">
+              <div class="panel-header" style="margin-bottom:0;">
+                <div>
+                  <div class="section-kicker">Auto Radar</div>
+                  <h3 class="section-title" style="font-size:22px;">热点自动抓取与批量生产</h3>
+                  <p class="section-desc">开启后系统会按设定时间自动抓取英文热点，并按批次展示。勾选新闻后可直接批量生成文案、配音、素材和横竖屏视频。</p>
+                </div>
+              </div>
+              <div class="field-grid" style="grid-template-columns: 150px 150px 150px 150px minmax(0,1fr);">
+                <label class="check-card" style="min-height:auto; padding:14px;">
+                  <span>
+                    <strong>自动抓取</strong>
+                    <small>管理员可开启</small>
+                  </span>
+                  <input id="openNewsBatchEnabled" type="checkbox">
+                </label>
+                <div class="field">
+                  <label for="openNewsBatchIntervalSelect">抓取频率</label>
+                  <select id="openNewsBatchIntervalSelect" class="select-input">
+                    <option value="5">每5分钟</option>
+                    <option value="15">每15分钟</option>
+                    <option value="30">每30分钟</option>
+                    <option value="60">每1小时</option>
+                    <option value="180">每3小时</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="openNewsBatchLimitSelect">每次数量</label>
+                  <select id="openNewsBatchLimitSelect" class="select-input">
+                    <option value="10">10条</option>
+                    <option value="20">20条</option>
+                    <option value="30">30条</option>
+                    <option value="50">50条</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>&nbsp;</label>
+                  <button class="btn btn-secondary" id="openNewsBatchSaveBtn" type="button" style="width:100%;">保存设置</button>
+                </div>
+                <div class="field">
+                  <label>&nbsp;</label>
+                  <button class="btn btn-primary" id="openNewsBatchRunBtn" type="button" style="width:100%;">立即抓取一批</button>
+                </div>
+              </div>
+              <div class="topbar-status" id="openNewsBatchStatus">自动抓取设置加载中...</div>
             </div>
 
             <div class="field-grid" style="grid-template-columns: 180px minmax(0,1fr) 190px;">
@@ -1549,14 +1595,8 @@
               </div>
               <div class="field">
                 <label>&nbsp;</label>
-                <button class="btn btn-primary" id="openNewsSearchBtn" type="button" style="width:100%;">抓取最新新闻</button>
+                <button class="btn btn-primary" id="openNewsSearchBtn" type="button" style="width:100%;">抓取英文热点</button>
               </div>
-            </div>
-
-            <div class="field" id="openNewsSourceSection">
-              <label>新闻来源</label>
-              <div class="option-grid" id="openNewsSourceGrid"></div>
-              <div class="helper">不需要搜索关键词。系统会抓取你勾选网站的最新新闻，并按公开来源时间排序。</div>
             </div>
 
             <div class="field">
@@ -1564,64 +1604,55 @@
               <textarea id="openNewsNotesInput" placeholder="例如：保持中立新闻口吻，重点说明事件背景和影响；不要夸大未证实信息；口播控制在 1-3 分钟。"></textarea>
             </div>
 
-            <div class="topbar-status" id="openNewsStatus">请选择分区和新闻源后抓取最新新闻。</div>
-
-            <div class="panel" id="openNewsAutoPanel" style="padding:16px; gap:12px; margin-top:16px;">
-              <div class="panel-header" style="margin-bottom:0;">
-                <div>
-                  <div class="section-kicker">Auto Radar</div>
-                  <h3 class="section-title" style="font-size:22px;">自动热点候选池</h3>
-                  <p class="section-desc">系统按设定频率自动抓取英文热点，先进入候选池。你审核后再选择要做成视频的新闻，不会自动消耗成片成本。</p>
-                </div>
-                <div class="actions" style="justify-content:flex-end;">
-                  <button class="btn btn-secondary" id="openNewsAutoRefreshBtn" type="button">刷新候选池</button>
-                </div>
-              </div>
-              <div id="openNewsAutoAdminPanel" style="display:none;">
-                <div class="field-grid" style="grid-template-columns: 140px 180px 180px 160px;">
-                  <label class="voice-card" style="padding:14px; align-items:center;">
-                    <input id="openNewsAutoEnabled" type="checkbox" style="width:18px;height:18px;accent-color:var(--brand);">
-                    <strong>启用自动抓取</strong>
-                  </label>
-                  <div class="field">
-                    <label for="openNewsAutoIntervalSelect">抓取频率</label>
-                    <select id="openNewsAutoIntervalSelect" class="select-input">
-                      <option value="5">每5分钟（测试）</option>
-                      <option value="30">每30分钟</option>
-                      <option value="60">每1小时</option>
-                      <option value="180">每3小时</option>
-                      <option value="360">每6小时</option>
-                    </select>
-                  </div>
-                  <div class="field">
-                    <label for="openNewsAutoRangeSelect">热点时间范围</label>
-                    <select id="openNewsAutoRangeSelect" class="select-input"></select>
-                  </div>
-                  <div class="field">
-                    <label for="openNewsAutoLimitSelect">每类最多</label>
-                    <select id="openNewsAutoLimitSelect" class="select-input">
-                      <option value="10">10条</option>
-                      <option value="20">20条</option>
-                      <option value="30">30条</option>
-                      <option value="50">50条</option>
-                    </select>
-                  </div>
-                </div>
-                <div class="field">
-                  <label>自动抓取分区</label>
-                  <div class="option-grid" id="openNewsAutoCategoryGrid"></div>
-                </div>
-                <div class="actions">
-                  <button class="btn btn-primary" id="openNewsAutoSaveBtn" type="button">保存自动抓取设置</button>
-                  <button class="btn btn-secondary" id="openNewsAutoRunBtn" type="button">立即抓取一次</button>
-                </div>
-              </div>
-              <div class="topbar-status" id="openNewsAutoStatus">自动候选池准备就绪。</div>
-              <div class="file-board" id="openNewsAutoCandidateList"></div>
-            </div>
+            <div class="topbar-status" id="openNewsStatus">请选择分区和时间范围后抓取英文圈热点新闻，或直接点击“一键抓取全球热点”。</div>
 
             <div class="insight-grid" id="openNewsStats" style="display:none; margin-top:12px;"></div>
             <div class="file-board" id="openNewsCandidateList" style="margin-top:14px;"></div>
+
+            <div class="panel" id="openNewsBatchPanel" style="padding:16px; gap:12px; margin-top:18px;">
+              <div class="panel-header" style="margin-bottom:0;">
+                <div>
+                  <div class="section-kicker">Batches</div>
+                  <h3 class="section-title" style="font-size:22px;">热点抓取批次</h3>
+                  <p class="section-desc">不同批次会自动去重。勾选你想制作的视频新闻，然后选择语言、配音和主预览画幅，一键批量生产。</p>
+                </div>
+              </div>
+              <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr));">
+                <div class="field">
+                  <label for="openNewsBatchMarketSelect">生成语言</label>
+                  <select id="openNewsBatchMarketSelect" class="select-input"></select>
+                </div>
+                <div class="field">
+                  <label for="openNewsBatchVoiceSelect">配音音色</label>
+                  <select id="openNewsBatchVoiceSelect" class="select-input"></select>
+                </div>
+                <div class="field">
+                  <label for="openNewsBatchAspectSelect">主预览画幅</label>
+                  <select id="openNewsBatchAspectSelect" class="select-input">
+                    <option value="horizontal" selected>横屏 16:9</option>
+                    <option value="vertical">竖屏 9:16</option>
+                  </select>
+                  <small>最终仍会同时生成横屏和竖屏；这里决定优先预览版本。</small>
+                </div>
+              </div>
+              <label class="check-card" style="margin-top:4px;">
+                <div>
+                  <strong>生成完成后自动发布 YouTube</strong>
+                  <p>勾选后会在横屏和竖屏成片完成后，自动发布到 ihouse AI Lab 频道，分类为 News & Politics。</p>
+                </div>
+                <input type="checkbox" id="openNewsBatchYoutubePublish" checked>
+              </label>
+              <div class="actions">
+                <button class="btn btn-primary" id="openNewsBatchProduceBtn" type="button">一键制作选中新闻视频</button>
+                <button class="btn btn-secondary" id="openNewsLocalTokProposeBtn" type="button">提交 LocalTok 审核</button>
+                <button class="btn btn-secondary" id="openNewsLocalTokRefreshBtn" type="button">刷新 LocalTok 状态</button>
+                <button class="btn btn-secondary" id="openNewsBatchRefreshBtn" type="button">刷新批次</button>
+              </div>
+              <div class="topbar-status" id="openNewsBatchProduceStatus">请选择批次里的新闻。</div>
+              <div class="file-board" id="openNewsBatchList"></div>
+              <div class="file-board" id="openNewsBatchJobList" style="display:none;"></div>
+              <div class="file-board" id="openNewsLocalTokList" style="display:none;"></div>
+            </div>
 
             <div class="panel" id="openNewsDraftPanel" style="display:none; padding:16px; gap:12px; margin-top:18px;">
               <div class="panel-header" style="margin-bottom:0;">
@@ -1646,11 +1677,12 @@
                   <select id="openNewsVoiceSelect" class="select-input"></select>
                 </div>
                 <div class="field">
-                  <label for="openNewsAspectSelect">视频画幅</label>
+                  <label for="openNewsAspectSelect">主预览画幅</label>
                   <select id="openNewsAspectSelect" class="select-input">
                     <option value="vertical">竖屏 9:16</option>
                     <option value="horizontal" selected>横屏 16:9</option>
                   </select>
+                  <small>OpenNews 成片会同时生成横屏和竖屏；这里仅决定页面优先预览哪个版本。</small>
                 </div>
               </div>
               <div class="actions">
@@ -1997,10 +2029,12 @@
       openNewsCategories: [],
       openNewsTrendCategories: [],
       openNewsTrendTimeRanges: [],
-      openNewsAutoConfig: null,
-      openNewsAutoCandidates: [],
-      openNewsMode: 'source',
+      openNewsMode: 'trend',
       openNewsCandidates: [],
+      openNewsBatches: [],
+      openNewsBatchConfig: null,
+      openNewsBatchJobId: '',
+      openNewsLocalTokProposals: [],
       openNewsSelectedArticle: null,
       openNewsDraft: null,
       workspaceMode: 'ai',
@@ -2096,31 +2130,34 @@
       aiWorkflowWorkspace: document.getElementById('aiWorkflowWorkspace'),
       openNewsWorkspace: document.getElementById('openNewsWorkspace'),
       openNewsBackBtn: document.getElementById('openNewsBackBtn'),
-      openNewsSourceModeBtn: document.getElementById('openNewsSourceModeBtn'),
-      openNewsTrendModeBtn: document.getElementById('openNewsTrendModeBtn'),
+      openNewsQuickHotBtn: document.getElementById('openNewsQuickHotBtn'),
       openNewsCategorySelect: document.getElementById('openNewsCategorySelect'),
       openNewsQueryInput: document.getElementById('openNewsQueryInput'),
       openNewsTrendRangeField: document.getElementById('openNewsTrendRangeField'),
       openNewsTrendRangeSelect: document.getElementById('openNewsTrendRangeSelect'),
       openNewsSearchBtn: document.getElementById('openNewsSearchBtn'),
-      openNewsSourceSection: document.getElementById('openNewsSourceSection'),
-      openNewsSourceGrid: document.getElementById('openNewsSourceGrid'),
       openNewsNotesInput: document.getElementById('openNewsNotesInput'),
       openNewsStatus: document.getElementById('openNewsStatus'),
       openNewsStats: document.getElementById('openNewsStats'),
       openNewsCandidateList: document.getElementById('openNewsCandidateList'),
-      openNewsAutoPanel: document.getElementById('openNewsAutoPanel'),
-      openNewsAutoAdminPanel: document.getElementById('openNewsAutoAdminPanel'),
-      openNewsAutoEnabled: document.getElementById('openNewsAutoEnabled'),
-      openNewsAutoIntervalSelect: document.getElementById('openNewsAutoIntervalSelect'),
-      openNewsAutoRangeSelect: document.getElementById('openNewsAutoRangeSelect'),
-      openNewsAutoLimitSelect: document.getElementById('openNewsAutoLimitSelect'),
-      openNewsAutoCategoryGrid: document.getElementById('openNewsAutoCategoryGrid'),
-      openNewsAutoSaveBtn: document.getElementById('openNewsAutoSaveBtn'),
-      openNewsAutoRunBtn: document.getElementById('openNewsAutoRunBtn'),
-      openNewsAutoRefreshBtn: document.getElementById('openNewsAutoRefreshBtn'),
-      openNewsAutoStatus: document.getElementById('openNewsAutoStatus'),
-      openNewsAutoCandidateList: document.getElementById('openNewsAutoCandidateList'),
+      openNewsBatchEnabled: document.getElementById('openNewsBatchEnabled'),
+      openNewsBatchIntervalSelect: document.getElementById('openNewsBatchIntervalSelect'),
+      openNewsBatchLimitSelect: document.getElementById('openNewsBatchLimitSelect'),
+      openNewsBatchSaveBtn: document.getElementById('openNewsBatchSaveBtn'),
+      openNewsBatchRunBtn: document.getElementById('openNewsBatchRunBtn'),
+      openNewsBatchStatus: document.getElementById('openNewsBatchStatus'),
+      openNewsBatchMarketSelect: document.getElementById('openNewsBatchMarketSelect'),
+      openNewsBatchVoiceSelect: document.getElementById('openNewsBatchVoiceSelect'),
+      openNewsBatchAspectSelect: document.getElementById('openNewsBatchAspectSelect'),
+      openNewsBatchYoutubePublish: document.getElementById('openNewsBatchYoutubePublish'),
+      openNewsBatchProduceBtn: document.getElementById('openNewsBatchProduceBtn'),
+      openNewsLocalTokProposeBtn: document.getElementById('openNewsLocalTokProposeBtn'),
+      openNewsLocalTokRefreshBtn: document.getElementById('openNewsLocalTokRefreshBtn'),
+      openNewsBatchRefreshBtn: document.getElementById('openNewsBatchRefreshBtn'),
+      openNewsBatchProduceStatus: document.getElementById('openNewsBatchProduceStatus'),
+      openNewsBatchList: document.getElementById('openNewsBatchList'),
+      openNewsBatchJobList: document.getElementById('openNewsBatchJobList'),
+      openNewsLocalTokList: document.getElementById('openNewsLocalTokList'),
       openNewsDraftPanel: document.getElementById('openNewsDraftPanel'),
       openNewsDraftMeta: document.getElementById('openNewsDraftMeta'),
       openNewsScriptTextarea: document.getElementById('openNewsScriptTextarea'),
@@ -3858,16 +3895,17 @@
       els.openNewsStatus.classList.toggle('error', !!error);
     }
 
-    function selectedOpenNewsSourceIds() {
-      return Array.from(els.openNewsSourceGrid?.querySelectorAll('input[type="checkbox"]:checked') || []).map(item => item.value);
-    }
-
     function renderOpenNewsOptions() {
       const markets = state.options?.target_markets || [];
       if (els.openNewsMarketSelect) {
         const current = els.openNewsMarketSelect.value || state.selectedTargetMarket || 'cn';
         els.openNewsMarketSelect.innerHTML = markets.map(item => `<option value="${item.id}">${escapeHtml(optionLabel('targetMarkets', item.id, item.name))}｜${escapeHtml(optionLabel('contentLanguages', item.content_language, item.content_language || ''))}</option>`).join('');
         els.openNewsMarketSelect.value = markets.some(item => item.id === current) ? current : (markets[0]?.id || 'cn');
+      }
+      if (els.openNewsBatchMarketSelect) {
+        const current = els.openNewsBatchMarketSelect.value || state.selectedTargetMarket || 'cn';
+        els.openNewsBatchMarketSelect.innerHTML = markets.map(item => `<option value="${item.id}">${escapeHtml(optionLabel('targetMarkets', item.id, item.name))}｜${escapeHtml(optionLabel('contentLanguages', item.content_language, item.content_language || ''))}</option>`).join('');
+        els.openNewsBatchMarketSelect.value = markets.some(item => item.id === current) ? current : (markets[0]?.id || 'cn');
       }
       const presets = state.options?.voice_presets || [];
       if (els.openNewsVoiceSelect) {
@@ -3878,9 +3916,18 @@
           .join('');
         els.openNewsVoiceSelect.value = presets.some(item => item.id === currentVoice) ? currentVoice : (els.openNewsVoiceSelect.querySelector('option')?.value || '');
       }
+      if (els.openNewsBatchVoiceSelect) {
+        const currentVoice = els.openNewsBatchVoiceSelect.value || els.openNewsVoiceSelect?.value || 'mandarin_male';
+        const batchMarket = els.openNewsBatchMarketSelect?.value || 'cn';
+        const visible = presets.filter(item => visibleVoiceIdsForMarket(batchMarket).includes(item.id));
+        els.openNewsBatchVoiceSelect.innerHTML = visible
+          .map(item => `<option value="${item.id}">${escapeHtml(optionLabel('voicePresets', item.id, item.name))}｜${escapeHtml(item.subtitle || '')}</option>`)
+          .join('');
+        els.openNewsBatchVoiceSelect.value = visible.some(item => item.id === currentVoice) ? currentVoice : (els.openNewsBatchVoiceSelect.querySelector('option')?.value || '');
+      }
       if (els.openNewsCategorySelect && state.openNewsCategories.length) {
         const currentCategory = els.openNewsCategorySelect.value || 'all';
-        const categories = state.openNewsMode === 'trend' && state.openNewsTrendCategories.length ? state.openNewsTrendCategories : state.openNewsCategories;
+        const categories = state.openNewsTrendCategories.length ? state.openNewsTrendCategories : state.openNewsCategories;
         els.openNewsCategorySelect.innerHTML = categories.map(item => `<option value="${item.id}">${escapeHtml(item.name || item.id)}</option>`).join('');
         els.openNewsCategorySelect.value = categories.some(item => item.id === currentCategory) ? currentCategory : 'all';
       }
@@ -3889,255 +3936,49 @@
         els.openNewsTrendRangeSelect.innerHTML = state.openNewsTrendTimeRanges.map(item => `<option value="${item.id}">${escapeHtml(item.name || item.id)}</option>`).join('');
         els.openNewsTrendRangeSelect.value = state.openNewsTrendTimeRanges.some(item => item.id === currentRange) ? currentRange : '6h';
       }
-      renderOpenNewsAutoControls();
     }
 
-    function formatOpenNewsAutoTime(ts) {
-      const value = Number(ts || 0);
-      if (!value) return '尚未执行';
-      const date = new Date(value * 1000);
-      if (Number.isNaN(date.getTime())) return '尚未执行';
-      return date.toLocaleString('zh-CN', { hour12: false });
-    }
-
-    function setOpenNewsAutoStatus(message, error = false) {
-      if (!els.openNewsAutoStatus) return;
-      els.openNewsAutoStatus.textContent = message;
-      els.openNewsAutoStatus.classList.toggle('error', !!error);
-    }
-
-    function renderOpenNewsAutoControls() {
-      const isAdmin = state.currentUser?.role === 'admin';
-      if (els.openNewsAutoAdminPanel) els.openNewsAutoAdminPanel.style.display = isAdmin ? 'grid' : 'none';
-      const config = state.openNewsAutoConfig || {};
-      if (els.openNewsAutoEnabled) els.openNewsAutoEnabled.checked = !!config.enabled;
-      if (els.openNewsAutoIntervalSelect) els.openNewsAutoIntervalSelect.value = String(config.interval_minutes || 60);
-      if (els.openNewsAutoLimitSelect) els.openNewsAutoLimitSelect.value = String(config.limit || 20);
-      if (els.openNewsAutoRangeSelect && state.openNewsTrendTimeRanges.length) {
-        const currentRange = config.time_range || els.openNewsAutoRangeSelect.value || '6h';
-        els.openNewsAutoRangeSelect.innerHTML = state.openNewsTrendTimeRanges.map(item => `<option value="${item.id}">${escapeHtml(item.name || item.id)}</option>`).join('');
-        els.openNewsAutoRangeSelect.value = state.openNewsTrendTimeRanges.some(item => item.id === currentRange) ? currentRange : '6h';
-      }
-      if (els.openNewsAutoCategoryGrid && state.openNewsTrendCategories.length) {
-        const selected = new Set(Array.isArray(config.categories) && config.categories.length ? config.categories : ['all']);
-        els.openNewsAutoCategoryGrid.innerHTML = state.openNewsTrendCategories.map(item => `
-          <label class="voice-card" style="padding:14px;">
-            <input type="checkbox" value="${escapeHtml(item.id || '')}" ${selected.has(item.id) ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--brand);">
-            <strong>${escapeHtml(item.name || item.id)}</strong>
-          </label>
-        `).join('');
-      }
-    }
-
-    function selectedOpenNewsAutoCategories() {
-      const values = Array.from(els.openNewsAutoCategoryGrid?.querySelectorAll('input[type="checkbox"]:checked') || []).map(item => item.value);
-      return values.length ? values : ['all'];
-    }
-
-    function renderOpenNewsAutoCandidates(candidates = []) {
-      if (!els.openNewsAutoCandidateList) return;
-      state.openNewsAutoCandidates = candidates;
-      if (!candidates.length) {
-        els.openNewsAutoCandidateList.innerHTML = '<div class="empty-box">自动候选池暂无待审核热点。管理员可以启用自动抓取，或点击“立即抓取一次”。</div>';
-        return;
-      }
-      const isAdmin = state.currentUser?.role === 'admin';
-      els.openNewsAutoCandidateList.innerHTML = candidates.map(item => {
-        const displayTitle = item.title_zh || item.translated_title || item.title || '未命名热点';
-        const displaySummary = item.summary_zh || item.translated_summary || item.summary || '';
-        const originalTitle = item.title_zh || item.translated_title ? item.title : '';
-        return `
-          <div class="history-card">
-            <div class="history-top">
-              <div>
-                <div class="history-title">${escapeHtml(displayTitle)}</div>
-                ${originalTitle ? `<div class="history-topic">英文原题：${escapeHtml(originalTitle)}</div>` : ''}
-                <div class="history-topic">${escapeHtml(item.source_name || '')} · ${escapeHtml(item.category_name || item.auto_category || '')}</div>
-              </div>
-              <span class="badge">自动候选 · 热度 ${escapeHtml(item.trend_score || '-')}</span>
-            </div>
-            <div class="history-topic">新闻时间：${escapeHtml(item.published_at || '未知')} · 抓取时间：${escapeHtml(formatOpenNewsAutoTime(item.auto_fetched_at))}</div>
-            ${item.source_count ? `<div class="history-topic">英文来源数：${Number(item.source_count || 0)} · 代表来源：${escapeHtml((item.source_domains || []).slice(0, 5).join(' / '))}</div>` : ''}
-            ${displaySummary ? `<div class="social-card">${escapeHtml(displaySummary)}</div>` : ''}
-            <div class="actions">
-              <a class="btn btn-secondary" href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener">打开原文</a>
-              <button class="btn btn-primary opennews-auto-draft-action" type="button" data-opennews-auto-id="${escapeHtml(item.id || '')}">生成新闻稿</button>
-              ${isAdmin ? `<button class="btn btn-secondary opennews-auto-ignore-action" type="button" data-opennews-auto-id="${escapeHtml(item.id || '')}">忽略</button>` : ''}
-            </div>
-          </div>
-        `;
-      }).join('');
-      els.openNewsAutoCandidateList.querySelectorAll('.opennews-auto-draft-action').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const article = state.openNewsAutoCandidates.find(item => item.id === btn.dataset.opennewsAutoId);
-          if (article) generateOpenNewsDraft(article);
-        });
-      });
-      els.openNewsAutoCandidateList.querySelectorAll('.opennews-auto-ignore-action').forEach(btn => {
-        btn.addEventListener('click', () => updateOpenNewsAutoCandidateStatus(btn.dataset.opennewsAutoId, 'ignored'));
-      });
-    }
-
-    async function loadOpenNewsAutoConfig() {
-      try {
-        const res = await fetch('/api/opennews/auto/config');
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || '自动抓取配置加载失败');
-        state.openNewsAutoConfig = data.config || {};
-        renderOpenNewsAutoControls();
-        const config = state.openNewsAutoConfig;
-        const nextText = config.enabled ? `下次自动抓取：${formatOpenNewsAutoTime(config.next_run_at)}` : '自动抓取未启用。';
-        setOpenNewsAutoStatus(`${config.last_run_message || '自动候选池准备就绪。'} ${nextText}`);
-      } catch (error) {
-        setOpenNewsAutoStatus(error.message || '自动抓取配置加载失败', true);
-      }
-    }
-
-    async function saveOpenNewsAutoConfig() {
-      if (!els.openNewsAutoSaveBtn) return;
-      els.openNewsAutoSaveBtn.disabled = true;
-      setOpenNewsAutoStatus('正在保存自动抓取设置...');
-      try {
-        const res = await fetch('/api/opennews/auto/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            enabled: !!els.openNewsAutoEnabled?.checked,
-            interval_minutes: Number(els.openNewsAutoIntervalSelect?.value || 60),
-            time_range: els.openNewsAutoRangeSelect?.value || '6h',
-            limit: Number(els.openNewsAutoLimitSelect?.value || 20),
-            categories: selectedOpenNewsAutoCategories(),
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || '自动抓取设置保存失败');
-        state.openNewsAutoConfig = data.config || {};
-        renderOpenNewsAutoControls();
-        setOpenNewsAutoStatus(`设置已保存。${state.openNewsAutoConfig.enabled ? `下次自动抓取：${formatOpenNewsAutoTime(state.openNewsAutoConfig.next_run_at)}` : '自动抓取已关闭。'}`);
-      } catch (error) {
-        setOpenNewsAutoStatus(friendlyRequestError(error, '自动抓取设置保存失败'), true);
-      } finally {
-        els.openNewsAutoSaveBtn.disabled = false;
-      }
-    }
-
-    async function runOpenNewsAutoNow() {
-      if (!els.openNewsAutoRunBtn) return;
-      els.openNewsAutoRunBtn.disabled = true;
-      setOpenNewsAutoStatus('正在立即抓取英文热点候选...');
-      try {
-        const res = await fetch('/api/opennews/auto/run-now', { method: 'POST' });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok && !data.running) throw new Error(data.error || data.message || '立即抓取失败');
-        setOpenNewsAutoStatus(data.message || '抓取已提交，请稍后刷新候选池。');
-        await loadOpenNewsAutoConfig();
-        await loadOpenNewsAutoCandidates();
-      } catch (error) {
-        setOpenNewsAutoStatus(friendlyRequestError(error, '立即抓取失败'), true);
-      } finally {
-        els.openNewsAutoRunBtn.disabled = false;
-      }
-    }
-
-    async function loadOpenNewsAutoCandidates() {
-      try {
-        const res = await fetch('/api/opennews/auto/candidates?status=pending');
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || '自动候选池加载失败');
-        renderOpenNewsAutoCandidates(Array.isArray(data.candidates) ? data.candidates : []);
-      } catch (error) {
-        setOpenNewsAutoStatus(error.message || '自动候选池加载失败', true);
-      }
-    }
-
-    async function updateOpenNewsAutoCandidateStatus(candidateId, status) {
-      if (!candidateId) return;
-      try {
-        const res = await fetch(`/api/opennews/auto/candidates/${encodeURIComponent(candidateId)}/status`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || '候选状态更新失败');
-        await loadOpenNewsAutoCandidates();
-      } catch (error) {
-        setOpenNewsAutoStatus(error.message || '候选状态更新失败', true);
-      }
-    }
-
-    function setOpenNewsMode(mode) {
-      state.openNewsMode = mode === 'trend' ? 'trend' : 'source';
-      const trendMode = state.openNewsMode === 'trend';
-      if (els.openNewsSourceModeBtn) {
-        els.openNewsSourceModeBtn.classList.toggle('btn-primary', !trendMode);
-        els.openNewsSourceModeBtn.classList.toggle('btn-secondary', trendMode);
-      }
-      if (els.openNewsTrendModeBtn) {
-        els.openNewsTrendModeBtn.classList.toggle('btn-primary', trendMode);
-        els.openNewsTrendModeBtn.classList.toggle('btn-secondary', !trendMode);
-      }
-      if (els.openNewsSourceSection) els.openNewsSourceSection.style.display = trendMode ? 'none' : '';
-      if (els.openNewsTrendRangeField) els.openNewsTrendRangeField.style.display = trendMode ? '' : 'none';
+    function resetOpenNewsHotspotView() {
+      state.openNewsMode = 'trend';
+      if (els.openNewsTrendRangeField) els.openNewsTrendRangeField.style.display = '';
       if (els.openNewsQueryInput) {
-        els.openNewsQueryInput.placeholder = trendMode
-          ? '可选：Taiwan Strait / semiconductor / Ukraine，用来聚焦英文热点'
-          : '不填则抓所选网站最新新闻；也可填 Taiwan Strait / AI chip 等过滤';
+        els.openNewsQueryInput.placeholder = '可选：Taiwan Strait / semiconductor / Ukraine，用来聚焦英文热点';
       }
-      if (els.openNewsSearchBtn) els.openNewsSearchBtn.textContent = trendMode ? '抓取英文热点' : '抓取最新新闻';
+      if (els.openNewsSearchBtn) els.openNewsSearchBtn.textContent = '抓取英文热点';
       renderOpenNewsOptions();
-      renderOpenNewsSourceGrid();
       renderOpenNewsCandidates([]);
       renderOpenNewsStats();
       state.openNewsSelectedArticle = null;
       state.openNewsDraft = null;
       if (els.openNewsDraftPanel) els.openNewsDraftPanel.style.display = 'none';
-      setOpenNewsStatus(trendMode ? '请选择分区和时间范围后抓取英文圈热点新闻。' : '请选择分区和新闻源后抓取最新新闻。');
+      setOpenNewsStatus('请选择分区和时间范围后抓取英文圈热点新闻，或直接点击“一键抓取全球热点”。');
     }
 
     async function loadOpenNewsSources() {
       if (state.openNewsSources.length && state.openNewsCategories.length) {
-        renderOpenNewsSourceGrid();
         renderOpenNewsOptions();
-        loadOpenNewsAutoConfig();
-        loadOpenNewsAutoCandidates();
+        await loadOpenNewsBatchConfig();
+        await loadOpenNewsBatches();
+        await loadOpenNewsLocalTokProposals();
         return;
       }
-      setOpenNewsStatus('正在加载 OpenNews 新闻源...');
+      setOpenNewsStatus('正在加载 OpenNews 热点源...');
       try {
         const res = await fetch('/api/opennews/sources');
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || '新闻源加载失败');
+        if (!res.ok) throw new Error(data.error || '热点源加载失败');
         state.openNewsSources = Array.isArray(data.sources) ? data.sources : [];
         state.openNewsCategories = Array.isArray(data.categories) ? data.categories : [];
         state.openNewsTrendCategories = Array.isArray(data.trend_categories) ? data.trend_categories : state.openNewsCategories;
         state.openNewsTrendTimeRanges = Array.isArray(data.trend_time_ranges) ? data.trend_time_ranges : [];
         renderOpenNewsOptions();
-        renderOpenNewsSourceGrid();
-        setOpenNewsMode(state.openNewsMode || 'source');
-        loadOpenNewsAutoConfig();
-        loadOpenNewsAutoCandidates();
+        resetOpenNewsHotspotView();
+        await loadOpenNewsBatchConfig();
+        await loadOpenNewsBatches();
+        await loadOpenNewsLocalTokProposals();
       } catch (error) {
-        setOpenNewsStatus(error.message || '新闻源加载失败', true);
+        setOpenNewsStatus(error.message || '热点源加载失败', true);
       }
-    }
-
-    function renderOpenNewsSourceGrid() {
-      if (!els.openNewsSourceGrid) return;
-      if (state.openNewsMode === 'trend') {
-        els.openNewsSourceGrid.innerHTML = '';
-        return;
-      }
-      const category = els.openNewsCategorySelect?.value || 'all';
-      const sources = state.openNewsSources.filter(item => category === 'all' || item.category === category);
-      els.openNewsSourceGrid.innerHTML = sources.length ? sources.map(item => `
-        <label class="voice-card" style="padding:14px;">
-          <input type="checkbox" value="${escapeHtml(item.id || '')}" checked style="width:18px;height:18px;accent-color:var(--brand);">
-          <strong>${escapeHtml(item.name || item.id || '新闻源')}</strong>
-          <span class="voice-subtitle">${escapeHtml(item.country || '')} · ${escapeHtml(item.content_type || '')}</span>
-          <span class="chip">${escapeHtml(item.license || '未知授权')}</span>
-        </label>
-      `).join('') : '<div class="empty-box">当前分区暂未配置新闻源。</div>';
     }
 
     function renderOpenNewsCandidates(candidates = []) {
@@ -4185,21 +4026,464 @@
 
     function renderOpenNewsStats(stats = [], rawCount = 0, dedupedCount = 0, recentCount = 0, recentWindow = '') {
       if (!els.openNewsStats) return;
-      if (!stats.length) {
-        els.openNewsStats.style.display = 'none';
-        els.openNewsStats.innerHTML = '';
+      els.openNewsStats.style.display = 'none';
+      els.openNewsStats.innerHTML = '';
+    }
+
+    function setOpenNewsBatchStatus(message, error = false) {
+      if (!els.openNewsBatchStatus) return;
+      els.openNewsBatchStatus.textContent = message;
+      els.openNewsBatchStatus.classList.toggle('error', !!error);
+    }
+
+    function setOpenNewsBatchProduceStatus(message, error = false) {
+      if (!els.openNewsBatchProduceStatus) return;
+      els.openNewsBatchProduceStatus.textContent = message;
+      els.openNewsBatchProduceStatus.classList.toggle('error', !!error);
+    }
+
+    function formatOpenNewsBatchTime(value) {
+      const numeric = Number(value || 0);
+      if (!numeric) return '-';
+      try {
+        return new Date(numeric * 1000).toLocaleString();
+      } catch {
+        return '-';
+      }
+    }
+
+    function selectedOpenNewsBatchItemIds() {
+      return Array.from(document.querySelectorAll('.opennews-batch-check:checked')).map(input => input.value).filter(Boolean);
+    }
+
+    function renderOpenNewsBatches(batches = []) {
+      if (!els.openNewsBatchList) return;
+      state.openNewsBatches = Array.isArray(batches) ? batches : [];
+      if (!state.openNewsBatches.length) {
+        els.openNewsBatchList.innerHTML = '<div class="empty-box">还没有热点抓取批次。可以点击“立即抓取一批”，或开启自动抓取。</div>';
         return;
       }
-      els.openNewsStats.style.display = 'grid';
-      const summary = `<div class="insight-card"><div class="label">抓取统计</div><div class="value">原始 ${Number(rawCount || 0)} 条｜去重后 ${Number(dedupedCount || 0)} 条｜今日/昨日 ${Number(recentCount || 0)} 条</div>${recentWindow ? `<div class="label">时间窗口：${escapeHtml(recentWindow)}</div>` : '<div class="label">仅显示今天和前一天的新闻。</div>'}</div>`;
-      const sourceCards = stats.map(item => `
-        <div class="insight-card">
-          <div class="label">${escapeHtml(item.source_name || item.source_id || '新闻源')}</div>
-          <div class="value">今日/昨日 ${Number(item.deduped_count || 0)} / 原始 ${Number(item.raw_count || 0)}｜页面 ${Number(item.crawled_pages || 0)}</div>
-          ${item.error && !Number(item.raw_count || 0) ? `<div class="label" style="color:#b45309;">${escapeHtml(item.error)}</div>` : ''}
+      els.openNewsBatchList.innerHTML = state.openNewsBatches.map(batch => {
+        const items = Array.isArray(batch.items) ? batch.items : [];
+        const title = `${formatOpenNewsBatchTime(batch.started_at)}｜${escapeHtml(batch.category || 'all')}｜${escapeHtml(batch.time_range || '6h')}`;
+        const summary = `新增 ${items.length} 条｜原始 ${Number(batch.raw_count || 0)} 条｜过滤重复 ${Number(batch.duplicate_count || 0)} 条`;
+        const itemCards = items.length ? items.map(item => {
+          const itemId = item.batch_item_id || item.id || '';
+          const displayTitle = item.title_zh || item.translated_title || item.title || '未命名新闻';
+          const displaySummary = item.summary_zh || item.translated_summary || item.summary || '';
+          const originalTitle = item.title_zh || item.translated_title ? item.title : '';
+          return `
+            <label class="history-card" style="cursor:pointer;">
+              <div class="history-top">
+                <div style="display:flex; gap:10px; align-items:flex-start;">
+                  <input class="opennews-batch-check" type="checkbox" value="${escapeHtml(itemId)}" style="margin-top:5px;">
+                  <div>
+                    <div class="history-title">${escapeHtml(displayTitle)}</div>
+                    ${originalTitle ? `<div class="history-topic">英文原题：${escapeHtml(originalTitle)}</div>` : ''}
+                    <div class="history-topic">${escapeHtml(item.source_name || item.trend_domain || '')} · ${escapeHtml(item.category_name || '')}</div>
+                  </div>
+                </div>
+                <span class="badge">热度 ${escapeHtml(item.trend_score || '-')}</span>
+              </div>
+              <div class="history-topic">新闻时间：${escapeHtml(item.published_at || '来源页面未标注明确发布时间')}</div>
+              ${displaySummary ? `<div class="social-card">${escapeHtml(displaySummary)}</div>` : ''}
+              <div class="actions">
+                <a class="btn btn-secondary" href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener" onclick="event.stopPropagation()">打开原文</a>
+              </div>
+            </label>
+          `;
+        }).join('') : '<div class="empty-box">这个批次没有新增新闻，可能都被跨批次去重过滤了。</div>';
+        return `
+          <div class="history-card">
+            <div class="history-top">
+              <div>
+                <div class="history-title">${title}</div>
+                <div class="history-topic">${summary}</div>
+              </div>
+              <span class="badge">${escapeHtml(batch.triggered_by || 'auto')}</span>
+            </div>
+            ${batch.message ? `<div class="history-topic">${escapeHtml(batch.message)}</div>` : ''}
+            <div class="file-board" style="margin-top:12px;">${itemCards}</div>
+          </div>
+        `;
+      }).join('');
+      els.openNewsBatchList.querySelectorAll('.opennews-batch-check').forEach(input => {
+        input.addEventListener('change', () => {
+          const count = selectedOpenNewsBatchItemIds().length;
+          setOpenNewsBatchProduceStatus(count ? `已勾选 ${count} 条新闻，可一键批量生产。` : '请选择批次里的新闻。');
+        });
+      });
+    }
+
+    function applyOpenNewsBatchConfig(config = {}, isAdmin = false) {
+      state.openNewsBatchConfig = config || {};
+      if (els.openNewsBatchEnabled) {
+        els.openNewsBatchEnabled.checked = !!config.enabled;
+        els.openNewsBatchEnabled.disabled = !isAdmin;
+      }
+      if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(config.interval_minutes || 30);
+      if (els.openNewsBatchLimitSelect) els.openNewsBatchLimitSelect.value = String(config.limit || 20);
+      if (els.openNewsBatchSaveBtn) els.openNewsBatchSaveBtn.disabled = !isAdmin;
+      const nextRun = config.next_run_at ? `下次抓取：${formatOpenNewsBatchTime(config.next_run_at)}` : '自动抓取未启用';
+      setOpenNewsBatchStatus(`${config.last_run_message || '自动抓取尚未启动。'}｜${nextRun}`);
+    }
+
+    async function loadOpenNewsBatchConfig() {
+      if (!els.openNewsBatchStatus) return;
+      try {
+        const res = await fetch('/api/opennews/batches/config');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '自动抓取设置加载失败');
+        applyOpenNewsBatchConfig(data.config || {}, !!data.is_admin);
+      } catch (error) {
+        setOpenNewsBatchStatus(friendlyRequestError(error, '自动抓取设置加载失败'), true);
+      }
+    }
+
+    async function saveOpenNewsBatchConfig() {
+      setOpenNewsBatchStatus('正在保存自动抓取设置...');
+      try {
+        const res = await fetch('/api/opennews/batches/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            enabled: !!els.openNewsBatchEnabled?.checked,
+            interval_minutes: Number(els.openNewsBatchIntervalSelect?.value || 30),
+            category: els.openNewsCategorySelect?.value || 'all',
+            time_range: els.openNewsTrendRangeSelect?.value || '6h',
+            limit: Number(els.openNewsBatchLimitSelect?.value || 20),
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '保存失败');
+        applyOpenNewsBatchConfig(data.config || {}, true);
+      } catch (error) {
+        setOpenNewsBatchStatus(friendlyRequestError(error, '自动抓取设置保存失败'), true);
+      }
+    }
+
+    async function loadOpenNewsBatches() {
+      if (!els.openNewsBatchList) return;
+      try {
+        const res = await fetch('/api/opennews/batches?limit=20');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '批次加载失败');
+        renderOpenNewsBatches(Array.isArray(data.batches) ? data.batches : []);
+        await loadOpenNewsBatchJobs();
+      } catch (error) {
+        if (els.openNewsBatchList) els.openNewsBatchList.innerHTML = `<div class="empty-box">${escapeHtml(friendlyRequestError(error, '批次加载失败'))}</div>`;
+      }
+    }
+
+    async function loadOpenNewsBatchJobs() {
+      if (!els.openNewsBatchJobList) return;
+      try {
+        const res = await fetch('/api/opennews/batches/jobs?limit=5');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '批量生产任务加载失败');
+        const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+        if (!jobs.length) return;
+        renderOpenNewsBatchJob(jobs[0] || {});
+      } catch (error) {
+        // 生产任务列表只是状态恢复辅助，不影响批次新闻本身显示。
+      }
+    }
+
+    async function runOpenNewsBatchNow() {
+      if (els.openNewsBatchRunBtn) {
+        els.openNewsBatchRunBtn.disabled = true;
+        els.openNewsBatchRunBtn.textContent = '抓取中...';
+      }
+      setOpenNewsBatchStatus('正在抓取一个新的热点批次...');
+      try {
+        const res = await fetch('/api/opennews/batches/run-now', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            category: els.openNewsCategorySelect?.value || 'all',
+            time_range: els.openNewsTrendRangeSelect?.value || '6h',
+            limit: Number(els.openNewsBatchLimitSelect?.value || 20),
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || data.message || '抓取失败');
+        setOpenNewsBatchStatus(data.message || '新批次抓取完成');
+        await loadOpenNewsBatchConfig();
+        await loadOpenNewsBatches();
+      } catch (error) {
+        setOpenNewsBatchStatus(friendlyRequestError(error, '批次抓取失败'), true);
+      } finally {
+        if (els.openNewsBatchRunBtn) {
+          els.openNewsBatchRunBtn.disabled = false;
+          els.openNewsBatchRunBtn.textContent = '立即抓取一批';
+        }
+      }
+    }
+
+    function openNewsBatchItemStatusLabel(item = {}) {
+      const status = item.status || 'queued';
+      const youtubeRecords = Array.isArray(item.youtube_records) ? item.youtube_records : [];
+      if (status === 'completed' && youtubeRecords.length) return 'YouTube 已发布';
+      if (status === 'completed' && item.youtube_error) return '成片完成 / YouTube 失败';
+      if (status === 'completed') return '成片完成';
+      const labels = {
+        queued: '等待生成',
+        drafting: '生成文案中',
+        producing: '生成配音素材中',
+        composing: '合成成片中',
+        publishing_youtube: '发布 YouTube 中',
+        failed: '失败',
+      };
+      return labels[status] || status;
+    }
+
+    function renderOpenNewsBatchJob(job = {}) {
+      if (!els.openNewsBatchJobList) return;
+      els.openNewsBatchJobList.style.display = 'grid';
+      const items = Array.isArray(job.items) ? job.items : [];
+      const completedCount = items.filter(item => item.status === 'completed').length;
+      const publishedCount = items.filter(item => Array.isArray(item.youtube_records) && item.youtube_records.length).length;
+      const failedCount = items.filter(item => item.status === 'failed' || item.error || item.youtube_error).length;
+      const summary = [
+        `${completedCount}/${items.length || 0} 条成片完成`,
+        publishedCount ? `${publishedCount} 条已发布 YouTube` : '',
+        failedCount ? `${failedCount} 条有异常` : '',
+      ].filter(Boolean).join('｜');
+      els.openNewsBatchJobList.innerHTML = `
+        <div class="history-card">
+          <div class="history-top">
+            <div>
+              <div class="history-title">批量生产任务：${escapeHtml(job.job_id || '-')}</div>
+              <div class="history-topic">${escapeHtml(job.message || '')}</div>
+              ${summary ? `<div class="history-topic">${escapeHtml(summary)}</div>` : ''}
+            </div>
+            <span class="badge">${escapeHtml(job.status || '-')}</span>
+          </div>
+          <div class="file-board" style="margin-top:12px;">
+            ${items.map(item => `
+              <div class="history-card">
+                <div class="history-top">
+                  <div>
+                    <div class="history-title">${escapeHtml(item.title || 'OpenNews 新闻')}</div>
+                    <div class="history-topic">${escapeHtml(item.message || '')}</div>
+                  </div>
+                  <span class="badge">${escapeHtml(openNewsBatchItemStatusLabel(item))}</span>
+                </div>
+                ${item.task_id ? `<div class="history-topic">任务 ID：${escapeHtml(item.task_id)}</div>` : ''}
+                ${item.vertical_url || item.horizontal_url ? `<div class="actions" style="margin-top:10px;">
+                  ${item.horizontal_url ? `<a class="btn btn-secondary" href="${escapeHtml(item.horizontal_url)}" target="_blank" rel="noopener">下载横屏</a>` : ''}
+                  ${item.vertical_url ? `<a class="btn btn-secondary" href="${escapeHtml(item.vertical_url)}" target="_blank" rel="noopener">下载竖屏</a>` : ''}
+                </div>` : ''}
+                ${Array.isArray(item.youtube_records) && item.youtube_records.length ? `<div class="social-card" style="margin-top:10px;"><strong>YouTube 已发布</strong>${item.youtube_records.map(record => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>${escapeHtml(record.aspect_ratio || '')}｜${escapeHtml(record.privacy_status || '')}</span><a href="${escapeHtml(record.youtube_url || '#')}" target="_blank" rel="noopener">打开 YouTube</a></div>`).join('')}</div>` : ''}
+                ${item.youtube_error ? `<div class="topbar-status error">${escapeHtml(item.youtube_error)}</div>` : ''}
+                ${item.error ? `<div class="topbar-status error">${escapeHtml(item.error)}</div>` : ''}
+              </div>
+            `).join('')}
+          </div>
         </div>
-      `).join('');
-      els.openNewsStats.innerHTML = summary + sourceCards;
+      `;
+    }
+
+    async function fetchOpenNewsBatchJob(jobId) {
+      const res = await fetch(`/api/opennews/batches/jobs/${encodeURIComponent(jobId)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '批量生产状态查询失败');
+      return data.job || {};
+    }
+
+    async function pollOpenNewsBatchJob(jobId) {
+      state.openNewsBatchJobId = jobId;
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 900000) {
+        await new Promise(resolve => setTimeout(resolve, 2500));
+        const job = await fetchOpenNewsBatchJob(jobId);
+        renderOpenNewsBatchJob(job);
+        const status = job?.status;
+        if (['done', 'partial', 'failed'].includes(status)) {
+          renderOpenNewsBatchJob(await fetchOpenNewsBatchJob(jobId));
+          await loadActiveTasks();
+          return;
+        }
+      }
+      throw new Error('批量生产状态等待超时，请稍后在当前任务或历史记录里查看。');
+    }
+
+    async function produceOpenNewsBatchVideos() {
+      const itemIds = selectedOpenNewsBatchItemIds();
+      if (!itemIds.length) {
+        setOpenNewsBatchProduceStatus('请先勾选要制作的视频新闻。', true);
+        return;
+      }
+      if (els.openNewsBatchProduceBtn) {
+        els.openNewsBatchProduceBtn.disabled = true;
+        els.openNewsBatchProduceBtn.textContent = '提交中...';
+      }
+      setOpenNewsBatchProduceStatus(`正在提交 ${itemIds.length} 条新闻批量生产...`);
+      try {
+        const res = await fetch('/api/opennews/batches/produce', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_ids: itemIds,
+            target_market: els.openNewsBatchMarketSelect?.value || state.selectedTargetMarket || 'cn',
+            voice_preset_id: els.openNewsBatchVoiceSelect?.value || '',
+            aspect_ratio: els.openNewsBatchAspectSelect?.value || 'horizontal',
+            youtube_auto_publish: !!els.openNewsBatchYoutubePublish?.checked,
+            youtube_privacy_status: 'public',
+            youtube_aspects: ['horizontal', 'vertical'],
+            notes: els.openNewsNotesInput?.value || '',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '批量生产提交失败');
+        renderOpenNewsBatchJob(data.job || {});
+        setOpenNewsBatchProduceStatus(els.openNewsBatchYoutubePublish?.checked ? '批量生产已开始，成片完成后会自动发布 YouTube。' : '批量生产已开始，系统会自动生成文案并提交成片任务。');
+        await pollOpenNewsBatchJob(data.job_id);
+        setOpenNewsBatchProduceStatus(els.openNewsBatchYoutubePublish?.checked ? '批量生产已完成，YouTube 发布结果已显示在任务卡片中。' : '批量生产已提交完成，可在当前任务和历史记录查看视频。');
+      } catch (error) {
+        setOpenNewsBatchProduceStatus(friendlyRequestError(error, '批量生产失败'), true);
+      } finally {
+        if (els.openNewsBatchProduceBtn) {
+          els.openNewsBatchProduceBtn.disabled = false;
+          els.openNewsBatchProduceBtn.textContent = '一键制作选中新闻视频';
+        }
+      }
+    }
+
+    function renderOpenNewsLocalTokProposals(proposals = []) {
+      if (!els.openNewsLocalTokList) return;
+      state.openNewsLocalTokProposals = Array.isArray(proposals) ? proposals : [];
+      els.openNewsLocalTokList.style.display = state.openNewsLocalTokProposals.length ? 'grid' : 'none';
+      if (!state.openNewsLocalTokProposals.length) {
+        els.openNewsLocalTokList.innerHTML = '';
+        return;
+      }
+      els.openNewsLocalTokList.innerHTML = state.openNewsLocalTokProposals.map(proposal => {
+        const localId = proposal.local_proposal_id || '';
+        const titles = Array.isArray(proposal.titles) ? proposal.titles : [];
+        const decision = proposal.decision || {};
+        const publishResult = proposal.publish_result || {};
+        return `
+          <div class="history-card">
+            <div class="history-top">
+              <div>
+                <div class="history-title">LocalTok 审核提案：${escapeHtml(proposal.proposal_id || localId || '-')}</div>
+                <div class="history-topic">${escapeHtml(proposal.message || '')}</div>
+              </div>
+              <span class="badge">${escapeHtml(proposal.status || '-')}</span>
+            </div>
+            <div class="history-topic">候选：${escapeHtml(titles.slice(0, 3).join(' / ') || '-')}</div>
+            ${decision.choice ? `<div class="social-card">审核选择：${escapeHtml(decision.choice || '')}${decision.feedback ? `｜反馈：${escapeHtml(decision.feedback)}` : ''}</div>` : ''}
+            ${proposal.task_id ? `<div class="history-topic">生成任务 ID：${escapeHtml(proposal.task_id)}</div>` : ''}
+            ${proposal.history_id ? `<div class="history-topic">历史记录：${escapeHtml(proposal.history_id)}</div>` : ''}
+            ${publishResult.name ? `<div class="history-topic">LocalTok 文件：${escapeHtml(publishResult.name)}</div>` : ''}
+            ${proposal.error ? `<div class="topbar-status error">${escapeHtml(proposal.error)}</div>` : ''}
+            <div class="actions">
+              <button class="btn btn-secondary opennews-localtok-check" data-proposal-id="${escapeHtml(localId)}" type="button">检查审核决定</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      els.openNewsLocalTokList.querySelectorAll('.opennews-localtok-check').forEach(btn => {
+        btn.addEventListener('click', () => checkOpenNewsLocalTokProposal(btn.dataset.proposalId));
+      });
+    }
+
+    async function loadOpenNewsLocalTokProposals() {
+      if (!els.openNewsLocalTokList) return;
+      try {
+        const res = await fetch('/api/opennews/localtok/proposals?limit=20');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'LocalTok 状态加载失败');
+        renderOpenNewsLocalTokProposals(Array.isArray(data.proposals) ? data.proposals : []);
+        const configured = !!data.localtok?.configured;
+        if (!configured) {
+          setOpenNewsBatchProduceStatus('LocalTok 还没有配置令牌，需先在服务器设置 LOCALTOK_TOKEN。', true);
+        }
+      } catch (error) {
+        setOpenNewsBatchProduceStatus(friendlyRequestError(error, 'LocalTok 状态加载失败'), true);
+      }
+    }
+
+    async function proposeOpenNewsToLocalTok() {
+      const itemIds = selectedOpenNewsBatchItemIds();
+      if (!itemIds.length) {
+        setOpenNewsBatchProduceStatus('请先勾选要提交 LocalTok 审核的新闻。', true);
+        return;
+      }
+      if (els.openNewsLocalTokProposeBtn) {
+        els.openNewsLocalTokProposeBtn.disabled = true;
+        els.openNewsLocalTokProposeBtn.textContent = '提交中...';
+      }
+      setOpenNewsBatchProduceStatus(`正在提交 ${itemIds.length} 条新闻给 LocalTok 审核...`);
+      try {
+        const res = await fetch('/api/opennews/localtok/propose', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_ids: itemIds,
+            target_market: els.openNewsBatchMarketSelect?.value || state.selectedTargetMarket || 'cn',
+            voice_preset_id: els.openNewsBatchVoiceSelect?.value || '',
+            notes: els.openNewsNotesInput?.value || '',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'LocalTok 提案提交失败');
+        setOpenNewsBatchProduceStatus(`LocalTok 提案已提交：${data.proposal_id || data.local_proposal_id || ''}，等待对方审核。`);
+        await loadOpenNewsLocalTokProposals();
+        if (data.local_proposal_id) {
+          pollOpenNewsLocalTokProposal(data.local_proposal_id).catch(() => {});
+        }
+      } catch (error) {
+        setOpenNewsBatchProduceStatus(friendlyRequestError(error, 'LocalTok 提案失败'), true);
+      } finally {
+        if (els.openNewsLocalTokProposeBtn) {
+          els.openNewsLocalTokProposeBtn.disabled = false;
+          els.openNewsLocalTokProposeBtn.textContent = '提交 LocalTok 审核';
+        }
+      }
+    }
+
+    async function checkOpenNewsLocalTokProposal(localProposalId) {
+      if (!localProposalId) return;
+      setOpenNewsBatchProduceStatus('正在检查 LocalTok 审核决定...');
+      try {
+        const res = await fetch(`/api/opennews/localtok/proposals/${encodeURIComponent(localProposalId)}/check`, {
+          method: 'POST',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'LocalTok 审核状态检查失败');
+        renderOpenNewsLocalTokProposals([data.proposal, ...state.openNewsLocalTokProposals.filter(item => item.local_proposal_id !== localProposalId)]);
+        const status = data.proposal?.status || 'pending';
+        setOpenNewsBatchProduceStatus(status === 'pending' ? 'LocalTok 还未审核，稍后再检查。' : (data.proposal?.message || 'LocalTok 状态已更新。'));
+        if (['decided', 'generating'].includes(status)) {
+          pollOpenNewsLocalTokProposal(localProposalId).catch(() => {});
+        }
+      } catch (error) {
+        setOpenNewsBatchProduceStatus(friendlyRequestError(error, 'LocalTok 审核检查失败'), true);
+      }
+    }
+
+    async function pollOpenNewsLocalTokProposal(localProposalId) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 30 * 60 * 1000) {
+        await new Promise(resolve => setTimeout(resolve, 30000));
+        const res = await fetch('/api/opennews/localtok/proposals?limit=20');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'LocalTok 状态查询失败');
+        renderOpenNewsLocalTokProposals(Array.isArray(data.proposals) ? data.proposals : []);
+        const proposal = (data.proposals || []).find(item => item.local_proposal_id === localProposalId);
+        if (!proposal) return;
+        if (proposal.status === 'pending') {
+          await checkOpenNewsLocalTokProposal(localProposalId);
+          continue;
+        }
+        if (['published', 'failed'].includes(proposal.status)) {
+          setOpenNewsBatchProduceStatus(proposal.message || 'LocalTok 流程已结束。', proposal.status === 'failed');
+          await loadActiveTasks();
+          return;
+        }
+      }
     }
 
     function openNewsSourceNotice(sourceErrors = []) {
@@ -4212,27 +4496,20 @@
     async function searchOpenNews() {
       const query = (els.openNewsQueryInput?.value || '').trim();
       const category = els.openNewsCategorySelect?.value || 'all';
-      const sourceIds = selectedOpenNewsSourceIds();
-      const trendMode = state.openNewsMode === 'trend';
-      if (!trendMode && !sourceIds.length) {
-        setOpenNewsStatus('请至少选择一个新闻源。', true);
-        return;
-      }
       els.openNewsSearchBtn.disabled = true;
-      els.openNewsSearchBtn.textContent = trendMode ? '抓取热点中...' : '抓取中...';
+      els.openNewsSearchBtn.textContent = '抓取热点中...';
       state.openNewsSelectedArticle = null;
       state.openNewsDraft = null;
       if (els.openNewsDraftPanel) els.openNewsDraftPanel.style.display = 'none';
       renderOpenNewsStats();
-      setOpenNewsStatus(trendMode ? '正在抓取英文圈热点新闻，优先使用 NewsData，必要时自动补充 GDELT/Bing...' : (query ? '正在按关键词过滤所选网站新闻...' : '正在抓取所选网站的最新公开新闻...'));
+      setOpenNewsStatus('正在抓取英文圈热点新闻，优先使用 NewsData，必要时自动补充 GDELT/Bing...');
       try {
-        const res = await fetch(trendMode ? '/api/opennews/trends/search' : '/api/opennews/search', {
+        const res = await fetch('/api/opennews/trends/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             query,
             category,
-            source_ids: sourceIds,
             time_range: els.openNewsTrendRangeSelect?.value || '6h',
           }),
         });
@@ -4240,25 +4517,68 @@
         if (!res.ok) throw new Error(data.error || '新闻抓取失败');
         renderOpenNewsCandidates(Array.isArray(data.candidates) ? data.candidates : []);
         renderOpenNewsStats(Array.isArray(data.stats) ? data.stats : [], data.raw_count, data.deduped_count, data.recent_count, data.recent_window);
-        const sourceNotice = trendMode ? openNewsSourceNotice(data.source_errors || []) : '';
-        setOpenNewsStatus(trendMode
-          ? `已发现 ${Number(data.count || 0)} 个英文热点。${sourceNotice ? sourceNotice + ' ' : ''}请确认来源和热度后生成中文新闻稿。`
-          : `已抓取 ${Number(data.count || 0)} 条今天/昨天的新闻候选。请确认来源网站和新闻时间后生成新闻稿。`);
+        const sourceNotice = openNewsSourceNotice(data.source_errors || []);
+        setOpenNewsStatus(`已发现 ${Number(data.count || 0)} 个英文热点。${sourceNotice ? sourceNotice + ' ' : ''}请确认来源和热度后生成中文新闻稿。`);
       } catch (error) {
         renderOpenNewsCandidates([]);
         renderOpenNewsStats();
         setOpenNewsStatus(friendlyRequestError(error, '新闻抓取失败'), true);
       } finally {
         els.openNewsSearchBtn.disabled = false;
-        els.openNewsSearchBtn.textContent = trendMode ? '抓取英文热点' : '抓取最新新闻';
+        els.openNewsSearchBtn.textContent = '抓取英文热点';
       }
+    }
+
+    async function quickFetchOpenNewsHotspots() {
+      resetOpenNewsHotspotView();
+      if (els.openNewsCategorySelect) els.openNewsCategorySelect.value = 'all';
+      if (els.openNewsTrendRangeSelect) els.openNewsTrendRangeSelect.value = '6h';
+      if (els.openNewsQueryInput) els.openNewsQueryInput.value = '';
+      setOpenNewsStatus('正在自动抓取全球英文热点新闻...');
+      await searchOpenNews();
+    }
+
+    function applyOpenNewsDraft(article, draft) {
+      state.openNewsDraft = draft || {};
+      if (els.openNewsDraftPanel) els.openNewsDraftPanel.style.display = 'grid';
+      if (els.openNewsScriptTextarea) els.openNewsScriptTextarea.value = state.openNewsDraft.script || '';
+      const meta = state.openNewsDraft._meta || {};
+      const mediaCount = Array.isArray(meta.article_media) ? meta.article_media.length : 0;
+      if (els.openNewsDraftMeta) {
+        els.openNewsDraftMeta.innerHTML = [
+          { label: '新闻来源', value: article.source_name || meta.source_name || '-' },
+          { label: '新闻时间', value: state.openNewsDraft.news_time_label || article.published_at || meta.published_at || '来源页面未标注明确发布时间' },
+          { label: '新闻分区', value: article.category_name || meta.category_name || '-' },
+          { label: '原站素材', value: `${mediaCount} 个图片/视频候选` },
+        ].map(item => `<div class="insight-card"><div class="label">${escapeHtml(item.label)}</div><div class="value">${escapeHtml(item.value)}</div></div>`).join('');
+      }
+      setOpenNewsStatus('新闻稿已生成。确认后可以进入新闻素材成片生产。');
+    }
+
+    async function pollOpenNewsDraftJob(jobId, article) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 420000) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const res = await fetch(`/api/opennews/draft/status/${encodeURIComponent(jobId)}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '新闻稿生成状态查询失败');
+        if (data.status === 'done') {
+          applyOpenNewsDraft(article, data.draft || {});
+          return;
+        }
+        if (data.status === 'failed') {
+          throw new Error(data.error || data.message || '新闻稿生成失败');
+        }
+        setOpenNewsStatus(data.message || '新闻稿正在后台生成，请稍候...');
+      }
+      throw new Error('新闻稿后台生成等待超时，请稍后到页面重新查看或重试。');
     }
 
     async function generateOpenNewsDraft(article) {
       state.openNewsSelectedArticle = article;
-      setOpenNewsStatus('正在读取原文、提取原站素材并生成新闻稿...');
+      setOpenNewsStatus('新闻稿任务已提交，正在后台生成...');
       try {
-        const res = await fetch('/api/opennews/draft', {
+        const res = await fetch('/api/opennews/draft/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -4268,19 +4588,8 @@
           }),
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || '新闻稿生成失败');
-        state.openNewsDraft = data.draft || {};
-        if (els.openNewsDraftPanel) els.openNewsDraftPanel.style.display = 'grid';
-        if (els.openNewsScriptTextarea) els.openNewsScriptTextarea.value = state.openNewsDraft.script || '';
-        const meta = state.openNewsDraft._meta || {};
-        const mediaCount = Array.isArray(meta.article_media) ? meta.article_media.length : 0;
-        els.openNewsDraftMeta.innerHTML = [
-          { label: '新闻来源', value: article.source_name || meta.source_name || '-' },
-          { label: '新闻时间', value: state.openNewsDraft.news_time_label || article.published_at || meta.published_at || '来源页面未标注明确发布时间' },
-          { label: '新闻分区', value: article.category_name || meta.category_name || '-' },
-          { label: '原站素材', value: `${mediaCount} 个图片/视频候选` },
-        ].map(item => `<div class="insight-card"><div class="label">${escapeHtml(item.label)}</div><div class="value">${escapeHtml(item.value)}</div></div>`).join('');
-        setOpenNewsStatus('新闻稿已生成。确认后可以进入新闻素材成片生产。');
+        if (!res.ok) throw new Error(data.error || '新闻稿任务提交失败');
+        await pollOpenNewsDraftJob(data.job_id, article);
       } catch (error) {
         setOpenNewsStatus(friendlyRequestError(error, '新闻稿生成失败'), true);
       }
@@ -4338,8 +4647,6 @@
       if (openNewsMode) {
         renderOpenNewsOptions();
         loadOpenNewsSources();
-        loadOpenNewsAutoConfig();
-        loadOpenNewsAutoCandidates();
         setHeroStatus('OpenNews 新闻视频工作台已就绪');
       } else if (propertyMode) {
         renderPropertyVideoOptions();
@@ -5534,6 +5841,34 @@
             </div>
           `);
         }
+        const finalVariants = result.final_video_variants || {};
+        const variantKeys = Object.keys(finalVariants).filter(key => finalVariants[key]?.url);
+        if (variantKeys.length > 1) {
+          const orderedVariantKeys = ['horizontal', 'vertical'].filter(key => finalVariants[key]?.url)
+            .concat(variantKeys.filter(key => !['horizontal', 'vertical'].includes(key)));
+          const variantPreviews = orderedVariantKeys.map(key => {
+            const variant = finalVariants[key] || {};
+            const label = key === 'horizontal' ? '横屏 16:9' : (key === 'vertical' ? '竖屏 9:16' : key);
+            return `
+              <div class="media-box" style="box-shadow:none; border:1px solid rgba(15,23,42,0.08); margin-top:12px;">
+                <div class="label">${escapeHtml(label)}</div>
+                <video controls playsinline src="${variant.url}"></video>
+                <div class="actions" style="margin-top:10px; flex-wrap:wrap;">
+                  <a class="btn btn-secondary" href="${variant.url}" download target="_blank" style="text-decoration:none;">下载${escapeHtml(label)}</a>
+                  ${variant.cover_url ? `<a class="btn btn-secondary" href="${variant.cover_url}" download target="_blank" style="text-decoration:none;">下载封面</a>` : ''}
+                  ${variant.subtitle_url ? `<a class="btn btn-secondary" href="${variant.subtitle_url}" download target="_blank" style="text-decoration:none;">下载字幕</a>` : ''}
+                </div>
+              </div>
+            `;
+          }).join('');
+          finalBlocks.push(`
+            <div class="media-box">
+              <div class="label">成片双版本</div>
+              <div class="empty-box" style="min-height:auto; padding:16px; text-align:left;">已同时生成横屏 16:9 和竖屏 9:16 两个版本，可分别预览和下载。</div>
+              ${variantPreviews}
+            </div>
+          `);
+        }
         if (result.cover_image?.url || result.subtitle_file?.url) {
           finalBlocks.push(`
             <div class="media-box">
@@ -6072,11 +6407,16 @@
     });
     els.openNewsPageBtn?.addEventListener('click', () => switchWorkspaceMode('opennews'));
     els.openNewsBackBtn?.addEventListener('click', () => switchWorkspaceMode('ai'));
-    els.openNewsSourceModeBtn?.addEventListener('click', () => setOpenNewsMode('source'));
-    els.openNewsTrendModeBtn?.addEventListener('click', () => setOpenNewsMode('trend'));
+    els.openNewsQuickHotBtn?.addEventListener('click', quickFetchOpenNewsHotspots);
+    els.openNewsBatchSaveBtn?.addEventListener('click', saveOpenNewsBatchConfig);
+    els.openNewsBatchRunBtn?.addEventListener('click', runOpenNewsBatchNow);
+    els.openNewsBatchRefreshBtn?.addEventListener('click', loadOpenNewsBatches);
+    els.openNewsBatchProduceBtn?.addEventListener('click', produceOpenNewsBatchVideos);
+    els.openNewsLocalTokProposeBtn?.addEventListener('click', proposeOpenNewsToLocalTok);
+    els.openNewsLocalTokRefreshBtn?.addEventListener('click', loadOpenNewsLocalTokProposals);
+    els.openNewsBatchMarketSelect?.addEventListener('change', renderOpenNewsOptions);
     els.openNewsCategorySelect?.addEventListener('change', () => {
       renderOpenNewsOptions();
-      renderOpenNewsSourceGrid();
     });
     els.openNewsSearchBtn?.addEventListener('click', searchOpenNews);
     els.openNewsQueryInput?.addEventListener('keydown', (event) => {
@@ -6087,12 +6427,6 @@
     });
     els.openNewsMarketSelect?.addEventListener('change', renderOpenNewsOptions);
     els.openNewsProduceBtn?.addEventListener('click', produceOpenNewsVideo);
-    els.openNewsAutoRefreshBtn?.addEventListener('click', async () => {
-      await loadOpenNewsAutoConfig();
-      await loadOpenNewsAutoCandidates();
-    });
-    els.openNewsAutoSaveBtn?.addEventListener('click', saveOpenNewsAutoConfig);
-    els.openNewsAutoRunBtn?.addEventListener('click', runOpenNewsAutoNow);
     els.propertyVideoPageBtn?.addEventListener('click', () => switchWorkspaceMode('property'));
     els.backToAiWorkflowBtn?.addEventListener('click', () => switchWorkspaceMode('ai'));
     els.propertyVideoMarketSelect?.addEventListener('change', renderPropertyVideoOptions);

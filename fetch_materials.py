@@ -16,6 +16,9 @@ load_dotenv(override=False)
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 PEXELS_API_URL = "https://api.pexels.com/v1/search"
 PEXELS_VIDEO_URL = "https://api.pexels.com/videos/search"
+OPENNEWS_MAX_MATERIALS = 10
+OPENNEWS_MAX_SOURCE_VIDEOS = 1
+OPENNEWS_MAX_SOURCE_IMAGES = 10
 
 
 def _asset_kind_for_suffix(path: str) -> str:
@@ -281,17 +284,26 @@ def _rank_source_material(item: dict) -> int:
     kind = str(item.get("kind") or "").lower()
     title = str(item.get("title") or "").lower()
     url = str(item.get("url") or "").lower()
-    score = 100 if kind == "video" else 0
+    source = str(item.get("source") or "").lower()
+    score = 15 if kind == "video" else 0
     if "opengraph" in title:
-        score += 20
-    if "article" in title:
-        score += 15
-    if "linked video" in title or re.search(r"\.(mp4|mov|m4v|webm)(?:$|\?)", url):
         score += 30
+    if "article" in title:
+        score += 25
+    if "hero" in title or "featured" in title or "lead" in title:
+        score += 18
+    if any(token in url for token in ("wp-content", "media", "image", "photo", "newsroom", "uploads")):
+        score += 10
+    if "linked video" in title or re.search(r"\.(mp4|mov|m4v|webm)(?:$|\?)", url):
+        score += 20
+    if source in {"article", "related_article", "opengraph", "news_source"}:
+        score += 18
+    if source in {"general_web", "general_web_search_media"}:
+        score -= 8
     return score
 
 
-def _theme_balanced_source_materials(items: list[dict]) -> list[dict]:
+def _theme_balanced_source_materials(items: list[dict], relevance_tokens: set[str] | None = None) -> list[dict]:
     """Keep OpenNews visuals aligned with script themes instead of one global pool."""
     groups: dict[int, list[dict]] = {}
     unthemed_index = 9999
@@ -304,7 +316,14 @@ def _theme_balanced_source_materials(items: list[dict]) -> list[dict]:
         groups.setdefault(theme_index, []).append(item)
 
     for theme_index, group in list(groups.items()):
-        groups[theme_index] = sorted(group, key=_rank_source_material, reverse=True)
+        groups[theme_index] = sorted(
+            group,
+            key=lambda item: (
+                _source_material_relevance_score(item, relevance_tokens or set()),
+                _rank_source_material(item),
+            ),
+            reverse=True,
+        )
 
     ordered: list[dict] = []
     theme_indexes = sorted(groups)
@@ -349,6 +368,12 @@ def _tokenize_opennews_relevance(text: str) -> set[str]:
         "微软": "microsoft",
         "谷歌": "google",
         "苹果": "apple",
+        "苹果公司": "apple",
+        "开发者大会": "wwdc",
+        "人工智能版": "artificial intelligence",
+        "地震": "earthquake",
+        "海啸": "tsunami",
+        "菲律宾": "philippines",
         "亚马逊": "amazon",
     }
     for source, replacement in aliases.items():
@@ -359,7 +384,8 @@ def _tokenize_opennews_relevance(text: str) -> set[str]:
         "facebook", "ipo", "trillionaire", "nvidia", "openai", "microsoft",
         "google", "alphabet", "semiconductor", "artificial intelligence",
         "biotechnology", "stock market", "investors", "ukraine", "russia",
-        "taiwan strait", "drone", "missile",
+        "taiwan strait", "drone", "missile", "wwdc", "siri", "iphone",
+        "apple intelligence", "earthquake", "tsunami", "philippines",
     }
     for phrase in phrases:
         if phrase in text:
@@ -404,7 +430,25 @@ def _source_material_relevance_score(item: dict, relevance_tokens: set[str]) -> 
     for token in relevance_tokens:
         if " " in token and token in haystack_lower:
             score += 18
+    source = str(item.get("source") or "").lower()
+    title = str(item.get("title") or "").lower()
+    if source in {"article", "related_article", "opengraph", "news_source"}:
+        score += 8
+    if "opengraph" in title or "article" in title:
+        score += 6
     return score
+
+
+def _opennews_min_relevance_score(item: dict) -> int:
+    title = str(item.get("title") or "").lower()
+    source = str(item.get("source") or "").lower()
+    if "opengraph" in title or "article" in title:
+        return 12
+    if source in {"general_web", "general_web_search_media"}:
+        return 28
+    if str(item.get("kind") or "").lower() == "video":
+        return 16
+    return 14
 
 
 def fetch_materials_for_segment(
@@ -426,8 +470,9 @@ def fetch_materials_for_segment(
     material_items = []
     material_paths = []
     is_opennews_material_only = bool(seg.get("opennews_material_only") or seg.get("disable_free_material_fallback"))
-    max_source_videos = 14 if is_opennews_material_only else 1
-    max_source_images = 28 if is_opennews_material_only else 2
+    max_total_materials = OPENNEWS_MAX_MATERIALS if is_opennews_material_only else 3
+    max_source_videos = OPENNEWS_MAX_SOURCE_VIDEOS if is_opennews_material_only else 1
+    max_source_images = OPENNEWS_MAX_SOURCE_IMAGES if is_opennews_material_only else 2
     used_source_urls = used_source_urls if used_source_urls is not None else set()
     used_source_hashes = used_source_hashes if used_source_hashes is not None else set()
     used_library_ids = used_library_ids if used_library_ids is not None else set()
@@ -442,19 +487,28 @@ def fetch_materials_for_segment(
             continue
         if _looks_like_bad_source_material(item):
             continue
-        if relevance_tokens and _source_material_relevance_score(item, relevance_tokens) <= 0:
-            print(f"  ⚠️ 新闻素材相关性不足，已跳过：{item.get('title') or item.get('url')}")
+        relevance_score = _source_material_relevance_score(item, relevance_tokens) if relevance_tokens else 1
+        min_relevance_score = _opennews_min_relevance_score(item)
+        if relevance_tokens and relevance_score < min_relevance_score:
+            print(
+                "  ⚠️ 新闻素材相关性不足，已跳过："
+                f"{item.get('title') or item.get('url')}｜score={relevance_score}/{min_relevance_score}"
+            )
             continue
+        item = dict(item)
+        item["_relevance_score"] = relevance_score
         seen_source_urls.update(identity_keys)
         source_materials.append(item)
     if is_opennews_material_only:
-        source_materials = _theme_balanced_source_materials(source_materials)
+        source_materials = _theme_balanced_source_materials(source_materials, relevance_tokens)
     else:
         source_materials.sort(key=_rank_source_material, reverse=True)
     source_video_count = 0
     source_image_count = 0
     source_attempt_limit = 260 if is_opennews_material_only else 24
     for item in source_materials[:source_attempt_limit]:
+        if len(material_items) >= max_total_materials:
+            break
         if source_video_count >= max_source_videos and source_image_count >= max_source_images:
             break
         kind = str(item.get("kind") or "").strip().lower()
@@ -498,16 +552,21 @@ def fetch_materials_for_segment(
             source_image_count += 1
         print(f"  ✅ 已下载新闻来源素材：{os.path.basename(copied_path)}")
 
-    library_items = search_material_library(
-        seg,
-        target_market=target_market or str(seg.get("target_market") or ""),
-        department_id=department_id or str(seg.get("department_id") or ""),
-        limit_videos=max(0, max_source_videos + 2 - source_video_count),
-        limit_images=max(0, max_source_images + 4 - source_image_count),
-    )
+    remaining_slots = max(0, max_total_materials - len(material_items))
+    library_items = []
+    if remaining_slots:
+        library_items = search_material_library(
+            seg,
+            target_market=target_market or str(seg.get("target_market") or ""),
+            department_id=department_id or str(seg.get("department_id") or ""),
+            limit_videos=max(0, min(remaining_slots, max_source_videos - source_video_count)),
+            limit_images=max(0, min(remaining_slots, max_source_images - source_image_count)),
+        )
     library_video_count = source_video_count
     library_image_count = source_image_count
     for item in library_items:
+        if len(material_items) >= max_total_materials:
+            break
         item_kind = str(item.get("kind") or "").lower()
         if item_kind == "video" and library_video_count >= max_source_videos:
             continue
@@ -543,11 +602,11 @@ def fetch_materials_for_segment(
         try:
             video_download_index = 0
             for query in fallback_queries or [keyword]:
-                if library_video_count >= max_source_videos:
+                if library_video_count >= max_source_videos or len(material_items) >= max_total_materials:
                     break
                 videos = search_videos(query, count=max(1, max_source_videos - library_video_count))
                 for video in videos:
-                    if library_video_count >= max_source_videos:
+                    if library_video_count >= max_source_videos or len(material_items) >= max_total_materials:
                         break
                     video_key = _source_url_key(str(video.get("url") or ""))
                     if video_key and video_key in used_source_urls:
@@ -571,11 +630,11 @@ def fetch_materials_for_segment(
         try:
             photo_download_index = 0
             for query in fallback_queries or [keyword]:
-                if library_image_count >= max_source_images:
+                if library_image_count >= max_source_images or len(material_items) >= max_total_materials:
                     break
                 photos = search_photos(query, count=max(1, max_source_images - library_image_count))
                 for photo in photos:
-                    if library_image_count >= max_source_images:
+                    if library_image_count >= max_source_images or len(material_items) >= max_total_materials:
                         break
                     photo_key = _source_url_key(str(photo.get("url") or ""))
                     if photo_key and photo_key in used_source_urls:
@@ -597,6 +656,9 @@ def fetch_materials_for_segment(
 
     seg_with_materials["material_paths"] = material_paths
     seg_with_materials["material_items"] = material_items
+    if is_opennews_material_only and len(material_items) > OPENNEWS_MAX_MATERIALS:
+        seg_with_materials["material_paths"] = material_paths[:OPENNEWS_MAX_MATERIALS]
+        seg_with_materials["material_items"] = material_items[:OPENNEWS_MAX_MATERIALS]
     return seg_with_materials
 
 

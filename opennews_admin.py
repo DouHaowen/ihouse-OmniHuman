@@ -23,10 +23,17 @@ from xml.etree import ElementTree as ET
 
 import requests
 
+try:
+    import anthropic
+except Exception:  # pragma: no cover - optional in local tooling
+    anthropic = None
+
 
 DEFAULT_HEADERS = {
     "User-Agent": "iHouse-OpenNews-Test/0.1 (+https://aiagent.office.ihousejapan.cn)",
 }
+
+ANTHROPIC_CLIENT = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) if anthropic and os.getenv("ANTHROPIC_API_KEY") else None
 
 
 def _get_openai_relay_api_key() -> str:
@@ -147,7 +154,10 @@ video_title, summary, script, material_keywords, material_visual_plan, fact_chec
     candidate = _extract_json_object_text(repaired_raw)
     if not candidate:
         raise RuntimeError("API 中转新闻稿生成失败：JSON 修复后仍未返回可解析 JSON")
-    return json.loads(candidate)
+    repaired = json.loads(candidate)
+    if not isinstance(repaired, dict):
+        raise RuntimeError("API 中转新闻稿生成失败：JSON 修复后返回的不是对象")
+    return repaired
 
 
 def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
@@ -178,20 +188,32 @@ def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) 
                 raise RuntimeError(f"API 中转新闻稿生成失败：{response.status_code} {response.text[:500]}")
             raw = _extract_openai_relay_text(response.json())
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+                last_error = RuntimeError("模型返回的 JSON 不是对象")
             except json.JSONDecodeError:
                 candidate = _extract_json_object_text(raw)
                 if candidate:
                     try:
-                        return json.loads(candidate)
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            return parsed
+                        last_error = RuntimeError("模型返回的 JSON 对象提取结果不是对象")
                     except json.JSONDecodeError as exc:
                         last_error = exc
                 else:
                     last_error = RuntimeError("模型未返回 JSON 对象")
-                if attempt < len(efforts):
-                    time.sleep(1.5)
-                    continue
+            if attempt < len(efforts):
+                time.sleep(1.5)
+                continue
+            try:
                 return _repair_opennews_relay_json(raw)
+            except Exception as repair_exc:
+                return {
+                    "_raw_text": raw,
+                    "_json_parse_warning": str(repair_exc),
+                }
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_error = exc
             if attempt < len(efforts):
@@ -201,6 +223,617 @@ def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) 
                 "API 中转模型生成 OpenNews 新闻稿超时，请稍后重试；系统已改用更轻推理强度重试但仍未返回。"
             ) from exc
     raise RuntimeError(f"API 中转新闻稿生成失败：{last_error}")
+
+
+def _request_opennews_claude_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
+    if not ANTHROPIC_CLIENT:
+        raise RuntimeError("未配置 ANTHROPIC_API_KEY，无法使用 Claude 生成新闻稿")
+    prompts = [
+        prompt,
+        prompt + """
+
+重要补充：
+1. 你必须只返回合法 JSON，本次不要输出任何解释文字。
+2. JSON 字符串内部不要出现未转义的半角双引号。
+3. 如果内容里必须提到引号，请改用中文引号「」或『』。
+4. 不要输出 markdown、代码块、注释或省略号。
+""",
+    ]
+    last_error: Exception | None = None
+    for item in prompts:
+        try:
+            message = ANTHROPIC_CLIENT.messages.create(
+                model=os.getenv("ANTHROPIC_OPENNEWS_MODEL", "claude-sonnet-4-6"),
+                max_tokens=max_output_tokens,
+                system="你是专业新闻视频编辑。只输出可解析 JSON，不输出解释。",
+                messages=[{"role": "user", "content": item}],
+            )
+            raw = "\n".join(
+                getattr(block, "text", "").strip()
+                for block in getattr(message, "content", []) or []
+                if getattr(block, "type", "") == "text" and getattr(block, "text", "").strip()
+            ).strip()
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                candidate = _extract_json_object_text(raw)
+                if candidate:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict):
+                        return parsed
+                raise
+        except Exception as exc:
+            last_error = exc
+            continue
+    if last_error:
+        raise RuntimeError(f"Claude 新闻稿生成失败：{last_error}") from last_error
+    raise RuntimeError("Claude 新闻稿生成失败：模型未返回可解析 JSON")
+
+
+def _request_opennews_model_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
+    try:
+        return _request_opennews_claude_json(prompt, max_output_tokens=max_output_tokens)
+    except Exception as claude_error:
+        print(f"[opennews_claude_fallback] {claude_error!r} -> api_relay")
+        return _request_opennews_relay_json(prompt, max_output_tokens=max_output_tokens)
+
+
+def _ensure_string_list(value: object, *, limit: int = 8) -> list[str]:
+    if isinstance(value, list):
+        values = value
+    elif value is None:
+        values = []
+    else:
+        values = re.split(r"[、,，;\n]+", str(value))
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = _strip_tags(str(item or "")).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _extract_labeled_opennews_text(raw: str, labels: tuple[str, ...]) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    escaped = "|".join(re.escape(label) for label in labels)
+    next_labels = (
+        "标题|视频标题|新闻标题|摘要|简要|口播|口播稿|文案|正文|script|summary|"
+        "关键词|素材|事实|核验|来源|时间|source|credit"
+    )
+    match = re.search(
+        rf"(?:{escaped})\s*[:：]\s*([\s\S]*?)(?=\n\s*(?:{next_labels})\s*[:：]|\Z)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return _strip_tags(match.group(1)).strip(" \n\r\t-")
+
+
+def _clean_opennews_script_text(value: str) -> str:
+    text = _strip_tags(value or "")
+    text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"^\s*[{[][\s\S]*?[}\]]\s*$", "", text).strip() if '"script"' in text[:200] else text
+    text = re.sub(r"(一句话看事件|背景方面|影响方面|首先|其次|最后)\s*[:：]?", "", text)
+    banned_sentences = (
+        "这条新闻值得关注的地方，在于它背后涉及的现实变化，以及相关各方接下来可能作出的反应。",
+        "从已经公开的信息看，这件事不只是单一事件，还牵动了相关群体和行业的后续判断。",
+        "后续还要看当事方说明和更多公开报道带来的新信息。",
+        "目前相关报道已经引发关注。",
+        "具体细节仍需以原始报道、官方信息和后续公开消息为准。",
+    )
+    for sentence in banned_sentences:
+        text = text.replace(sentence, "")
+    text = re.sub(r"\s+", " ", text).strip()
+    # Keep it suitable for a short video, but do not crush it into a one-line summary.
+    if len(text) > 420:
+        sentences = re.split(r"(?<=[。！？!?])\s*", text)
+        selected: list[str] = []
+        char_count = 0
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            selected.append(sentence)
+            char_count += len(sentence)
+            if char_count >= 300:
+                break
+        text = "".join(selected).strip() or text[:340].strip()
+    return text
+
+
+def _looks_like_generic_opennews_script(script: str, article: dict) -> bool:
+    text = _strip_tags(script or "")
+    if not text:
+        return True
+    generic_patterns = (
+        "这条英文热点新闻主要涉及",
+        "这是一条关于",
+        "英文媒体报道了",
+        "领域的新动向",
+        "领域的新变化",
+        "国际新闻中的一项新动向",
+        "这件事可能影响相关行业",
+        "相关公司、政策或市场参与方",
+        "官方文件、市场反应和更多公开报道",
+        "这条新闻值得关注的地方",
+        "从已经公开的信息看",
+        "后续还要看当事方说明",
+        "背后涉及的现实变化",
+        "相关各方接下来可能作出的反应",
+        "相关群体和行业的后续判断",
+        "目前相关报道已经引发关注",
+        "具体细节仍需以原始报道",
+        "后续进展仍需",
+        "请继续关注",
+    )
+    if sum(1 for pattern in generic_patterns if pattern in text) >= 2:
+        return True
+    title_terms = [
+        term.lower()
+        for term in re.findall(r"[A-Za-z]{4,}|[\u4e00-\u9fff]{2,}", str(article.get("title") or ""))
+    ]
+    if title_terms:
+        lowered = text.lower()
+        matched = sum(1 for term in title_terms[:8] if term in lowered)
+        if matched == 0 and len(text) < 180:
+            return True
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+    if cjk_count and cjk_count < 90:
+        return True
+    return False
+
+
+def _target_language_name(target_market: str) -> str:
+    return "繁體中文" if target_market == "tw" else ("日本語" if target_market == "jp" else "简体中文")
+
+
+def _needs_opennews_language_rewrite(text: str, target_market: str) -> bool:
+    text = _strip_tags(text or "")
+    if not text:
+        return True
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+    kana_count = len(re.findall(r"[\u3040-\u30ff]", text))
+    alpha_count = len(re.findall(r"[A-Za-z]", text))
+    if target_market == "jp":
+        return kana_count < 10 and cjk_count < 25 and alpha_count > 30
+    return cjk_count < 35 and alpha_count > max(40, cjk_count * 2)
+
+
+def _first_non_empty_text(*values: object) -> str:
+    for value in values:
+        text = _strip_tags(str(value or "")).strip()
+        if text:
+            return text
+    return ""
+
+
+def _has_cjk_text(value: str, *, minimum: int = 6) -> bool:
+    return len(re.findall(r"[\u4e00-\u9fff]", value or "")) >= minimum
+
+
+def _format_opennews_source_time(source_name: str, published_at: str) -> str:
+    source = (source_name or "公开新闻源").strip()
+    time_label = (published_at or "").strip()
+    if not time_label:
+        return f"据{source}报道"
+    return f"据{source} {time_label}报道"
+
+
+def _article_concrete_title_summary(article: dict) -> tuple[str, str]:
+    title = _first_non_empty_text(
+        article.get("title_zh"),
+        article.get("translated_title"),
+        article.get("video_title"),
+        article.get("title"),
+    )
+    summary = _first_non_empty_text(
+        article.get("summary_zh"),
+        article.get("translated_summary"),
+        article.get("summary"),
+        title,
+    )
+    return title, summary
+
+
+def _compact_opennews_subject_text(title: str, summary: str, *, target_market: str) -> tuple[str, str]:
+    """Build a concrete fallback subject from the article itself, never from a broad category."""
+    title = _strip_tags(title or "").strip()
+    summary = _strip_tags(summary or "").strip()
+    if target_market == "jp":
+        if _has_cjk_text(title, minimum=3) or len(re.findall(r"[\u3040-\u30ff]", title)) >= 3:
+            video_title = title[:80]
+        else:
+            video_title = f"英語圏ニュース：{title[:60] or '最新報道'}"
+        if _has_cjk_text(summary, minimum=6) or len(re.findall(r"[\u3040-\u30ff]", summary)) >= 6:
+            subject = summary[:180]
+        else:
+            subject = f"「{title[:120] or summary[:120] or '英語圏の最新報道'}」について報じられています"
+        return video_title, subject
+    if _has_cjk_text(title, minimum=4):
+        video_title = title[:80]
+    else:
+        video_title = f"英文热点：{title[:60] or '最新报道'}"
+    if _has_cjk_text(summary, minimum=10):
+        subject = summary[:190]
+    elif _has_cjk_text(title, minimum=4):
+        subject = title[:150]
+    else:
+        concrete = title or summary or "这条英文报道"
+        subject = f"这条新闻围绕“{concrete[:130]}”展开"
+    return video_title, subject
+
+
+def _opennews_topic_kind(article: dict, title: str, summary: str) -> str:
+    category = str(article.get("category") or "").lower()
+    text = " ".join([category, title or "", summary or ""]).lower()
+    if re.search(r"高考|exam|college entrance|student|school|education|university|gaokao", text, flags=re.IGNORECASE):
+        return "education"
+    if re.search(r"spacex|meta|nvidia|openai|anthropic|ai|chip|semiconductor|tech|technology|software|tool", text, flags=re.IGNORECASE):
+        return "technology"
+    if re.search(r"stock|market|ipo|fed|inflation|rate|tariff|finance|economy|investment|earnings|bank", text, flags=re.IGNORECASE):
+        return "finance"
+    if re.search(r"missile|drone|military|defense|war|ukraine|navy|army|air force|attack", text, flags=re.IGNORECASE):
+        return "military"
+    if re.search(r"white house|congress|election|minister|president|policy|sanction|government|parliament", text, flags=re.IGNORECASE):
+        return "politics"
+    return "general"
+
+
+def _opennews_natural_closing(kind: str, *, target_market: str) -> str:
+    if target_market == "jp":
+        closings = {
+            "education": "受験生と家族にとっては、大きな節目となる一日です。",
+            "technology": "今後は、実際の利用場面と業界への広がりが焦点になります。",
+            "finance": "市場では、この動きが投資判断や企業戦略にどう影響するかが注目されます。",
+            "military": "現地情勢と各国の対応について、引き続き慎重な確認が必要です。",
+            "politics": "今後の制度設計や関係国の反応が焦点になります。",
+            "general": "今後の追加情報と現地の反応が注目されます。",
+        }
+        return closings.get(kind, closings["general"])
+    closings = {
+        "education": "对考生和家庭来说，这不仅是一场考试，也是一段重要人生节点的开始。",
+        "technology": "接下来，外界更关心的是这项技术会如何落地，以及会给行业带来什么变化。",
+        "finance": "市场接下来会关注公司的订阅增长、广告业务、内容投入和盈利预期能不能支撑新的估值想象。",
+        "military": "目前相关信息仍需要结合官方通报和多方公开报道继续确认。",
+        "politics": "接下来，各方对这项政策或表态的反应，将成为外界观察的重点。",
+        "general": "接下来，新闻的关键会落在当事方如何回应，以及事件时间线是否会进一步清晰。",
+    }
+    return closings.get(kind, closings["general"])
+
+
+def _opennews_context_sentence(kind: str, subject: str, *, target_market: str) -> str:
+    if target_market == "jp":
+        sentences = {
+            "education": "現場では、受験生だけでなく家族にとっても緊張感のある一日となっています。",
+            "technology": "背景には、AI やデジタル技術をめぐる競争が一段と激しくなっていることがあります。",
+            "finance": "投資家は、企業が次にどんな成長材料を示せるのかを慎重に見極めようとしています。",
+            "military": "この動きは、地域の安全保障環境と各国の対応を考えるうえで重要な材料になります。",
+            "politics": "この発言や政策は、国内外の関係者の判断にも影響する可能性があります。",
+            "general": "今回の報道は、現場の動きと関係者の反応をあわせて見る必要があります。",
+        }
+        return sentences.get(kind, sentences["general"])
+    sentences = {
+        "education": "现场最受关注的，不只是考试本身，还有考生家庭在这个节点上的压力、期待和投入。",
+        "technology": "这背后反映的是科技公司围绕产品能力、用户场景和行业竞争展开的新一轮角力。",
+        "finance": "对市场来说，关键不只是这家公司眼下的表现，而是它能不能拿出新的增长故事来说服投资者。",
+        "military": "这类消息的重点，在于事件本身如何改变地区安全判断，以及相关各方随后会采取什么动作。",
+        "politics": "这类政策或表态的影响，往往不只停留在政府层面，也会传导到企业、市场和国际关系。",
+        "general": "报道中的关键线索，集中在事件发生的时间、涉及的主体，以及已经出现的直接影响。",
+    }
+    return sentences.get(kind, sentences["general"])
+
+
+def _opennews_detail_sentence(kind: str, *, target_market: str) -> str:
+    if target_market == "jp":
+        sentences = {
+            "education": "毎年多くの受験生が進路を左右する試験に臨み、学校や家庭にも大きな影響を与えています。",
+            "technology": "企業は新機能やサービスを通じて利用者を広げようとしており、競合他社との差別化も問われます。",
+            "finance": "株価の評価は、売上や利益だけでなく、投資家が次の成長シナリオを信じられるかにも左右されます。",
+            "military": "発表内容や現地映像だけでなく、当事国の説明と周辺国の反応をあわせて見る必要があります。",
+            "politics": "政策の方向性は、国内の議論だけでなく、企業活動や外交関係にも波及する可能性があります。",
+            "general": "短い発表の中にも、当事者の立場や社会への影響を読み解く手がかりがあります。",
+        }
+        return sentences.get(kind, sentences["general"])
+    sentences = {
+        "education": "每年高考都会牵动大量家庭，也折射出教育竞争、升学压力和社会流动机会这些现实议题。",
+        "technology": "如果相关产品或工具真正进入用户场景，它影响的就不只是单家公司，也会改变行业竞争节奏。",
+        "finance": "如果公司拿不出更清晰的增长路径，投资者对估值和未来盈利的疑问就很难消失。",
+        "military": "在信息仍然快速变化的情况下，公开通报、现场素材和多方报道之间的交叉验证尤其重要。",
+        "politics": "政策信号一旦释放，相关企业、市场和盟友都会重新评估自身的应对策略。",
+        "general": "如果后续信息进一步确认，相关机构、企业或普通民众都可能据此调整判断。",
+    }
+    return sentences.get(kind, sentences["general"])
+
+
+def _localized_known_opennews_subject(title: str, summary: str, *, target_market: str) -> str:
+    if target_market == "jp":
+        return ""
+    text = " ".join([title or "", summary or ""]).lower()
+    if "gaokao" in text or ("college entrance" in text and "exam" in text):
+        location = "北京" if "beijing" in text or "北京" in text else "中国多地"
+        return f"在{location}，大批年轻考生在家长陪同下走进考场，参加中国一年一度的高考。"
+    if "spacex" in text and ("ipo" in text or "public offering" in text):
+        return "围绕 SpaceX 是否可能推进上市计划，英文媒体报道了投资者、马斯克和资本市场关注的新动向。"
+    if "anthropic" in text and ("pause" in text or "emergency" in text):
+        return "Anthropic 呼吁为先进人工智能系统建立类似“暂停键”的安全机制，以便在高风险情况下及时控制模型运行。"
+    if ("netflix" in text or "奈飞" in text) and ("stock" in text or "market" in text or "shares" in text or "股票" in text):
+        return "奈飞股价这一年来表现不够理想，市场正在等待这家公司拿出新的增长叙事。"
+    if ("job cut" in text or "layoff" in text or "裁员" in text) and ("ai" in text or "artificial intelligence" in text or "人工智能" in text):
+        number_match = re.search(r"(\d{1,3}(?:,\d{3})+|\d{4,})", title + " " + summary)
+        percent_match = re.search(r"(\d{1,2})\s*%", title + " " + summary)
+        number_text = number_match.group(1) if number_match else "大量"
+        percent_text = percent_match.group(1) if percent_match else ""
+        percent_part = f"，其中约 {percent_text}% 被认为与人工智能有关" if percent_text else "，人工智能成为其中一个重要原因"
+        return f"美国雇主在最新统计中宣布裁员 {number_text} 人，创下近几年少见的高位{percent_part}。"
+    return ""
+
+
+def _local_opennews_language_fallback(*, article: dict, target_market: str, published_at: str) -> dict:
+    source_name = str(article.get("source_name") or "公开新闻源")
+    original_title, original_summary = _article_concrete_title_summary(article)
+    fallback_title, subject = _compact_opennews_subject_text(original_title, original_summary, target_market=target_market)
+    localized_subject = _localized_known_opennews_subject(original_title, original_summary, target_market=target_market)
+    if localized_subject:
+        subject = localized_subject
+        if fallback_title.startswith("英文热点："):
+            fallback_title = subject[:36]
+    topic_kind = _opennews_topic_kind(article, original_title, original_summary)
+    context_sentence = _opennews_context_sentence(topic_kind, subject, target_market=target_market)
+    detail_sentence = _opennews_detail_sentence(topic_kind, target_market=target_market)
+    closing = _opennews_natural_closing(topic_kind, target_market=target_market)
+    if target_market == "jp":
+        lead = _format_opennews_source_time(source_name, published_at).replace("据", "").replace("报道", "が伝えた内容によると")
+        return {
+            "video_title": fallback_title,
+            "summary": subject,
+            "script": _clean_opennews_script_text(f"{lead}、{subject}。{context_sentence}{detail_sentence}{closing}"),
+        }
+    lead = _format_opennews_source_time(source_name, published_at)
+    subject_sentence = subject.rstrip("。！？!?；; ")
+    return {
+        "video_title": fallback_title,
+        "summary": subject,
+        "script": _clean_opennews_script_text(f"{lead}，{subject_sentence}。{context_sentence}{detail_sentence}{closing}"),
+    }
+
+
+def _rewrite_opennews_text_language(*, title: str, summary: str, script: str, article: dict, target_market: str, published_at: str) -> dict:
+    language = _target_language_name(target_market)
+    source_name = str(article.get("source_name") or "公开新闻源")
+    fallback_title = title or str(article.get("title") or "OpenNews 新闻")
+    fallback_summary = summary or str(article.get("summary") or fallback_title)
+    fallback_script = script or fallback_summary or fallback_title
+    prompt = f"""
+请把下面 OpenNews 新闻内容改写成{language}新闻视频播出稿。
+
+要求：
+- 只返回 JSON，不要解释。
+- 保持事实边界，不要新增原文没有的信息。
+- script 是 45-60 秒自然口播，一段即可，必须像主播正在播一条完整短新闻。
+- 简体/繁体中文写 220-320 字；日语写 420-560 字。
+- 开头直接讲“谁/哪家机构/哪家公司做了什么”，不要先写空泛导语。
+- 中间至少写 2-3 句，补足新闻背景、关键数字、市场/政策/行业/社会影响，不要只写一句摘要。
+- 结尾自然收住，点出下一步最具体的看点，不要套话。
+- 不要写“一句话看事件/背景方面/影响方面/首先/其次/最后”。
+- 不要写“这条新闻主要涉及”“引发关注”“具体细节仍需以原始报道为准”这种空泛模板句。
+- 不要写“这条新闻值得关注的地方”“从已经公开的信息看”“这件事不只是单一事件”“后续还要看当事方说明”这类机器总结句。
+- 自然提到来源和时间。
+
+来源：{source_name}
+时间：{published_at or "来源页面未标注明确发布时间"}
+标题：{fallback_title}
+摘要：{fallback_summary}
+现有口播：{fallback_script}
+
+JSON 字段：
+{{"video_title":"...","summary":"...","script":"..."}}
+""".strip()
+    try:
+        parsed = _request_opennews_model_json(prompt, max_output_tokens=1600)
+        if isinstance(parsed, dict):
+            return {
+                "video_title": _strip_tags(str(parsed.get("video_title") or fallback_title)),
+                "summary": _strip_tags(str(parsed.get("summary") or fallback_summary)),
+                "script": _clean_opennews_script_text(str(parsed.get("script") or fallback_script)),
+            }
+    except Exception:
+        pass
+    return _local_opennews_language_fallback(article=article, target_market=target_market, published_at=published_at)
+
+
+def _polish_opennews_broadcast_copy(
+    *,
+    draft: dict,
+    article: dict,
+    article_text: str,
+    related_context: str,
+    target_market: str,
+    published_at: str,
+) -> dict:
+    """Rewrite title/summary/script as natural broadcast copy after JSON generation."""
+    language = _target_language_name(target_market)
+    length_rule = "简体/繁体中文 220-320 字" if target_market != "jp" else "日本語 420-560 字"
+    source_name = str(article.get("source_name") or "公开新闻源")
+    title = _strip_tags(str(draft.get("video_title") or article.get("title") or ""))
+    summary = _strip_tags(str(draft.get("summary") or article.get("summary") or ""))
+    script = _clean_opennews_script_text(str(draft.get("script") or summary or title))
+    prompt = f"""
+你是电视新闻节目的资深中文/日文新闻编辑。请把下面内容改写成真正可以直接播出的短新闻口播稿。
+
+输出语言：{language}
+目标长度：{length_rule}，一段完整口播，不要分标题小节。
+
+必须遵守：
+- 根据新闻标题、摘要和正文内容写，必须具体讲这条新闻本身，不要写成“某领域新动向”。
+- 第一句直接交代“谁/哪家公司/哪个机构/哪个国家发生了什么”。
+- 中间至少写 2-3 句，补最关键的事实、数字、背景、现场信息或利益相关方。
+- 必须说明这件事为什么值得关注，但必须贴合新闻类型：教育讲考生和家庭，科技讲产品和行业，财经讲市场和投资，政治讲政策和各方反应，军事讲局势和官方通报。
+- 结尾自然收住，点出下一步最具体的看点，不能突然断，也不要套“后续仍需关注”“具体细节以原文为准”这种空话。
+- 不要出现“一句话看事件”“背景方面”“影响方面”“首先/其次/最后”。
+- 不要出现“这条新闻值得关注的地方”“从已经公开的信息看”“这件事不只是单一事件”“后续还要看当事方说明”。
+- 不要加入原文没有的价格、人数、结论或立场。
+- 语气像新闻主播，不要像机器摘要，不要像论文简介。
+
+来源：{source_name}
+发布时间：{published_at or "来源页面未标注明确发布时间"}
+原始标题：{article.get("title") or ""}
+原始摘要：{article.get("summary") or ""}
+当前标题：{title}
+当前摘要：{summary}
+当前口播稿：{script}
+
+正文节选：
+{(article_text or "")[:4500] or "无正文。"}
+
+相关报道：
+{related_context or "无"}
+
+只返回 JSON：
+{{"video_title":"适合视频标题的短标题","summary":"一句中文/日文摘要","script":"完整播出稿"}}
+""".strip()
+    try:
+        parsed = _request_opennews_model_json(prompt, max_output_tokens=2200)
+        if not isinstance(parsed, dict):
+            return draft
+        polished = dict(draft)
+        polished["video_title"] = _strip_tags(str(parsed.get("video_title") or title))
+        polished["summary"] = _strip_tags(str(parsed.get("summary") or summary))
+        polished["script"] = _clean_opennews_script_text(str(parsed.get("script") or script))
+        polished["_broadcast_polished"] = True
+        return polished
+    except Exception:
+        return draft
+
+
+def _fallback_opennews_visual_plan(script: str, keywords: list[str], article: dict, category: str) -> list[dict]:
+    seed_parts = [
+        str(article.get("title") or ""),
+        str(article.get("summary") or ""),
+        script,
+        " ".join(keywords),
+    ]
+    queries = _expanded_media_queries(*seed_parts, category=category, limit=8)
+    if not queries:
+        queries = [_compact_query(str(article.get("title") or script or "news"), max_chars=70)]
+    plan: list[dict] = []
+    for index, query in enumerate(queries[:4]):
+        plan.append({
+            "title": query,
+            "script_context": script[:140],
+            "visual_need": f"与新闻事实直接相关的画面：{query}",
+            "queries": [query],
+        })
+    return plan
+
+
+def _normalize_opennews_draft_payload(raw_draft: dict, *, article: dict, target_market: str, published_at: str) -> dict:
+    """Make relay output usable even when the model returns prose instead of strict JSON."""
+    draft = dict(raw_draft or {})
+    raw_text = str(draft.get("_raw_text") or "")
+    title = _strip_tags(str(
+        draft.get("video_title")
+        or draft.get("title")
+        or _extract_labeled_opennews_text(raw_text, ("video_title", "视频标题", "新闻标题", "标题"))
+        or article.get("title")
+        or "OpenNews 新闻"
+    ))
+    summary = _strip_tags(str(
+        draft.get("summary")
+        or _extract_labeled_opennews_text(raw_text, ("summary", "摘要", "简要"))
+        or article.get("summary")
+        or title
+    ))
+    script = _clean_opennews_script_text(str(
+        draft.get("script")
+        or draft.get("口播稿")
+        or draft.get("文案")
+        or _extract_labeled_opennews_text(raw_text, ("script", "口播稿", "文案", "正文"))
+        or raw_text
+        or summary
+        or title
+    ))
+    if not script:
+        source_name = str(article.get("source_name") or "公开新闻源")
+        time_label = published_at or "来源页面未标注明确发布时间"
+        script = f"据{source_name}{time_label}消息，{summary or title}。这条新闻仍需结合公开来源继续关注后续进展。"
+    if (
+        _needs_opennews_language_rewrite(title, target_market)
+        or _needs_opennews_language_rewrite(summary, target_market)
+        or _needs_opennews_language_rewrite(script, target_market)
+    ):
+        rewritten = _rewrite_opennews_text_language(
+            title=title,
+            summary=summary,
+            script=script,
+            article=article,
+            target_market=target_market,
+            published_at=published_at,
+        )
+        title = str(rewritten.get("video_title") or title)
+        summary = str(rewritten.get("summary") or summary)
+        script = _clean_opennews_script_text(str(rewritten.get("script") or script))
+        if _looks_like_generic_opennews_script(script, article):
+            hard_fallback = _local_opennews_language_fallback(article=article, target_market=target_market, published_at=published_at)
+            title = str(hard_fallback.get("video_title") or title)
+            summary = str(hard_fallback.get("summary") or summary)
+            script = _clean_opennews_script_text(str(hard_fallback.get("script") or script))
+        if _needs_opennews_language_rewrite(script, target_market):
+            hard_fallback = _local_opennews_language_fallback(article=article, target_market=target_market, published_at=published_at)
+            title = str(hard_fallback.get("video_title") or title)
+            summary = str(hard_fallback.get("summary") or summary)
+            script = _clean_opennews_script_text(str(hard_fallback.get("script") or script))
+    if _looks_like_generic_opennews_script(script, article):
+        rewritten = _rewrite_opennews_text_language(
+            title=title,
+            summary=summary,
+            script=script,
+            article=article,
+            target_market=target_market,
+            published_at=published_at,
+        )
+        title = str(rewritten.get("video_title") or title)
+        summary = str(rewritten.get("summary") or summary)
+        script = _clean_opennews_script_text(str(rewritten.get("script") or script))
+    keywords = _ensure_string_list(draft.get("material_keywords"), limit=8)
+    if not keywords:
+        keyword_seed = " ".join([title, summary, script[:120]])
+        keywords = _expanded_media_queries(keyword_seed, category=str(article.get("category") or "all"), limit=6)
+    visual_plan = draft.get("material_visual_plan") or draft.get("visual_plan") or []
+    if not isinstance(visual_plan, list) or not visual_plan:
+        visual_plan = _fallback_opennews_visual_plan(script, keywords, article, str(article.get("category") or "all"))
+    fact_notes = _ensure_string_list(draft.get("fact_check_notes"), limit=6)
+    if not fact_notes:
+        fact_notes = ["请以原始新闻链接和相关公开报道为准，避免把推测写成确定事实。"]
+    source_name = str(article.get("source_name") or draft.get("_meta", {}).get("source_name") or "OpenNews")
+    source_credit = _strip_tags(str(draft.get("source_credit") or f"来源：{source_name}"))
+    news_time_label = _strip_tags(str(draft.get("news_time_label") or published_at or "来源页面未标注明确发布时间"))
+    normalized = {
+        **draft,
+        "video_title": title,
+        "summary": summary,
+        "script": script,
+        "material_keywords": keywords,
+        "material_visual_plan": visual_plan,
+        "fact_check_notes": fact_notes,
+        "source_credit": source_credit,
+        "news_time_label": news_time_label,
+    }
+    if raw_text:
+        normalized["_relay_raw_text"] = raw_text[:4000]
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -1664,9 +2297,6 @@ def _collect_related_article_media(related_articles: list[dict], *, limit: int =
 
 
 def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: str = "") -> dict:
-    api_key = _get_openai_relay_api_key()
-    if not api_key:
-        raise RuntimeError("未配置 OPENAI_RELAY_API_KEY，无法生成新闻稿")
     url = str(article.get("url") or "")
     article_fetch_warning = ""
     try:
@@ -1689,7 +2319,7 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
 你是 iHouse 的 OpenNews 新闻视频编辑。请根据公开新闻源生成短视频新闻口播稿。
 
 输出语言：{language}
-目标长度：短新闻口播，约 30-45 秒。简体/繁体中文约 120-180 字；日语约 220-320 字。
+目标长度：新闻视频口播，约 45-60 秒。简体/繁体中文约 220-320 字；日语约 420-560 字。
 来源名称：{article.get("source_name")}
 授权：{article.get("license")}
 标题：{article.get("title")}
@@ -1710,12 +2340,15 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
 1. 只根据来源正文、候选摘要、相关报道和管理员补充写，不要编造未出现的事实。
 2. 涉及军事、外交、台海、战争议题时，语气保持新闻说明，不煽动，不下定论。
 3. 必须明确体现新闻来源和发布时间；如果发布时间未知，要写“来源页面未标注明确发布时间”。
-4. 口播稿只写一段短文案，像短新闻主播口播一样，把事件讲清楚即可，不要扩展成长篇分析。
-5. 口播稿不要写成提纲、栏目、小节或说明文，不要出现“一句话看事件”“背景方面”“影响方面”“首先/其次/最后”这类结构提示语，也不要用项目符号。
-6. 新闻来源和发布时间要自然融入口播正文里；事实边界只用一句轻轻带过，不要单独分成“来源标注”“背景分析”“影响分析”式段落。
-7. 句子要短而顺，适合字幕切分；整篇读起来要像完整短文案，不要像摘要拼接，也不要超过目标长度。
-8. 必须全部使用“输出语言”生成：标题、摘要、口播稿、素材关键词、事实核验提醒、来源标注、新闻时间标注。
-9. 输出 JSON：
+4. 口播稿只写一段视频文案，像新闻主播口播一样，把事件、背景、影响和下一步看点讲清楚，但不要扩展成长篇评论。
+5. 口播稿建议 5-7 句：第一句直接说“谁做了什么”；中间 2-3 句补关键背景、数据、现场或相关方；后面说明为什么值得关注；最后一句自然收尾。
+6. 开头不要空泛，必须出现新闻里的具体主体，例如公司、机构、人物、国家、产品、政策或事件名。
+7. 不要写“这条新闻主要涉及”“引发关注”“后续仍需关注”“具体细节仍需以原始报道为准”“这条新闻值得关注的地方”“从已经公开的信息看”“这件事不只是单一事件”“后续还要看当事方说明”这类模板句。
+8. 口播稿不要写成提纲、栏目、小节或说明文，不要出现“一句话看事件”“背景方面”“影响方面”“首先/其次/最后”这类结构提示语，也不要用项目符号。
+9. 新闻来源和发布时间要自然融入口播正文里；事实边界只用一句轻轻带过，不要单独分成“来源标注”“背景分析”“影响分析”式段落。
+10. 句子要短而顺，适合字幕切分；整篇读起来要像完整新闻视频播出稿，不要像摘要拼接，也不要少于目标长度太多。
+11. 必须全部使用“输出语言”生成：标题、摘要、口播稿、素材关键词、事实核验提醒、来源标注、新闻时间标注。
+12. 输出 JSON：
 {{
   "video_title": "...",
   "summary": "...",
@@ -1742,7 +2375,30 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
 - 如果文案讲中国芯片/科技，画面计划应包含 semiconductor、chip factory、technology company、China tech 等。
 - 如果文案讲白宫发言人，才使用 White House press briefing、spokesperson 等。
 """.strip()
-    draft = _request_opennews_relay_json(prompt, max_output_tokens=4096)
+    draft = _request_opennews_model_json(prompt, max_output_tokens=4096)
+    draft = _normalize_opennews_draft_payload(
+        draft,
+        article=article,
+        target_market=target_market,
+        published_at=str(published_at or ""),
+    )
+    draft = _polish_opennews_broadcast_copy(
+        draft=draft,
+        article=article,
+        article_text=article_text,
+        related_context=related_context,
+        target_market=target_market,
+        published_at=str(published_at or ""),
+    )
+    if _looks_like_generic_opennews_script(str(draft.get("script") or ""), article):
+        replacement = _local_opennews_language_fallback(
+            article=article,
+            target_market=target_market,
+            published_at=str(published_at or ""),
+        )
+        draft["video_title"] = replacement.get("video_title") or draft.get("video_title")
+        draft["summary"] = replacement.get("summary") or draft.get("summary")
+        draft["script"] = replacement.get("script") or draft.get("script")
     keyword_values = draft.get("material_keywords") or []
     if not isinstance(keyword_values, list):
         keyword_values = [str(keyword_values)]
@@ -1774,7 +2430,8 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
     )
     article_media = _merge_media_items(article_media, related_article_media, related_media, limit=180)
     draft["_meta"] = {
-        "model": _get_openai_relay_model(),
+        "model": os.getenv("ANTHROPIC_OPENNEWS_MODEL", "claude-sonnet-4-6") if ANTHROPIC_CLIENT else _get_openai_relay_model(),
+        "model_provider": "Claude" if ANTHROPIC_CLIENT else "API中转模型",
         "source_url": url,
         "source_name": article.get("source_name"),
         "license": article.get("license"),
@@ -1910,7 +2567,7 @@ def _theme_plan_from_visual_plan(draft: dict, category: str) -> list[dict]:
     if not isinstance(visual_plan, list):
         return []
     themes: list[dict] = []
-    for item in visual_plan[:10]:
+    for item in visual_plan[:8]:
         if not isinstance(item, dict):
             continue
         title = _compact_query(str(item.get("title") or item.get("visual_need") or ""), max_chars=36)
@@ -1937,7 +2594,7 @@ def _theme_plan_from_visual_plan(draft: dict, category: str) -> list[dict]:
                 continue
             seen.add(key)
             deduped_queries.append(query)
-            if len(deduped_queries) >= 6:
+            if len(deduped_queries) >= 4:
                 break
         if not deduped_queries:
             continue
@@ -1951,9 +2608,16 @@ def _theme_plan_from_visual_plan(draft: dict, category: str) -> list[dict]:
     return themes
 
 
-def _rank_media_by_theme_plan(media: list[dict], theme_plan: list[dict], keyword_text: str, *, per_theme_limit: int = 4) -> list[dict]:
+def _rank_media_by_theme_plan(
+    media: list[dict],
+    theme_plan: list[dict],
+    keyword_text: str,
+    *,
+    per_theme_limit: int = 2,
+    total_limit: int = 60,
+) -> list[dict]:
     if not theme_plan:
-        return _dedupe_media_items(_rank_media_for_segment(media, segment_text=keyword_text, keyword_text=keyword_text, limit=40))
+        return _dedupe_media_items(_rank_media_for_segment(media, segment_text=keyword_text, keyword_text=keyword_text, limit=total_limit))
     used: set[str] = set()
     ordered: list[dict] = []
     for theme_index, theme in enumerate(theme_plan):
@@ -1970,9 +2634,13 @@ def _rank_media_by_theme_plan(media: list[dict], theme_plan: list[dict], keyword
             enriched["theme_title"] = theme.get("title") or ""
             ordered.append(enriched)
             picked += 1
-            if picked >= per_theme_limit:
+            if picked >= per_theme_limit or len(ordered) >= total_limit:
                 break
+        if len(ordered) >= total_limit:
+            break
     for item in _rank_media_for_segment(media, segment_text=keyword_text, keyword_text=keyword_text, limit=120):
+        if len(ordered) >= total_limit:
+            break
         identity_keys = _media_identity_keys(str(item.get("url") or ""))
         if not identity_keys or identity_keys & used:
             continue
@@ -1987,7 +2655,7 @@ def _enrich_theme_plan_media(
     *,
     article_url: str = "",
     source_id: str = "",
-    limit_per_theme: int = 28,
+    limit_per_theme: int = 10,
 ) -> list[dict]:
     """For each script theme, crawl only configured news/official sources."""
     collected: list[dict] = []
@@ -2001,12 +2669,12 @@ def _enrich_theme_plan_media(
             discover_broad_opennews_media(
                 source_id=source_id,
                 category=category,
-                queries=queries[:3],
+                queries=queries[:2],
                 article_url=article_url,
                 limit=max(10, limit_per_theme // 2),
             ),
-            discover_general_search_media(queries[:4], limit=limit_per_theme),
-            discover_general_web_media(queries[:3], article_url=article_url, limit=limit_per_theme),
+            discover_general_search_media(queries[:2], limit=limit_per_theme),
+            discover_general_web_media(queries[:2], article_url=article_url, limit=limit_per_theme),
             limit=limit_per_theme,
         )
         for item in theme_media:
@@ -2063,19 +2731,20 @@ def build_opennews_script_data(*, draft: dict, article: dict | None = None, targ
     news_time_label = str(draft.get("news_time_label") or article.get("published_at") or draft.get("_meta", {}).get("published_at") or "来源页面未标注明确发布时间").strip()
     category_name = str(article.get("category_name") or draft.get("_meta", {}).get("category_name") or "新闻").strip()
     category_id = str(article.get("category") or draft.get("_meta", {}).get("category") or "all")
-    theme_plan = _theme_plan_from_visual_plan(draft, category_id) or _build_opennews_theme_plan(script, keyword_text, category_id, max_themes=10)
+    theme_plan = _theme_plan_from_visual_plan(draft, category_id) or _build_opennews_theme_plan(script, keyword_text, category_id, max_themes=6)
     theme_extra_media = _enrich_theme_plan_media(
         theme_plan,
         category_id,
         article_url=str(article.get("url") or draft.get("_meta", {}).get("source_url") or ""),
         source_id=str(article.get("source_id") or ""),
-        limit_per_theme=28,
+        limit_per_theme=10,
     )
     ranked_media = _rank_media_by_theme_plan(
-        _merge_media_items(article_media, theme_extra_media, limit=240),
+        _merge_media_items(article_media, theme_extra_media, limit=90),
         theme_plan,
         keyword_text,
-        per_theme_limit=8,
+        per_theme_limit=2,
+        total_limit=60,
     )
 
     segments = [

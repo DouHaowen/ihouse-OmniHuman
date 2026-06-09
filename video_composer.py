@@ -10,6 +10,12 @@ try:
 except Exception:
     WhisperModel = None
 
+try:
+    from PIL import Image, ImageOps
+except Exception:
+    Image = None
+    ImageOps = None
+
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 25
@@ -20,6 +26,7 @@ PIX_FMT = "yuv420p"
 SUBTITLE_FONT = "Noto Sans CJK SC"
 COVER_TITLE_FONT = "Noto Sans CJK SC"
 COVER_TITLE_DURATION = 1.0 / FPS  # exactly 1 frame — cover visible as first frame, no pause
+VOICE_OUTPUT_AUDIO_FILTER = "volume=1.35,loudnorm=I=-15:TP=-1.5:LRA=11"
 
 SUBTITLE_TEMPLATE_STYLES = {
     "classic": {
@@ -66,19 +73,19 @@ SUBTITLE_TEMPLATE_STYLES = {
     },
     "property_clear": {
         "font": SUBTITLE_FONT,
-        "size": 16,
-        "primary": "&H00FFFFFF",
-        "outline": "&H0013202C",
+        "size": 33,
+        "primary": "&H0038F7FF",
+        "outline": "&H0010192E",
         "back": "&H00000000",
         "border_style": 1,
-        "outline_width": 2.2,
-        "shadow": 0.9,
+        "outline_width": 4.2,
+        "shadow": 2.0,
         "alignment": 2,
-        "margin_v": 64,
-        "margin_l": 112,
-        "margin_r": 112,
+        "margin_v": 62,
+        "margin_l": 86,
+        "margin_r": 86,
         "bold": 1,
-        "spacing": 0.4,
+        "spacing": 0.5,
     },
 }
 
@@ -92,7 +99,19 @@ WHISPER_LANGUAGE_MAP = {
 def _run(cmd: list[str]) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "ffmpeg failed").strip())
+        raw = (result.stderr or result.stdout or "ffmpeg failed").strip()
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        important = [
+            line for line in lines
+            if "error" in line.lower()
+            or "invalid" in line.lower()
+            or "not found" in line.lower()
+            or "failed" in line.lower()
+            or "option" in line.lower()
+            or "unable" in line.lower()
+        ]
+        compact = "\n".join((important or lines)[-8:])
+        raise RuntimeError(compact or "ffmpeg failed")
 
 
 def _seconds(value) -> float:
@@ -149,6 +168,22 @@ def _image_dimensions(image_path: str) -> tuple[int, int]:
         return WIDTH, HEIGHT
 
 
+def _normalize_image_for_ffmpeg(image_path: str, output_path: Path) -> str:
+    if Image is None:
+        return image_path
+    try:
+        with Image.open(image_path) as img:
+            if ImageOps is not None:
+                img = ImageOps.exif_transpose(img)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            img.save(output_path, format="JPEG", quality=92, optimize=True)
+            return str(output_path)
+    except Exception:
+        return image_path
+
+
 def _material_frame_mode(width: int, height: int) -> str:
     ratio = (width / max(height, 1)) if width and height else (WIDTH / HEIGHT)
     if ratio <= 0.82:
@@ -201,7 +236,25 @@ def _card_overlay_expr(duration: float, intensity: int = 8) -> str:
 
 def _subtitle_filter(subtitle_path: Path, template_id: str) -> str:
     escaped = subtitle_path.as_posix().replace('\\', '/').replace(':', r'\:').replace("'", r"\'")
-    style_config = SUBTITLE_TEMPLATE_STYLES.get(template_id) or SUBTITLE_TEMPLATE_STYLES["classic"]
+    style_config = dict(SUBTITLE_TEMPLATE_STYLES.get(template_id) or SUBTITLE_TEMPLATE_STYLES["classic"])
+    if template_id == "property_clear":
+        if WIDTH == 1080 and HEIGHT == 1920:
+            # Vertical videos have less horizontal space; keep the same look but reduce footprint.
+            style_config.update({
+                "size": 22,
+                "outline_width": 3.0,
+                "shadow": 1.6,
+                "margin_v": 58,
+                "margin_l": 64,
+                "margin_r": 64,
+            })
+        else:
+            # Horizontal news videos can carry a longer single-line subtitle near the lower third.
+            style_config.update({
+                "margin_v": 38,
+                "margin_l": 42,
+                "margin_r": 42,
+            })
     style = (
         f"FontName={style_config['font']},"
         f"FontSize={style_config['size']},"
@@ -396,47 +449,63 @@ def _build_image_material_segment(images: list[str], duration: float, output_pat
         return
 
     per_image = max(duration / len(valid_images), 0.3)
-    cmd = ["ffmpeg", "-y"]
-    filter_parts = []
-    concat_inputs = []
-    for idx, image in enumerate(valid_images):
-        cmd += ["-loop", "1", "-t", f"{per_image:.3f}", "-i", image]
-        width, height = _image_dimensions(image)
-        mode = _material_frame_mode(width, height)
-        transition_filter = ""
-        if transition_id == "fade" and per_image > 0.9:
-            fade_out_start = max(per_image - 0.45, 0.15)
-            transition_filter = f",fade=t=in:st=0:d=0.28,fade=t=out:st={fade_out_start:.3f}:d=0.32"
+    work_dir = Path(tempfile.mkdtemp(prefix="ihouse_images_"))
+    try:
+        clip_paths: list[Path] = []
+        for idx, image in enumerate(valid_images):
+            normalized_image = _normalize_image_for_ffmpeg(image, work_dir / f"normalized_{idx:03d}.jpg")
+            clip_path = work_dir / f"image_clip_{idx:03d}.mp4"
+            width, height = _image_dimensions(normalized_image)
+            mode = _material_frame_mode(width, height)
+            transition_filter = ""
+            if transition_id == "fade" and per_image > 0.9:
+                fade_out_start = max(per_image - 0.45, 0.15)
+                transition_filter = f",fade=t=in:st=0:d=0.28,fade=t=out:st={fade_out_start:.3f}:d=0.32"
 
-        if mode == "portrait":
-            motion = _portrait_foreground_filter(per_image)
-            filter_parts.append(
-                f"[{idx}:v]{motion}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[v{idx}]"
-            )
-        elif mode == "square":
-            filter_parts.append(f"[{idx}:v]{_soft_background_filter()}[bg{idx}]")
-            filter_parts.append(f"[{idx}:v]{_square_foreground_filter()}[fg{idx}]")
-            filter_parts.append(
-                f"[bg{idx}][fg{idx}]{_card_overlay_expr(per_image, 6)}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[v{idx}]"
-            )
-        else:
-            filter_parts.append(f"[{idx}:v]{_soft_background_filter()}[bg{idx}]")
-            filter_parts.append(f"[{idx}:v]{_landscape_foreground_filter()}[fg{idx}]")
-            filter_parts.append(
-                f"[bg{idx}][fg{idx}]{_card_overlay_expr(per_image, 10)}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[v{idx}]"
-            )
-        concat_inputs.append(f"[v{idx}]")
-    filter_parts.append(f"{''.join(concat_inputs)}concat=n={len(valid_images)}:v=1:a=0[vout]")
-    cmd += [
-        "-filter_complex", ";".join(filter_parts),
-        "-map", "[vout]",
-        "-r", str(FPS),
-        "-c:v", VIDEO_CODEC,
-        "-preset", PRESET,
-        "-pix_fmt", PIX_FMT,
-        str(output_path),
-    ]
-    _run(cmd)
+            if mode == "portrait":
+                filter_expr = f"[0:v]{_portrait_foreground_filter(per_image)}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[vout]"
+            elif mode == "square":
+                filter_expr = (
+                    f"[0:v]{_soft_background_filter()}[bg];"
+                    f"[0:v]{_square_foreground_filter()}[fg];"
+                    f"[bg][fg]{_card_overlay_expr(per_image, 6)}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[vout]"
+                )
+            else:
+                filter_expr = (
+                    f"[0:v]{_soft_background_filter()}[bg];"
+                    f"[0:v]{_landscape_foreground_filter()}[fg];"
+                    f"[bg][fg]{_card_overlay_expr(per_image, 10)}{transition_filter},trim=duration={per_image:.3f},setpts=PTS-STARTPTS[vout]"
+                )
+            _run([
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-t", f"{per_image:.3f}",
+                "-i", normalized_image,
+                "-filter_complex", filter_expr,
+                "-map", "[vout]",
+                "-r", str(FPS),
+                "-c:v", VIDEO_CODEC,
+                "-preset", PRESET,
+                "-pix_fmt", PIX_FMT,
+                str(clip_path),
+            ])
+            clip_paths.append(clip_path)
+
+        concat_file = work_dir / "concat.txt"
+        concat_file.write_text(
+            "\n".join(f"file '{path.as_posix()}'" for path in clip_paths),
+            encoding="utf-8",
+        )
+        _run([
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_file),
+            "-c", "copy",
+            str(output_path),
+        ])
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _prepare_material_video_clip(video_path: str, duration: float, output_path: Path, transition_id: str = "fade") -> None:
@@ -898,6 +967,7 @@ def compose_history_video(
     transition_id: str = "fade",
     subtitle_template_id: str = "classic",
     aspect_ratio: str = "vertical",
+    output_stem: str = "final_video",
 ) -> dict:
     global WIDTH, HEIGHT
     output_root = Path(output_dir)
@@ -982,9 +1052,10 @@ def compose_history_video(
         merged_video = work_dir / "visual_track.mp4"
         merged_audio = work_dir / "voice_track.m4a"
         subtitle_file = work_dir / "timeline_subtitles.srt"
-        final_video = build_dir / "final_video.mp4"
-        cover_image = build_dir / "cover.jpg"
-        stored_subtitle = build_dir / "timeline_subtitles.srt"
+        safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(output_stem or "final_video")).strip("_") or "final_video"
+        final_video = build_dir / f"{safe_stem}.mp4"
+        cover_image = build_dir / ("cover.jpg" if safe_stem == "final_video" else f"{safe_stem}_cover.jpg")
+        stored_subtitle = build_dir / ("timeline_subtitles.srt" if safe_stem == "final_video" else f"{safe_stem}_subtitles.srt")
         target_market = ((result.get("workflow_config") or {}).get("target_market") or "cn")
 
         # ── Cover title text ──
@@ -1023,6 +1094,7 @@ def compose_history_video(
             "-i", str(merged_video),
             "-i", str(merged_audio),
             "-vf", vf,
+            "-af", VOICE_OUTPUT_AUDIO_FILTER,
             "-c:v", VIDEO_CODEC,
             "-preset", PRESET,
             "-pix_fmt", PIX_FMT,
@@ -1046,6 +1118,7 @@ def compose_history_video(
             "final_video_path": str(final_video),
             "cover_image_path": str(cover_image),
             "subtitle_path": str(stored_subtitle),
+            "compose_aspect_ratio": "horizontal" if WIDTH == 1920 else "vertical",
         }
     finally:
         WIDTH, HEIGHT = original_size

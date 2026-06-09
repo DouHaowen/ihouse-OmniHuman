@@ -18,6 +18,7 @@ load_dotenv(override=True)
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 SCRIPT_MODEL_API_RELAY = "api_relay"
+SCRIPT_MODEL_CLAUDE = "claude"
 
 MAX_DIGITAL_HUMAN_TOTAL_SECONDS = 35
 TARGET_DIGITAL_HUMAN_TOTAL_SECONDS = 30
@@ -1510,7 +1511,10 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
 
 
 def _normalize_script_model_provider(provider: str | None) -> str:
-    return SCRIPT_MODEL_API_RELAY
+    requested = str(provider or "").strip().lower()
+    if requested == SCRIPT_MODEL_API_RELAY:
+        return SCRIPT_MODEL_API_RELAY
+    return SCRIPT_MODEL_CLAUDE
 
 
 def _request_json_by_provider(
@@ -1522,7 +1526,10 @@ def _request_json_by_provider(
     target_market: str = "cn",
     department_id: str = "real_estate",
 ) -> tuple[dict, dict]:
-    return _request_json_from_openai_relay(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    normalized = _normalize_script_model_provider(provider)
+    if normalized == SCRIPT_MODEL_API_RELAY:
+        return _request_json_from_openai_relay(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+    return _request_json_from_claude(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
 
 def _build_message_kwargs(user_prompt: str, max_tokens: int, enable_web_search: bool, target_market: str = "cn", department_id: str = "real_estate") -> dict:
     kwargs = {
@@ -1543,7 +1550,7 @@ def _build_message_kwargs(user_prompt: str, max_tokens: int, enable_web_search: 
     return kwargs
 
 
-def revise_script_segment(topic: str, script_data: dict, segment_index: int, instruction: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_API_RELAY) -> dict:
+def revise_script_segment(topic: str, script_data: dict, segment_index: int, instruction: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_CLAUDE) -> dict:
     target = script_data.get('segments', [])[segment_index]
     segment_type = target.get('type', 'material')
     prompt = f"""
@@ -1603,7 +1610,7 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
     }
 
 
-def generate_script(topic: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_API_RELAY) -> dict:
+def generate_script(topic: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_CLAUDE) -> dict:
     """
     输入选题，生成完整视频文案
     """

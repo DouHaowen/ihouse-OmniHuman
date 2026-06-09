@@ -1,0 +1,350 @@
+"""OpenNews batched hot-topic fetching and production queue helpers."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from opennews_trends import search_english_trends
+
+
+DEFAULT_BATCH_CONFIG = {
+    "enabled": False,
+    "interval_minutes": 30,
+    "category": "all",
+    "time_range": "6h",
+    "limit": 20,
+    "last_run_at": 0,
+    "next_run_at": 0,
+    "last_run_message": "自动抓取尚未启动。",
+    "last_run_error": "",
+}
+
+VALID_INTERVALS = {5, 15, 30, 60, 180, 360}
+VALID_TIME_RANGES = {"1h", "6h", "24h"}
+VALID_CATEGORIES = {"all", "military", "politics", "technology", "finance", "ai", "society"}
+
+_FILE_LOCK = threading.Lock()
+_RUN_LOCK = threading.Lock()
+_SCHEDULER_STARTED = False
+
+
+def _config_path(root: Path) -> Path:
+    return root / "batch_config.json"
+
+
+def _seen_path(root: Path) -> Path:
+    return root / "seen.json"
+
+
+def _batches_dir(root: Path) -> Path:
+    return root / "batches"
+
+
+def _jobs_dir(root: Path) -> Path:
+    return root / "batch_jobs"
+
+
+def _ensure_root(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    _batches_dir(root).mkdir(parents=True, exist_ok=True)
+    _jobs_dir(root).mkdir(parents=True, exist_ok=True)
+
+
+def _read_json(path: Path, fallback: Any) -> Any:
+    try:
+        if not path.exists():
+            return fallback
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return fallback
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _safe_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return fallback
+
+
+def _normalize_config(config: dict | None) -> dict:
+    clean = dict(DEFAULT_BATCH_CONFIG)
+    if isinstance(config, dict):
+        clean.update(config)
+    clean["enabled"] = bool(clean.get("enabled"))
+    try:
+        interval = int(clean.get("interval_minutes") or DEFAULT_BATCH_CONFIG["interval_minutes"])
+    except Exception:
+        interval = DEFAULT_BATCH_CONFIG["interval_minutes"]
+    clean["interval_minutes"] = interval if interval in VALID_INTERVALS else DEFAULT_BATCH_CONFIG["interval_minutes"]
+    category = str(clean.get("category") or "all").strip().lower()
+    clean["category"] = category if category in VALID_CATEGORIES else "all"
+    time_range = str(clean.get("time_range") or "6h").strip().lower()
+    clean["time_range"] = time_range if time_range in VALID_TIME_RANGES else "6h"
+    try:
+        clean["limit"] = max(5, min(int(clean.get("limit") or 20), 60))
+    except Exception:
+        clean["limit"] = 20
+    for key in ("last_run_at", "next_run_at"):
+        clean[key] = _safe_float(clean.get(key), 0)
+    clean["last_run_message"] = str(clean.get("last_run_message") or "")
+    clean["last_run_error"] = str(clean.get("last_run_error") or "")
+    return clean
+
+
+def load_batch_config(root: Path) -> dict:
+    _ensure_root(root)
+    with _FILE_LOCK:
+        return _normalize_config(_read_json(_config_path(root), {}))
+
+
+def save_batch_config(root: Path, config: dict) -> dict:
+    _ensure_root(root)
+    current = load_batch_config(root)
+    current.update(config or {})
+    clean = _normalize_config(current)
+    now = time.time()
+    if clean.get("enabled") and not clean.get("next_run_at"):
+        clean["next_run_at"] = now + clean["interval_minutes"] * 60
+    if not clean.get("enabled"):
+        clean["next_run_at"] = 0
+    with _FILE_LOCK:
+        _write_json(_config_path(root), clean)
+    return clean
+
+
+def _candidate_key(candidate: dict) -> str:
+    url = str(candidate.get("url") or "").strip().lower()
+    title = str(candidate.get("title") or candidate.get("title_zh") or "").strip().lower()
+    source = str(candidate.get("source_name") or candidate.get("trend_domain") or "").strip().lower()
+    # Use source + normalized title as the stable event key; URL alone is too noisy
+    # across news aggregators and syndicated copies.
+    title_norm = " ".join(title.split())
+    basis = f"{source}|{title_norm or url}"
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:18]
+
+
+def _batch_path(root: Path, batch_id: str) -> Path:
+    return _batches_dir(root) / f"{batch_id}.json"
+
+
+def _job_path(root: Path, job_id: str) -> Path:
+    return _jobs_dir(root) / f"{job_id}.json"
+
+
+def _candidate_payload(candidate: dict, *, batch_id: str, category: str, fetched_at: float) -> dict:
+    item = dict(candidate)
+    item_id = _candidate_key(item)
+    item["id"] = str(item.get("id") or item_id)
+    item["batch_item_id"] = item_id
+    item["batch_id"] = batch_id
+    item["batch_category"] = category
+    item["batch_fetched_at"] = fetched_at
+    item["status"] = str(item.get("status") or "pending")
+    return item
+
+
+def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: dict | None = None) -> dict:
+    _ensure_root(root)
+    if not _RUN_LOCK.acquire(blocking=False):
+        return {"ok": False, "running": True, "message": "热点批次抓取正在执行中，请稍后刷新。"}
+    started_at = time.time()
+    batch_id = time.strftime("batch_%Y%m%d_%H%M%S")
+    config = load_batch_config(root)
+    if isinstance(override, dict):
+        config.update({k: v for k, v in override.items() if v not in (None, "", [])})
+        config = _normalize_config(config)
+    category = str(config.get("category") or "all")
+    time_range = str(config.get("time_range") or "6h")
+    limit = int(config.get("limit") or 20)
+    payload = {
+        "batch_id": batch_id,
+        "triggered_by": triggered_by,
+        "started_at": started_at,
+        "finished_at": 0,
+        "category": category,
+        "time_range": time_range,
+        "limit": limit,
+        "items": [],
+        "duplicate_count": 0,
+        "raw_count": 0,
+        "source_errors": [],
+        "message": "",
+    }
+    try:
+        result = search_english_trends(category=category, time_range=time_range, keyword="", limit=limit)
+        candidates = result.get("candidates") or []
+        payload["raw_count"] = len(candidates)
+        payload["source_errors"] = result.get("source_errors", [])
+        with _FILE_LOCK:
+            seen = _read_json(_seen_path(root), {})
+            if not isinstance(seen, dict):
+                seen = {}
+            new_items = []
+            duplicate_count = 0
+            for candidate in candidates:
+                key = _candidate_key(candidate)
+                if key in seen:
+                    duplicate_count += 1
+                    seen[key]["last_seen_at"] = started_at
+                    seen[key]["seen_count"] = int(seen[key].get("seen_count") or 1) + 1
+                    continue
+                item = _candidate_payload(candidate, batch_id=batch_id, category=category, fetched_at=started_at)
+                new_items.append(item)
+                seen[key] = {
+                    "key": key,
+                    "title": item.get("title") or item.get("title_zh") or "",
+                    "url": item.get("url") or "",
+                    "first_seen_at": started_at,
+                    "last_seen_at": started_at,
+                    "seen_count": 1,
+                    "batch_id": batch_id,
+                }
+            payload["items"] = new_items[:limit]
+            payload["duplicate_count"] = duplicate_count
+            payload["finished_at"] = time.time()
+            payload["message"] = f"抓取完成：新增 {len(payload['items'])} 条，过滤重复 {duplicate_count} 条。"
+            _write_json(_seen_path(root), seen)
+            _write_json(_batch_path(root, batch_id), payload)
+            config["last_run_at"] = payload["finished_at"]
+            config["next_run_at"] = payload["finished_at"] + int(config.get("interval_minutes") or 30) * 60 if config.get("enabled") else 0
+            config["last_run_message"] = payload["message"]
+            config["last_run_error"] = ""
+            _write_json(_config_path(root), _normalize_config(config))
+        return {"ok": True, **payload}
+    except Exception as exc:
+        payload["finished_at"] = time.time()
+        payload["message"] = f"抓取失败：{exc}"
+        with _FILE_LOCK:
+            config["last_run_at"] = payload["finished_at"]
+            config["next_run_at"] = payload["finished_at"] + int(config.get("interval_minutes") or 30) * 60 if config.get("enabled") else 0
+            config["last_run_error"] = str(exc)
+            config["last_run_message"] = payload["message"]
+            _write_json(_config_path(root), _normalize_config(config))
+            _write_json(_batch_path(root, batch_id), payload)
+        return {"ok": False, **payload}
+    finally:
+        _RUN_LOCK.release()
+
+
+def list_batches(root: Path, *, limit: int = 20) -> list[dict]:
+    _ensure_root(root)
+    with _FILE_LOCK:
+        paths = sorted(_batches_dir(root).glob("batch_*.json"), key=lambda p: p.name, reverse=True)
+        batches = []
+        for path in paths[: max(1, min(limit, 80))]:
+            payload = _read_json(path, {})
+            if isinstance(payload, dict):
+                batches.append(payload)
+        return batches
+
+
+def find_batch_items(root: Path, item_ids: list[str]) -> list[dict]:
+    wanted = {str(item or "").strip() for item in item_ids if str(item or "").strip()}
+    if not wanted:
+        return []
+    found: list[dict] = []
+    for batch in list_batches(root, limit=80):
+        for item in batch.get("items", []) or []:
+            if str(item.get("batch_item_id") or item.get("id") or "") in wanted:
+                found.append(dict(item))
+    return found
+
+
+def create_batch_job(root: Path, *, username: str, items: list[dict], options: dict) -> dict:
+    _ensure_root(root)
+    job_id = f"opennews_batch_{int(time.time())}_{hashlib.sha1((username + str(time.time())).encode()).hexdigest()[:8]}"
+    now = time.time()
+    job = {
+        "job_id": job_id,
+        "username": username,
+        "status": "queued",
+        "message": "批量生产任务已提交",
+        "created_at": now,
+        "updated_at": now,
+        "options": options,
+        "items": [
+            {
+                "batch_item_id": item.get("batch_item_id") or item.get("id"),
+                "title": item.get("title_zh") or item.get("translated_title") or item.get("title") or "OpenNews 新闻",
+                "article": item,
+                "status": "queued",
+                "message": "等待生成",
+                "task_id": "",
+                "error": "",
+            }
+            for item in items
+        ],
+    }
+    with _FILE_LOCK:
+        _write_json(_job_path(root, job_id), job)
+    return job
+
+
+def update_batch_job(root: Path, job_id: str, updater) -> dict:
+    _ensure_root(root)
+    with _FILE_LOCK:
+        job = _read_json(_job_path(root, job_id), {})
+        if not isinstance(job, dict):
+            job = {"job_id": job_id, "items": []}
+        updater(job)
+        job["updated_at"] = time.time()
+        _write_json(_job_path(root, job_id), job)
+        return job
+
+
+def load_batch_job(root: Path, job_id: str) -> dict | None:
+    _ensure_root(root)
+    with _FILE_LOCK:
+        job = _read_json(_job_path(root, job_id), None)
+    return job if isinstance(job, dict) else None
+
+
+def list_batch_jobs(root: Path, *, limit: int = 10, username: str = "", include_all: bool = False) -> list[dict]:
+    _ensure_root(root)
+    with _FILE_LOCK:
+        paths = sorted(_jobs_dir(root).glob("opennews_batch_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        jobs: list[dict] = []
+        for path in paths:
+            payload = _read_json(path, {})
+            if not isinstance(payload, dict):
+                continue
+            if not include_all and username and payload.get("username") != username:
+                continue
+            jobs.append(payload)
+            if len(jobs) >= max(1, min(int(limit or 10), 50)):
+                break
+        return jobs
+
+
+def start_batch_scheduler(root: Path, *, poll_seconds: int = 20) -> None:
+    global _SCHEDULER_STARTED
+    if _SCHEDULER_STARTED:
+        return
+    _SCHEDULER_STARTED = True
+    _ensure_root(root)
+
+    def loop() -> None:
+        while True:
+            try:
+                config = load_batch_config(root)
+                if config.get("enabled"):
+                    next_run_at = float(config.get("next_run_at") or 0)
+                    if not next_run_at or time.time() >= next_run_at:
+                        run_batch_fetch_once(root, triggered_by="scheduler")
+            except Exception:
+                pass
+            time.sleep(max(10, int(poll_seconds)))
+
+    threading.Thread(target=loop, name="opennews-batch-scheduler", daemon=True).start()

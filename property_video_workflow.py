@@ -38,6 +38,7 @@ PROPERTY_MAX_OPENAI_TOKENS = 8192
 PROPERTY_SUBTITLE_MAX_CHARS = 18
 PROPERTY_SUBTITLE_MIN_SECONDS = 0.65
 PROPERTY_TIMELINE_MIN_SEGMENT_SECONDS = 2.8
+PROPERTY_VOICE_AUDIO_FILTER = "volume=1.35,loudnorm=I=-15:TP=-1.5:LRA=11"
 PROPERTY_SUBTITLE_SILENT_RE = re.compile(r"[\s，,。！？!?；;、：:（）()《》<>【】\[\]“”\"'‘’…—\-]+")
 
 
@@ -331,22 +332,22 @@ def _property_subtitle_filter(subtitle_path: Path) -> str:
     style_config = {
         **base_style,
         "font": "Noto Sans CJK SC",
-        "size": 16,
-        "primary": "&H00FFFFFF",
-        "outline": "&H0013202C",
+        "size": 22,
+        "primary": "&H0038F7FF",
+        "outline": "&H0010192E",
         "back": "&H00000000",
         "border_style": 1,
-        "outline_width": 2.2,
-        "shadow": 0.9,
-        "margin_v": 64,
-        "margin_l": 112,
-        "margin_r": 112,
+        "outline_width": 3.0,
+        "shadow": 1.6,
+        "margin_v": 58,
+        "margin_l": 64,
+        "margin_r": 64,
     }
     style = (
         f"FontName={style_config['font']},"
         f"FontSize={style_config['size']},"
         "Bold=1,"
-        "Spacing=0.4,"
+        "Spacing=0.5,"
         f"PrimaryColour={style_config['primary']},"
         f"OutlineColour={style_config['outline']},"
         f"BackColour={style_config['back']},"
@@ -1104,10 +1105,11 @@ def _mux_voice_and_subtitles(
             "-filter_complex",
             (
                 f"[0:v]{subtitle_filter}[vout];"
+                f"[1:a]{PROPERTY_VOICE_AUDIO_FILTER}[voice];"
                 f"[2:a]volume={safe_bgm_volume:.3f},atrim=0:{video_duration:.3f},"
                 f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.8,"
                 f"afade=t=out:st={fade_out_start:.3f}:d=1.2[bgm];"
-                "[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                "[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
             ),
             "-map",
             "[vout]",
@@ -1147,10 +1149,11 @@ def _mux_voice_and_subtitles(
                 f"{video_duration:.3f}",
                 "-filter_complex",
                 (
+                    f"[1:a]{PROPERTY_VOICE_AUDIO_FILTER}[voice];"
                     f"[2:a]volume={safe_bgm_volume:.3f},atrim=0:{video_duration:.3f},"
                     f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.8,"
                     f"afade=t=out:st={fade_out_start:.3f}:d=1.2[bgm];"
-                    "[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                    "[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]"
                 ),
                 "-map",
                 "0:v:0",
@@ -1186,6 +1189,8 @@ def _mux_voice_and_subtitles(
         "0:v:0",
         "-map",
         "1:a:0",
+        "-af",
+        PROPERTY_VOICE_AUDIO_FILTER,
         "-c:v",
         "libx264",
         "-preset",
