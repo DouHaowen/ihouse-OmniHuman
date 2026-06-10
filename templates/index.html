@@ -4056,6 +4056,11 @@
       return Array.from(document.querySelectorAll('.opennews-batch-check:checked')).map(input => input.value).filter(Boolean);
     }
 
+    function updateOpenNewsBatchSelectionStatus() {
+      const count = selectedOpenNewsBatchItemIds().length;
+      setOpenNewsBatchProduceStatus(count ? `已勾选 ${count} 条新闻，可一键批量生产。` : '请选择批次里的新闻。');
+    }
+
     function renderOpenNewsBatches(batches = []) {
       if (!els.openNewsBatchList) return;
       state.openNewsBatches = Array.isArray(batches) ? batches : [];
@@ -4063,10 +4068,12 @@
         els.openNewsBatchList.innerHTML = '<div class="empty-box">还没有热点抓取批次。可以点击“立即抓取一批”，或开启自动抓取。</div>';
         return;
       }
-      els.openNewsBatchList.innerHTML = state.openNewsBatches.map(batch => {
+      els.openNewsBatchList.innerHTML = state.openNewsBatches.map((batch, batchIndex) => {
         const items = Array.isArray(batch.items) ? batch.items : [];
         const title = `${formatOpenNewsBatchTime(batch.started_at)}｜${escapeHtml(batch.category || 'all')}｜${escapeHtml(batch.time_range || '6h')}`;
         const summary = `新增 ${items.length} 条｜原始 ${Number(batch.raw_count || 0)} 条｜过滤重复 ${Number(batch.duplicate_count || 0)} 条`;
+        const batchId = batch.batch_id || `batch-${batchIndex}`;
+        const isOpen = batchIndex === 0 || items.some(item => selectedOpenNewsBatchItemIds().includes(String(item.batch_item_id || item.id || '')));
         const itemCards = items.length ? items.map(item => {
           const itemId = item.batch_item_id || item.id || '';
           const displayTitle = item.title_zh || item.translated_title || item.title || '未命名新闻';
@@ -4094,23 +4101,56 @@
           `;
         }).join('') : '<div class="empty-box">这个批次没有新增新闻，可能都被跨批次去重过滤了。</div>';
         return `
-          <div class="history-card">
-            <div class="history-top">
-              <div>
-                <div class="history-title">${title}</div>
-                <div class="history-topic">${summary}</div>
+          <details class="history-card opennews-batch-accordion" data-batch-id="${escapeHtml(batchId)}" ${isOpen ? 'open' : ''}>
+            <summary style="cursor:pointer; list-style:none;">
+              <div class="history-top">
+                <div>
+                  <div class="section-kicker">Batch ${escapeHtml(String(state.openNewsBatches.length - batchIndex))}</div>
+                  <div class="history-title">${title}</div>
+                  <div class="history-topic">${summary}</div>
+                  ${batch.message ? `<div class="history-topic">${escapeHtml(batch.message)}</div>` : ''}
+                </div>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+                  <span class="badge">${escapeHtml(batch.triggered_by || 'auto')}</span>
+                  <span class="badge opennews-batch-toggle-label">${isOpen ? '收起' : '展开'}</span>
+                </div>
               </div>
-              <span class="badge">${escapeHtml(batch.triggered_by || 'auto')}</span>
+            </summary>
+            <div class="actions" style="margin-top:12px;">
+              <button class="btn btn-secondary opennews-batch-select-all" type="button" data-batch-id="${escapeHtml(batchId)}">勾选本批次全部</button>
+              <button class="btn btn-ghost opennews-batch-clear-all" type="button" data-batch-id="${escapeHtml(batchId)}">取消本批次</button>
             </div>
-            ${batch.message ? `<div class="history-topic">${escapeHtml(batch.message)}</div>` : ''}
             <div class="file-board" style="margin-top:12px;">${itemCards}</div>
-          </div>
+          </details>
         `;
       }).join('');
+      els.openNewsBatchList.querySelectorAll('.opennews-batch-accordion').forEach(detail => {
+        detail.addEventListener('toggle', () => {
+          const label = detail.querySelector('.opennews-batch-toggle-label');
+          if (label) label.textContent = detail.open ? '收起' : '展开';
+        });
+      });
       els.openNewsBatchList.querySelectorAll('.opennews-batch-check').forEach(input => {
         input.addEventListener('change', () => {
-          const count = selectedOpenNewsBatchItemIds().length;
-          setOpenNewsBatchProduceStatus(count ? `已勾选 ${count} 条新闻，可一键批量生产。` : '请选择批次里的新闻。');
+          updateOpenNewsBatchSelectionStatus();
+        });
+      });
+      els.openNewsBatchList.querySelectorAll('.opennews-batch-select-all').forEach(btn => {
+        btn.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          const detail = btn.closest('.opennews-batch-accordion');
+          detail?.querySelectorAll('.opennews-batch-check').forEach(input => { input.checked = true; });
+          updateOpenNewsBatchSelectionStatus();
+        });
+      });
+      els.openNewsBatchList.querySelectorAll('.opennews-batch-clear-all').forEach(btn => {
+        btn.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          const detail = btn.closest('.opennews-batch-accordion');
+          detail?.querySelectorAll('.opennews-batch-check').forEach(input => { input.checked = false; });
+          updateOpenNewsBatchSelectionStatus();
         });
       });
     }

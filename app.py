@@ -4267,6 +4267,13 @@ def _external_opennews_job_result_payload(job: dict) -> dict:
             "vertical_url": item.get("vertical_url") or ((item.get("video") or {}).get("vertical_url") if isinstance(item.get("video"), dict) else ""),
             "horizontal_url": item.get("horizontal_url") or ((item.get("video") or {}).get("horizontal_url") if isinstance(item.get("video"), dict) else ""),
             "video": item.get("video") or {},
+            "youtube_records": item.get("youtube_records") or [],
+            "youtube_error": item.get("youtube_error") or "",
+            "youtube_urls": [
+                record.get("youtube_url")
+                for record in (item.get("youtube_records") or [])
+                if isinstance(record, dict) and record.get("youtube_url")
+            ],
             "error": item.get("error") or "",
         })
     return {
@@ -4348,6 +4355,13 @@ def _external_opennews_video_payload(request: Request, output_dir: Path, result:
         "variants": variants,
         "vertical_url": (variants.get("vertical") or {}).get("download_url") or "",
         "horizontal_url": (variants.get("horizontal") or {}).get("download_url") or "",
+        "youtube_records": result.get("youtube_publish_records") if isinstance(result.get("youtube_publish_records"), list) else [],
+        "youtube_latest": result.get("youtube_publish_latest") if isinstance(result.get("youtube_publish_latest"), dict) else {},
+        "youtube_urls": [
+            record.get("youtube_url")
+            for record in (result.get("youtube_publish_records") or [])
+            if isinstance(record, dict) and record.get("youtube_url")
+        ],
     }
 
 
@@ -4515,7 +4529,28 @@ async def external_opennews_health(request: Request):
     token_error = _require_external_news_token(request)
     if token_error:
         return token_error
-    return {"ok": True, "service": "ihouse-opennews", "time": int(time.time())}
+    batch_config = load_opennews_batch_config(OPENNEWS_BATCH_DIR)
+    youtube_config = youtube_env_config()
+    return {
+        "ok": True,
+        "service": "ihouse-opennews",
+        "time": int(time.time()),
+        "auto_fetch": {
+            "enabled": bool(batch_config.get("enabled")),
+            "interval_minutes": batch_config.get("interval_minutes"),
+            "limit": batch_config.get("limit"),
+            "last_run_at": batch_config.get("last_run_at"),
+            "next_run_at": batch_config.get("next_run_at"),
+            "last_run_message": batch_config.get("last_run_message") or "",
+            "last_run_error": batch_config.get("last_run_error") or "",
+        },
+        "youtube": {
+            "configured": bool(youtube_config.get("client_id") and youtube_config.get("client_secret") and (youtube_config.get("refresh_token") or YOUTUBE_TOKEN_STORE_PATH.exists())),
+            "default_auto_publish": True,
+            "default_privacy_status": "public",
+            "default_aspects": ["horizontal", "vertical"],
+        },
+    }
 
 
 @app.get("/api/external/opennews/used-titles")
@@ -4585,6 +4620,11 @@ async def external_opennews_produce_selected(request: Request):
     aspect_ratio = str(payload.get("aspect_ratio") or "vertical")
     feedback = str(payload.get("feedback") or payload.get("notes") or "")
     callback_url = str(payload.get("callback_url") or "").strip()
+    youtube_auto_publish = payload.get("youtube_auto_publish")
+    if youtube_auto_publish is None:
+        youtube_auto_publish = True
+    else:
+        youtube_auto_publish = bool(youtube_auto_publish)
     youtube_aspects = payload.get("youtube_aspects") or ["horizontal", "vertical"]
     if isinstance(youtube_aspects, str):
         youtube_aspects = ["horizontal", "vertical"] if youtube_aspects == "both" else [part.strip() for part in youtube_aspects.split(",") if part.strip()]
@@ -4609,7 +4649,7 @@ async def external_opennews_produce_selected(request: Request):
             "voice_preset_id": voice_preset_id,
             "aspect_ratio": aspect_ratio,
             "notes": feedback,
-            "youtube_auto_publish": bool(payload.get("youtube_auto_publish")),
+            "youtube_auto_publish": youtube_auto_publish,
             "youtube_privacy_status": str(payload.get("youtube_privacy_status") or "public"),
             "youtube_aspects": youtube_aspects or ["horizontal", "vertical"],
             "external_trigger": True,
@@ -4638,8 +4678,11 @@ async def external_opennews_produce_selected(request: Request):
         "job": job,
         "status_url": status_url,
         "ready_videos_url": f"{external_base_url}/api/external/opennews/ready-videos?limit=50",
+        "youtube_auto_publish": youtube_auto_publish,
+        "youtube_privacy_status": str(payload.get("youtube_privacy_status") or "public"),
+        "youtube_aspects": youtube_aspects or ["horizontal", "vertical"],
         "mode": "sync" if wait_until_done else "async",
-        "message": "已接收外部审核选择，开始自动生成新闻视频；完成后 job.items 会返回 vertical_url 和 horizontal_url。",
+        "message": "已接收外部审核选择，开始自动生成新闻视频；完成后 job.items 会返回 vertical_url、horizontal_url 和 youtube_records。",
     }
     if not wait_until_done:
         return response_payload
