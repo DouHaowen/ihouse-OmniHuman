@@ -2759,6 +2759,8 @@ def build_opennews_script_data(*, draft: dict, article: dict | None = None, targ
             "source_materials": ranked_media,
             "material_theme_plan": theme_plan,
             "theme_extra_media_count": len(theme_extra_media),
+            "opennews_category": category_id,
+            "opennews_category_name": category_name,
             "disable_free_material_fallback": True,
             "opennews_material_only": True,
             "strict_news_media_only": True,

@@ -247,6 +247,46 @@ SOURCE_MATERIAL_BAD_TOKENS = (
     "banner-ad",
 )
 
+OPENNEWS_VISUAL_DOMAIN_TOKENS = {
+    "technology": {
+        "ai", "artificial intelligence", "technology", "tech", "software", "app",
+        "chip", "semiconductor", "nvidia", "openai", "anthropic", "meta",
+        "facebook", "spacex", "tesla", "apple", "microsoft", "google", "alphabet",
+        "amazon", "siri", "wwdc", "iphone", "data center", "robot", "startup",
+    },
+    "finance": {
+        "stock", "stocks", "market", "nasdaq", "nyse", "wall street", "shares",
+        "ipo", "earnings", "investor", "investors", "inflation", "fed",
+        "interest rate", "bank", "finance", "economy", "trading", "tariff",
+    },
+    "military": {
+        "military", "defense", "war", "army", "navy", "air force", "fighter",
+        "jet", "ship", "warship", "destroyer", "carrier", "missile", "drone",
+        "uav", "troops", "ukraine", "russia", "iran", "israel", "gaza",
+    },
+    "politics": {
+        "white house", "congress", "parliament", "minister", "president",
+        "government", "policy", "diplomacy", "spokesperson", "press briefing",
+        "election", "sanction", "foreign ministry", "cabinet",
+    },
+    "society": {
+        "school", "student", "students", "exam", "education", "university",
+        "hospital", "police", "festival", "shooting", "fire", "earthquake",
+        "tsunami", "city", "people", "community",
+    },
+}
+
+OPENNEWS_WRONG_DOMAIN_BLOCKS = {
+    "technology": {"white house", "parliament", "congress", "press briefing", "government meeting", "cabinet meeting", "foreign ministry", "diplomacy"},
+    "finance": {"missile", "drone", "fighter jet", "warship", "military exercise", "troops"},
+    "military": {"stock market", "ipo", "wall street", "earnings", "investors"},
+}
+
+OPENNEWS_GENERIC_MEDIA_TOKENS = {
+    "news", "photo", "image", "video", "official", "media", "press", "latest",
+    "footage", "b-roll", "article", "source", "public domain", "archive",
+}
+
 
 def _normalized_media_basename(path: str) -> str:
     name = os.path.basename((path or "").lower())
@@ -414,6 +454,101 @@ def _opennews_relevance_tokens(seg: dict) -> set[str]:
     return _tokenize_opennews_relevance(" ".join(parts))
 
 
+def _opennews_visual_domain(seg: dict, relevance_tokens: set[str]) -> str:
+    explicit = str(seg.get("opennews_category") or seg.get("category") or "").strip().lower()
+    if explicit in OPENNEWS_VISUAL_DOMAIN_TOKENS:
+        return explicit
+    text = " ".join([
+        str(seg.get("material_keyword") or ""),
+        str(seg.get("material_search_keyword") or ""),
+        str(seg.get("material_desc") or ""),
+        str(seg.get("script") or "")[:1200],
+        " ".join(sorted(relevance_tokens)),
+    ]).lower()
+    best_domain = ""
+    best_hits = 0
+    for domain, tokens in OPENNEWS_VISUAL_DOMAIN_TOKENS.items():
+        hits = sum(1 for token in tokens if token in text)
+        if hits > best_hits:
+            best_hits = hits
+            best_domain = domain
+    return best_domain or "general"
+
+
+def _opennews_item_haystack(item: dict) -> str:
+    return " ".join(
+        str(item.get(field) or "")
+        for field in ("title", "url", "source_url", "related_query", "theme_title")
+    ).lower()
+
+
+def _opennews_domain_hits(text: str, domain: str) -> set[str]:
+    return {token for token in OPENNEWS_VISUAL_DOMAIN_TOKENS.get(domain, set()) if token in text}
+
+
+def _opennews_wrong_domain_hits(text: str, domain: str) -> set[str]:
+    hits = {token for token in OPENNEWS_WRONG_DOMAIN_BLOCKS.get(domain, set()) if token in text}
+    if domain != "politics" and not _opennews_domain_hits(text, domain):
+        politics_hits = _opennews_domain_hits(text, "politics")
+        if len(politics_hits) >= 2:
+            hits.update(politics_hits)
+    return hits
+
+
+def _opennews_core_relevance_tokens(relevance_tokens: set[str]) -> set[str]:
+    core = set()
+    for token in relevance_tokens:
+        lowered = token.lower().strip()
+        if not lowered or lowered in OPENNEWS_GENERIC_MEDIA_TOKENS:
+            continue
+        if lowered in {"government", "meeting", "briefing", "company", "market", "tools", "tool"}:
+            continue
+        core.add(lowered)
+    return core
+
+
+def _opennews_quality_decision(item: dict, relevance_tokens: set[str], domain: str) -> tuple[bool, str, int]:
+    source = str(item.get("source") or "").lower()
+    title = str(item.get("title") or "").lower()
+    haystack = _opennews_item_haystack(item)
+    item_tokens = _tokenize_opennews_relevance(haystack)
+    core_tokens = _opennews_core_relevance_tokens(relevance_tokens)
+    overlap = core_tokens & item_tokens
+    phrase_hits = {token for token in core_tokens if " " in token and token in haystack}
+    domain_hits = _opennews_domain_hits(haystack, domain)
+    wrong_hits = _opennews_wrong_domain_hits(haystack, domain)
+    relevance_score = _source_material_relevance_score(item, relevance_tokens)
+    rank_score = _rank_source_material(item)
+    score = relevance_score + min(rank_score, 35)
+    if overlap:
+        score += len(overlap) * 10
+    if phrase_hits:
+        score += len(phrase_hits) * 16
+    if domain_hits:
+        score += min(len(domain_hits) * 8, 24)
+    if wrong_hits:
+        score -= 35 + len(wrong_hits) * 8
+
+    # 原文/相关报道的主图允许稍宽，但仍不能明显跑到错误领域。
+    trusted_article_source = source in {"article", "related_article", "opengraph", "news_source"}
+    if wrong_hits and not (overlap or phrase_hits):
+        return False, f"疑似错误领域素材：{', '.join(sorted(wrong_hits)[:4])}", score
+    if source in {"general_web", "general_web_search_media"}:
+        if not (overlap or phrase_hits or domain_hits):
+            return False, "公开网页素材未命中新闻核心实体或视觉主题", score
+        if score < 42:
+            return False, f"公开网页素材相关性分数过低：{score}", score
+    elif not trusted_article_source:
+        if core_tokens and not (overlap or phrase_hits or domain_hits) and score < 34:
+            return False, f"素材相关性分数过低：{score}", score
+    else:
+        if wrong_hits and score < 28:
+            return False, f"原文素材但疑似跑题：{score}", score
+    if "search media:" in title and not (overlap or phrase_hits or domain_hits):
+        return False, "搜索素材只命中泛化检索词", score
+    return True, "通过相关性检查", score
+
+
 def _source_material_relevance_score(item: dict, relevance_tokens: set[str]) -> int:
     if not relevance_tokens:
         return 1
@@ -479,6 +614,8 @@ def fetch_materials_for_segment(
     seen_source_urls: set[str] = set()
     source_materials = []
     relevance_tokens = _opennews_relevance_tokens(seg) if is_opennews_material_only and seg.get("strict_news_media_only") else set()
+    visual_domain = _opennews_visual_domain(seg, relevance_tokens) if relevance_tokens else "general"
+    rejection_log: list[dict] = []
     for item in (seg.get("source_materials") or []):
         if not isinstance(item, dict) or not item.get("url"):
             continue
@@ -490,13 +627,35 @@ def fetch_materials_for_segment(
         relevance_score = _source_material_relevance_score(item, relevance_tokens) if relevance_tokens else 1
         min_relevance_score = _opennews_min_relevance_score(item)
         if relevance_tokens and relevance_score < min_relevance_score:
+            rejection_log.append({
+                "url": item.get("url") or "",
+                "title": item.get("title") or "",
+                "reason": f"基础相关性不足：{relevance_score}/{min_relevance_score}",
+            })
             print(
                 "  ⚠️ 新闻素材相关性不足，已跳过："
                 f"{item.get('title') or item.get('url')}｜score={relevance_score}/{min_relevance_score}"
             )
             continue
+        if relevance_tokens:
+            keep_item, quality_reason, quality_score = _opennews_quality_decision(item, relevance_tokens, visual_domain)
+            if not keep_item:
+                rejection_log.append({
+                    "url": item.get("url") or "",
+                    "title": item.get("title") or "",
+                    "reason": quality_reason,
+                    "score": quality_score,
+                    "domain": visual_domain,
+                })
+                print(f"  ⚠️ 新闻素材质量过滤：{quality_reason}｜{item.get('title') or item.get('url')}")
+                continue
+        else:
+            quality_reason = "非严格模式"
+            quality_score = relevance_score
         item = dict(item)
         item["_relevance_score"] = relevance_score
+        item["_quality_score"] = quality_score
+        item["_quality_reason"] = quality_reason
         seen_source_urls.update(identity_keys)
         source_materials.append(item)
     if is_opennews_material_only:
@@ -539,6 +698,8 @@ def fetch_materials_for_segment(
         entry = _material_entry(copied_path, kind=kind or _asset_kind_for_suffix(copied_path), source="opennews_source")
         entry["source_url"] = item.get("source_url") or item.get("url")
         entry["title"] = item.get("title", "")
+        entry["quality_score"] = item.get("_quality_score", 0)
+        entry["quality_reason"] = item.get("_quality_reason", "")
         if item.get("theme_index") is not None:
             entry["theme_index"] = item.get("theme_index")
         if item.get("theme_title"):
@@ -656,6 +817,14 @@ def fetch_materials_for_segment(
 
     seg_with_materials["material_paths"] = material_paths
     seg_with_materials["material_items"] = material_items
+    if is_opennews_material_only:
+        seg_with_materials["material_quality"] = {
+            "domain": visual_domain,
+            "relevance_tokens": sorted(relevance_tokens)[:80],
+            "accepted_count": len(material_items),
+            "rejected_count": len(rejection_log),
+            "rejections": rejection_log[:80],
+        }
     if is_opennews_material_only and len(material_items) > OPENNEWS_MAX_MATERIALS:
         seg_with_materials["material_paths"] = material_paths[:OPENNEWS_MAX_MATERIALS]
         seg_with_materials["material_items"] = material_items[:OPENNEWS_MAX_MATERIALS]

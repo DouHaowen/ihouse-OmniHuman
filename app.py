@@ -4254,6 +4254,114 @@ def _external_video_urls_for_result(public_base_url: str, output_dir: Path, resu
     }
 
 
+def _is_property_video_result(result: Optional[dict]) -> bool:
+    if not result:
+        return False
+    workflow_config = result.get("workflow_config") or {}
+    return bool(
+        result.get("mode") == "property_video"
+        or workflow_config.get("property_video_mode")
+        or str(result.get("topic") or "") == "房源实拍成片"
+    )
+
+
+def _is_digital_human_result(result: Optional[dict]) -> bool:
+    if not result or _is_opennews_result(result) or _is_property_video_result(result):
+        return False
+    workflow_config = result.get("workflow_config") or {}
+    segments = result.get("segments")
+    return bool(
+        result.get("final_video_path")
+        and (
+            workflow_config.get("digital_human_engine")
+            or isinstance(segments, list)
+            or result.get("segment_count")
+        )
+    )
+
+
+def _external_general_download_url(request: Request, history_id: str, output_dir: Path, value: str) -> str:
+    rel = _history_relpath_from_value(str(output_dir), value)
+    if not rel:
+        return ""
+    base_url = _get_public_base_url(request).rstrip("/")
+    return f"{base_url}/api/external/videos/{quote(history_id, safe='')}/download/{quote(rel, safe='/')}"
+
+
+def _external_final_video_paths(result: dict) -> set[str]:
+    paths: set[str] = set()
+    final_video_path = str(result.get("final_video_path") or "").strip()
+    if final_video_path:
+        paths.add(final_video_path)
+    variants = result.get("final_video_variants")
+    if isinstance(variants, dict):
+        for variant in variants.values():
+            if isinstance(variant, dict):
+                variant_path = str(variant.get("final_video_path") or "").strip()
+                if variant_path:
+                    paths.add(variant_path)
+    return paths
+
+
+def _external_general_video_payload(request: Request, output_dir: Path, result: dict) -> Optional[dict]:
+    if _is_property_video_result(result):
+        video_type = "property_video"
+        video_type_label = "房源实拍成片"
+    elif _is_digital_human_result(result):
+        video_type = "digital_human"
+        video_type_label = "数字人视频"
+    else:
+        return None
+
+    history_id = output_dir.name
+    variants: dict[str, dict] = {}
+    raw_variants = result.get("final_video_variants")
+    if isinstance(raw_variants, dict):
+        for aspect, variant in raw_variants.items():
+            if not isinstance(variant, dict):
+                continue
+            video_path = str(variant.get("final_video_path") or "")
+            rel = _history_relpath_from_value(str(output_dir), video_path)
+            if not rel or not (output_dir / rel).exists():
+                continue
+            variants[str(aspect)] = {
+                "aspect_ratio": str(variant.get("compose_aspect_ratio") or aspect),
+                "name": Path(video_path).name or f"final_video_{aspect}.mp4",
+                "download_url": _external_general_download_url(request, history_id, output_dir, video_path),
+                "size": (output_dir / rel).stat().st_size,
+            }
+
+    final_video_path = str(result.get("final_video_path") or "")
+    final_rel = _history_relpath_from_value(str(output_dir), final_video_path)
+    if final_rel and (output_dir / final_rel).exists() and not variants:
+        aspect = str((result.get("workflow_config") or {}).get("compose_aspect_ratio") or "vertical")
+        variants[aspect] = {
+            "aspect_ratio": aspect,
+            "name": Path(final_video_path).name or "final_video.mp4",
+            "download_url": _external_general_download_url(request, history_id, output_dir, final_video_path),
+            "size": (output_dir / final_rel).stat().st_size,
+        }
+
+    if not variants:
+        return None
+
+    preferred = variants.get("vertical") or variants.get("9:16") or next(iter(variants.values()))
+    return {
+        "id": history_id,
+        "history_id": history_id,
+        "title": result.get("title") or (result.get("script") or {}).get("title") or result.get("topic") or video_type_label,
+        "type": video_type,
+        "type_label": video_type_label,
+        "completed_at": int(output_dir.stat().st_mtime),
+        "created_at": int(output_dir.stat().st_mtime),
+        "duration": result.get("total_duration") or 0,
+        "vertical_url": preferred.get("download_url") or "",
+        "final_video_url": preferred.get("download_url") or "",
+        "final_video_name": preferred.get("name") or "",
+        "variants": variants,
+    }
+
+
 def _external_opennews_job_result_payload(job: dict) -> dict:
     items = []
     for item in job.get("items", []) or []:
@@ -4768,6 +4876,61 @@ async def external_opennews_video_download(history_id: str, file_path: str, requ
         return JSONResponse({"error": "文件不存在"}, status_code=404)
     if not target.exists() or not target.is_file():
         return JSONResponse({"error": "文件不存在"}, status_code=404)
+    return FileResponse(str(target), filename=target.name, media_type="video/mp4")
+
+
+@app.get("/api/external/ready-videos")
+async def external_ready_videos(request: Request, limit: int = 50, video_type: str = "all"):
+    token_error = _require_external_news_token(request)
+    if token_error:
+        return token_error
+    requested_type = str(video_type or "all").strip().lower()
+    if requested_type not in {"all", "digital_human", "property_video"}:
+        return JSONResponse({"error": "video_type 只支持 all、digital_human、property_video"}, status_code=400)
+    videos: list[dict] = []
+    try:
+        max_items = max(1, min(int(limit or 50), 200))
+    except Exception:
+        max_items = 50
+    for output_dir in sorted([p for p in OUTPUT_DIR.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
+        result = _load_result_from_output_dir(output_dir)
+        payload = _external_general_video_payload(request, output_dir, result or {})
+        if not payload:
+            continue
+        if requested_type != "all" and payload.get("type") != requested_type:
+            continue
+        videos.append(payload)
+        if len(videos) >= max_items:
+            break
+    return {"videos": videos, "count": len(videos)}
+
+
+@app.get("/api/external/videos/{history_id}/download/{file_path:path}")
+async def external_ready_video_download(history_id: str, file_path: str, request: Request):
+    token_error = _require_external_news_token(request)
+    if token_error:
+        return token_error
+    output_dir = _resolve_history_output_dir(history_id)
+    if not output_dir:
+        return JSONResponse({"error": "视频不存在"}, status_code=404)
+    result = _load_result_from_output_dir(output_dir)
+    if not (_is_digital_human_result(result) or _is_property_video_result(result)):
+        return JSONResponse({"error": "这条记录不是数字人或房源最终成片"}, status_code=404)
+    base = output_dir.resolve()
+    target = (output_dir / file_path).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    if not target.exists() or not target.is_file():
+        return JSONResponse({"error": "文件不存在"}, status_code=404)
+    allowed_paths = set()
+    for video_path in _external_final_video_paths(result or {}):
+        rel = _history_relpath_from_value(str(output_dir), video_path)
+        if rel:
+            allowed_paths.add((output_dir / rel).resolve())
+    if target not in allowed_paths:
+        return JSONResponse({"error": "只允许下载最终成片文件"}, status_code=403)
     return FileResponse(str(target), filename=target.name, media_type="video/mp4")
 
 
