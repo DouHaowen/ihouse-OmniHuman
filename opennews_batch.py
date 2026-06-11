@@ -26,7 +26,16 @@ DEFAULT_BATCH_CONFIG = {
 
 VALID_INTERVALS = {5, 15, 30, 60, 180, 360}
 VALID_TIME_RANGES = {"1h", "6h", "24h"}
-VALID_CATEGORIES = {"all", "military", "politics", "technology", "finance", "ai", "society"}
+VALID_CATEGORIES = {
+    "all",
+    "ai",
+    "real_estate",
+    "immigration",
+    "technology",
+    "finance",
+    "military",
+    "politics",
+}
 
 _FILE_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()

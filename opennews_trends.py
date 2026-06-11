@@ -46,42 +46,48 @@ class TrendCategory:
 
 
 TREND_CATEGORIES: list[TrendCategory] = [
-    TrendCategory("all", "全部", ""),
+    TrendCategory("all", "全部指定热点", ""),
+    TrendCategory("ai", "AI相关", "artificial intelligence OR generative AI OR OpenAI OR Anthropic OR Nvidia OR AI chip OR AI regulation"),
+    TrendCategory("real_estate", "房产类", "real estate OR housing market OR home prices OR mortgage rates OR property investment OR rental market"),
+    TrendCategory("immigration", "移民类", "immigration OR visa policy OR migrant OR citizenship OR border policy OR international students"),
+    TrendCategory("technology", "科技类", "semiconductor OR chip OR software OR Apple OR Tesla OR Microsoft OR Google OR startup OR robotics"),
+    TrendCategory("finance", "金融类", "Federal Reserve OR interest rates OR inflation OR stocks OR market OR oil OR dollar OR earnings"),
     TrendCategory("military", "军事类", "military OR defense OR missile OR drone OR navy OR air force OR Taiwan Strait OR Ukraine"),
     TrendCategory("politics", "政治类", "White House OR Congress OR election OR government OR foreign policy OR sanctions"),
-    TrendCategory("technology", "科技类", "AI OR semiconductor OR chip OR Nvidia OR OpenAI OR Apple OR Tesla"),
-    TrendCategory("finance", "金融类", "Federal Reserve OR interest rates OR inflation OR stocks OR market OR oil OR dollar"),
-    TrendCategory("ai", "AI", "artificial intelligence OR generative AI OR OpenAI OR Anthropic OR Nvidia"),
-    TrendCategory("society", "社会类", "protest OR crime OR disaster OR health OR education"),
 ]
 
+FOCUSED_TREND_CATEGORY_IDS = ["ai", "real_estate", "immigration", "technology", "finance", "military", "politics"]
+
 BING_TREND_QUERIES = {
-    "all": "breaking news latest",
+    "all": "AI real estate immigration technology finance military politics latest news",
+    "ai": "AI OpenAI Nvidia Anthropic AI chip latest news",
+    "real_estate": "real estate housing market mortgage rates latest news",
+    "immigration": "immigration visa policy migrant latest news",
+    "technology": "technology semiconductor chip software latest news",
+    "finance": "markets finance economy Federal Reserve latest news",
     "military": "defense military latest news",
     "politics": "White House politics latest news",
-    "technology": "AI technology semiconductor latest news",
-    "finance": "markets finance economy latest news",
-    "ai": "AI Nvidia OpenAI latest news",
-    "society": "world society latest news",
 }
 
 NEWSDATA_CATEGORY_MAP = {
-    "military": "politics",
-    "politics": "politics",
+    "ai": "technology",
+    "real_estate": "business",
+    "immigration": "politics",
     "technology": "technology",
     "finance": "business",
-    "ai": "technology",
-    "society": "world",
+    "military": "politics",
+    "politics": "politics",
 }
 
 NEWSDATA_QUERY_MAP = {
-    "all": "breaking news",
-    "military": "military defense Ukraine Taiwan Strait",
-    "politics": "White House Congress government sanctions",
+    "all": "artificial intelligence real estate immigration technology finance military politics",
+    "ai": "artificial intelligence OpenAI Nvidia Anthropic AI chip",
+    "real_estate": "real estate housing market mortgage property",
+    "immigration": "immigration visa policy migrant citizenship",
     "technology": "artificial intelligence semiconductor technology",
     "finance": "Federal Reserve markets inflation economy",
-    "ai": "artificial intelligence OpenAI Nvidia",
-    "society": "protest disaster health education",
+    "military": "military defense Ukraine Taiwan Strait",
+    "politics": "White House Congress government sanctions",
 }
 
 GDELT_SAFE_TERM_REPLACEMENTS = {
@@ -545,7 +551,7 @@ def _translate_trend_candidates(candidates: list[dict]) -> None:
             candidate["summary_zh"] = summary_zh
 
 
-def search_english_trends(*, category: str = "all", time_range: str = "6h", keyword: str = "", limit: int = 40) -> dict:
+def _search_english_trends_single(*, category: str = "all", time_range: str = "6h", keyword: str = "", limit: int = 40) -> dict:
     trend_category = _category_by_id(category)
     hours = _hours_for_range(time_range)
     source_errors: list[str] = []
@@ -600,5 +606,77 @@ def search_english_trends(*, category: str = "all", time_range: str = "6h", keyw
         "recent_window": f"最近 {hours} 小时英文新闻热点",
         "time_range": f"{hours}h",
         "category": trend_category.id,
+        "source_errors": source_errors,
+    }
+
+
+def search_english_trends(*, category: str = "all", time_range: str = "6h", keyword: str = "", limit: int = 40) -> dict:
+    """Search English hot topics.
+
+    The "all" bucket is intentionally not generic breaking news. It is a
+    curated pool of the business-relevant categories iHouse wants to monitor.
+    """
+    category = (category or "all").strip().lower() or "all"
+    keyword = _strip_tags(keyword or "").strip()
+    if category != "all" or keyword:
+        return _search_english_trends_single(category=category, time_range=time_range, keyword=keyword, limit=limit)
+
+    max_items = max(1, min(int(limit or 40), 80))
+    per_category_limit = max(4, min(14, (max_items + len(FOCUSED_TREND_CATEGORY_IDS) - 1) // len(FOCUSED_TREND_CATEGORY_IDS) + 2))
+    combined: list[dict] = []
+    stats: list[dict] = []
+    source_errors: list[str] = []
+    raw_count = 0
+    deduped_count = 0
+    seen_keys: set[str] = set()
+
+    for category_id in FOCUSED_TREND_CATEGORY_IDS:
+        try:
+            result = _search_english_trends_single(
+                category=category_id,
+                time_range=time_range,
+                keyword="",
+                limit=per_category_limit,
+            )
+        except Exception as exc:
+            source_errors.append(f"{category_id}: {exc}")
+            continue
+        raw_count += int(result.get("raw_count") or 0)
+        deduped_count += int(result.get("deduped_count") or 0)
+        for stat in result.get("stats") or []:
+            if isinstance(stat, dict):
+                stat = dict(stat)
+                stat["category"] = category_id
+                stats.append(stat)
+        for candidate in result.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            key = str(candidate.get("url") or "").strip().lower() or _normalize_title(str(candidate.get("title") or ""))
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            combined.append(dict(candidate))
+        source_errors.extend(str(item) for item in result.get("source_errors") or [] if item)
+
+    if not combined and source_errors:
+        raise RuntimeError("；".join(source_errors[:3]))
+
+    combined.sort(
+        key=lambda item: (
+            float(item.get("trend_score") or 0),
+            float(item.get("published_ts") or 0),
+        ),
+        reverse=True,
+    )
+    limited = combined[:max_items]
+    return {
+        "candidates": limited,
+        "stats": stats[:12],
+        "raw_count": raw_count,
+        "deduped_count": deduped_count or len(combined),
+        "recent_count": len(limited),
+        "recent_window": f"最近 {_hours_for_range(time_range)} 小时指定热点英文新闻",
+        "time_range": f"{_hours_for_range(time_range)}h",
+        "category": "all",
         "source_errors": source_errors,
     }

@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 try:
@@ -27,6 +28,7 @@ SUBTITLE_FONT = "Noto Sans CJK SC"
 COVER_TITLE_FONT = "Noto Sans CJK SC"
 COVER_TITLE_DURATION = 1.0 / FPS  # exactly 1 frame — cover visible as first frame, no pause
 VOICE_OUTPUT_AUDIO_FILTER = "volume=1.35,loudnorm=I=-15:TP=-1.5:LRA=11"
+COMPOSE_DIMENSION_LOCK = threading.Lock()
 
 SUBTITLE_TEMPLATE_STYLES = {
     "classic": {
@@ -969,13 +971,39 @@ def compose_history_video(
     aspect_ratio: str = "vertical",
     output_stem: str = "final_video",
 ) -> dict:
+    # WIDTH/HEIGHT are still shared by the helper filters below, so serialize
+    # composition to avoid horizontal/vertical jobs borrowing each other's style.
+    with COMPOSE_DIMENSION_LOCK:
+        return _compose_history_video_unlocked(
+            output_dir=output_dir,
+            result=result,
+            transition_id=transition_id,
+            subtitle_template_id=subtitle_template_id,
+            aspect_ratio=aspect_ratio,
+            output_stem=output_stem,
+        )
+
+
+def _compose_history_video_unlocked(
+    output_dir: str,
+    result: dict,
+    transition_id: str = "fade",
+    subtitle_template_id: str = "classic",
+    aspect_ratio: str = "vertical",
+    output_stem: str = "final_video",
+) -> dict:
     global WIDTH, HEIGHT
     output_root = Path(output_dir)
     if not output_root.exists():
         raise RuntimeError("输出目录不存在")
 
     original_size = (WIDTH, HEIGHT)
-    if str(aspect_ratio or "").strip().lower() in {"horizontal", "16:9", "landscape"}:
+    requested_aspect = (
+        "horizontal"
+        if str(aspect_ratio or "").strip().lower() in {"horizontal", "16:9", "landscape"}
+        else "vertical"
+    )
+    if requested_aspect == "horizontal":
         WIDTH, HEIGHT = 1920, 1080
     else:
         WIDTH, HEIGHT = 1080, 1920
@@ -1118,7 +1146,7 @@ def compose_history_video(
             "final_video_path": str(final_video),
             "cover_image_path": str(cover_image),
             "subtitle_path": str(stored_subtitle),
-            "compose_aspect_ratio": "horizontal" if WIDTH == 1920 else "vertical",
+            "compose_aspect_ratio": requested_aspect,
         }
     finally:
         WIDTH, HEIGHT = original_size

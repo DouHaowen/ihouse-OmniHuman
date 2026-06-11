@@ -1530,7 +1530,7 @@
             </div>
 
             <div class="actions" style="justify-content:flex-start; margin-bottom:14px;">
-              <button class="btn btn-primary" id="openNewsQuickHotBtn" type="button">一键抓取全球热点</button>
+              <button class="btn btn-primary" id="openNewsQuickHotBtn" type="button">一键抓取指定热点</button>
             </div>
 
             <div class="panel" style="padding:16px; gap:12px; margin-bottom:16px;">
@@ -1538,7 +1538,7 @@
                 <div>
                   <div class="section-kicker">Auto Radar</div>
                   <h3 class="section-title" style="font-size:22px;">热点自动抓取与批量生产</h3>
-                  <p class="section-desc">开启后系统会按设定时间自动抓取英文热点，并按批次展示。勾选新闻后可直接批量生成文案、配音、素材和横竖屏视频。</p>
+                  <p class="section-desc">开启后系统会按设定时间自动抓取 AI、房产、移民、科技、金融、军事、政治类英文热点，并按批次展示。勾选新闻后可直接批量生成文案、配音、素材和横竖屏视频。</p>
                 </div>
               </div>
               <div class="field-grid" style="grid-template-columns: 150px 150px 150px 150px minmax(0,1fr);">
@@ -1587,7 +1587,7 @@
               </div>
               <div class="field">
                 <label for="openNewsQueryInput">关键词过滤（可选）</label>
-                <input id="openNewsQueryInput" class="select-input" type="text" placeholder="不填则抓所选网站最新新闻；也可填 Taiwan Strait / AI chip 等过滤">
+                <input id="openNewsQueryInput" class="select-input" type="text" placeholder="可选：AI chip / mortgage rates / visa policy，用来进一步聚焦热点">
               </div>
               <div class="field" id="openNewsTrendRangeField" style="display:none;">
                 <label for="openNewsTrendRangeSelect">热点时间范围</label>
@@ -1604,7 +1604,7 @@
               <textarea id="openNewsNotesInput" placeholder="例如：保持中立新闻口吻，重点说明事件背景和影响；不要夸大未证实信息；口播控制在 1-3 分钟。"></textarea>
             </div>
 
-            <div class="topbar-status" id="openNewsStatus">请选择分区和时间范围后抓取英文圈热点新闻，或直接点击“一键抓取全球热点”。</div>
+            <div class="topbar-status" id="openNewsStatus">请选择分区和时间范围后抓取英文圈指定热点新闻，或直接点击“一键抓取指定热点”。</div>
 
             <div class="insight-grid" id="openNewsStats" style="display:none; margin-top:12px;"></div>
             <div class="file-board" id="openNewsCandidateList" style="margin-top:14px;"></div>
@@ -3942,7 +3942,7 @@
       state.openNewsMode = 'trend';
       if (els.openNewsTrendRangeField) els.openNewsTrendRangeField.style.display = '';
       if (els.openNewsQueryInput) {
-        els.openNewsQueryInput.placeholder = '可选：Taiwan Strait / semiconductor / Ukraine，用来聚焦英文热点';
+        els.openNewsQueryInput.placeholder = '可选：AI chip / mortgage rates / visa policy，用来进一步聚焦热点';
       }
       if (els.openNewsSearchBtn) els.openNewsSearchBtn.textContent = '抓取英文热点';
       renderOpenNewsOptions();
@@ -3951,7 +3951,7 @@
       state.openNewsSelectedArticle = null;
       state.openNewsDraft = null;
       if (els.openNewsDraftPanel) els.openNewsDraftPanel.style.display = 'none';
-      setOpenNewsStatus('请选择分区和时间范围后抓取英文圈热点新闻，或直接点击“一键抓取全球热点”。');
+      setOpenNewsStatus('请选择分区和时间范围后抓取英文圈指定热点新闻，或直接点击“一键抓取指定热点”。');
     }
 
     async function loadOpenNewsSources() {
@@ -4574,7 +4574,7 @@
       if (els.openNewsCategorySelect) els.openNewsCategorySelect.value = 'all';
       if (els.openNewsTrendRangeSelect) els.openNewsTrendRangeSelect.value = '6h';
       if (els.openNewsQueryInput) els.openNewsQueryInput.value = '';
-      setOpenNewsStatus('正在自动抓取全球英文热点新闻...');
+      setOpenNewsStatus('正在自动抓取 AI、房产、移民、科技、金融、军事、政治类英文热点新闻...');
       await searchOpenNews();
     }
 
