@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,7 @@ VALID_CATEGORIES = {
 _FILE_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()
 _SCHEDULER_STARTED = False
+RETENTION_SECONDS = max(3600, int(os.getenv("OPENNEWS_BATCH_RETENTION_SECONDS", str(2 * 24 * 60 * 60)) or str(2 * 24 * 60 * 60)))
 
 
 def _config_path(root: Path) -> Path:
@@ -85,6 +88,109 @@ def _safe_float(value: Any, fallback: float = 0.0) -> float:
         return float(value)
     except Exception:
         return fallback
+
+
+def _parse_news_timestamp(value: Any) -> float:
+    if value in (None, "", 0, "0"):
+        return 0.0
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 10_000_000_000:
+            ts = ts / 1000
+        return ts if ts > 0 else 0.0
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return _parse_news_timestamp(float(text))
+    except Exception:
+        pass
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            continue
+    try:
+        normalized = text.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
+def _candidate_reference_timestamp(item: dict) -> float:
+    published_ts = _parse_news_timestamp(item.get("published_ts"))
+    if published_ts:
+        return published_ts
+    published_at = _parse_news_timestamp(item.get("published_at") or item.get("news_time") or item.get("date"))
+    if published_at:
+        return published_at
+    return _safe_float(item.get("batch_fetched_at") or item.get("fetched_at") or item.get("created_at"), 0)
+
+
+def _is_recent_candidate(item: dict, *, now: float | None = None) -> bool:
+    now = now or time.time()
+    ts = _candidate_reference_timestamp(item)
+    if not ts:
+        return True
+    # Allow a small future clock skew from upstream feeds.
+    if ts > now + 6 * 60 * 60:
+        return True
+    return ts >= now - RETENTION_SECONDS
+
+
+def _prune_old_batches_locked(root: Path, *, now: float | None = None) -> dict:
+    now = now or time.time()
+    removed_batches = 0
+    removed_items = 0
+    kept_keys: set[str] = set()
+    for path in sorted(_batches_dir(root).glob("batch_*.json")):
+        payload = _read_json(path, {})
+        if not isinstance(payload, dict):
+            continue
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            items = []
+        fresh_items = [item for item in items if isinstance(item, dict) and _is_recent_candidate(item, now=now)]
+        removed_items += max(0, len(items) - len(fresh_items))
+        for item in fresh_items:
+            key = str(item.get("batch_item_id") or item.get("id") or "").strip()
+            if key:
+                kept_keys.add(key)
+        if not fresh_items and items:
+            try:
+                path.unlink()
+                removed_batches += 1
+            except FileNotFoundError:
+                pass
+            continue
+        if len(fresh_items) != len(items):
+            payload["items"] = fresh_items
+            payload["retention_pruned_at"] = now
+            payload["retention_policy_seconds"] = RETENTION_SECONDS
+            _write_json(path, payload)
+
+    seen = _read_json(_seen_path(root), {})
+    if isinstance(seen, dict):
+        fresh_seen = {}
+        for key, value in seen.items():
+            if not isinstance(value, dict):
+                continue
+            last_seen_at = _safe_float(value.get("last_seen_at") or value.get("first_seen_at"), 0)
+            if (last_seen_at and last_seen_at >= now - RETENTION_SECONDS) or str(key) in kept_keys:
+                fresh_seen[key] = value
+        if len(fresh_seen) != len(seen):
+            _write_json(_seen_path(root), fresh_seen)
+    return {"removed_batches": removed_batches, "removed_items": removed_items}
+
+
+def cleanup_old_batches(root: Path) -> dict:
+    _ensure_root(root)
+    with _FILE_LOCK:
+        return _prune_old_batches_locked(root)
 
 
 def _normalize_config(config: dict | None) -> dict:
@@ -197,6 +303,7 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
         payload["raw_count"] = len(candidates)
         payload["source_errors"] = result.get("source_errors", [])
         with _FILE_LOCK:
+            _prune_old_batches_locked(root, now=started_at)
             seen = _read_json(_seen_path(root), {})
             if not isinstance(seen, dict):
                 seen = {}
@@ -250,6 +357,7 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
 def list_batches(root: Path, *, limit: int = 20) -> list[dict]:
     _ensure_root(root)
     with _FILE_LOCK:
+        _prune_old_batches_locked(root)
         paths = sorted(_batches_dir(root).glob("batch_*.json"), key=lambda p: p.name, reverse=True)
         batches = []
         for path in paths[: max(1, min(limit, 80))]:

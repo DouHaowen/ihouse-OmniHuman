@@ -98,6 +98,15 @@ from opennews_batch import (
     start_batch_scheduler as start_opennews_batch_scheduler,
     update_batch_job as update_opennews_batch_job,
 )
+from opennews_collections import (
+    build_collection_video,
+    create_collection_job,
+    ensure_collection_auto_started_at,
+    list_collection_jobs,
+    list_collection_pool,
+    load_collection_job,
+    update_collection_job,
+)
 from localtok_client import (
     LocalTokError,
     get_decision as get_localtok_decision,
@@ -154,6 +163,7 @@ OPENNEWS_DRAFT_JOBS: dict[str, dict[str, Any]] = {}
 OPENNEWS_DRAFT_LOCK = threading.Lock()
 YOUTUBE_UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
 YOUTUBE_UPLOAD_LOCK = threading.Lock()
+OPENNEWS_COLLECTION_AUTO_LOCK = threading.Lock()
 ASSETS_DIR = BASE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
 AVATAR_LIBRARY_MANIFEST_PATH = ASSETS_DIR / "avatar_library_manifest.json"
@@ -227,18 +237,21 @@ FLOORPLAN_NAV_JOBS_DIR = OUTPUT_DIR / "admin_floorplan_nav_jobs"
 OPENNEWS_ADMIN_DIR = OUTPUT_DIR / "admin_opennews"
 OPENNEWS_AUTO_DIR = OUTPUT_DIR / "opennews_auto"
 OPENNEWS_BATCH_DIR = OUTPUT_DIR / "opennews_batches"
+OPENNEWS_COLLECTION_DIR = OUTPUT_DIR / "opennews_collections"
 OPENNEWS_LOCALTOK_DIR = OUTPUT_DIR / "opennews_localtok"
 YOUTUBE_AUTH_DIR = OUTPUT_DIR / "youtube_auth"
 YOUTUBE_TOKEN_STORE_PATH = YOUTUBE_AUTH_DIR / "youtube_token.json"
 FLOORPLAN_NAV_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_AUTO_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_BATCH_DIR.mkdir(parents=True, exist_ok=True)
+OPENNEWS_COLLECTION_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_LOCALTOK_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.on_event("startup")
 async def _start_opennews_batch_scheduler() -> None:
+    ensure_collection_auto_started_at(OPENNEWS_COLLECTION_DIR)
     start_opennews_batch_scheduler(OPENNEWS_BATCH_DIR, poll_seconds=20)
 
 VOICE_PRESETS = [
@@ -3295,6 +3308,182 @@ def _publish_opennews_result_to_youtube(
     return records
 
 
+def _run_opennews_collection_job(job_id: str) -> None:
+    try:
+        build_collection_video(OPENNEWS_COLLECTION_DIR, OUTPUT_DIR, job_id)
+    except Exception as exc:
+        update_collection_job(
+            OPENNEWS_COLLECTION_DIR,
+            job_id,
+            status="failed",
+            message=str(exc),
+            error=str(exc),
+        )
+
+
+def _collection_download_url(request: Request, job_id: str) -> str:
+    return f"{_get_public_base_url(request)}/api/opennews/collections/{quote(job_id)}/download"
+
+
+def _serialize_opennews_collection_job(job: dict, request: Request) -> dict:
+    payload = dict(job or {})
+    result = payload.get("result")
+    if isinstance(result, dict) and result.get("video_path"):
+        payload["download_url"] = _collection_download_url(request, str(payload.get("job_id") or result.get("job_id") or ""))
+    return payload
+
+
+def _short_opennews_collection_title(items: list[dict], *, prefix: str = "OpenNews合集") -> str:
+    today = time.strftime("%Y-%m-%d")
+    titles = [re.sub(r"\s+", "", str(item.get("title") or "")).strip("｜| -_") for item in items if item.get("title")]
+    title_parts: list[str] = []
+    for title in titles:
+        if not title:
+            continue
+        compact = title[:16]
+        candidate = "、".join(title_parts + [compact])
+        full = f"{prefix}：{candidate}｜{today}"
+        if len(full) > 96:
+            break
+        title_parts.append(compact)
+        if len(title_parts) >= 3:
+            break
+    if not title_parts:
+        return f"{prefix}｜{today}"
+    return f"{prefix}：{'、'.join(title_parts)}｜{today}"[:100]
+
+
+def _opennews_collection_description(items: list[dict], aspect_ratio: str) -> str:
+    lines = [
+        f"OpenNews 新闻合集（{aspect_ratio}）",
+        "本合集由 iHouse OpenNews 自动整理生成，包含以下短新闻：",
+        "",
+    ]
+    for index, item in enumerate(items, start=1):
+        title = str(item.get("title") or "OpenNews 新闻").strip()
+        source = str(item.get("source_name") or "").strip()
+        published_at = str(item.get("published_at") or "").strip()
+        suffix = "｜".join(part for part in [source, published_at] if part)
+        lines.append(f"{index}. {title}{'｜' + suffix if suffix else ''}")
+    lines.extend(["", "频道：ihouse AI Lab", "类型：OpenNews 自动新闻合集"])
+    return "\n".join(lines)[:5000]
+
+
+def _publish_opennews_collection_to_youtube(job_id: str, *, privacy_status: str = "public") -> dict:
+    job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id)
+    if not job:
+        raise YouTubePublishError("合集任务不存在")
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    video_path = Path(str(result.get("video_path") or ""))
+    if job.get("status") != "done" or not video_path.exists():
+        raise YouTubePublishError("合集成片尚未生成完成，不能发布 YouTube")
+    items = list(result.get("items") or job.get("items") or [])
+    aspect_ratio = str(result.get("aspect_ratio") or job.get("aspect_ratio") or "")
+    title = _short_opennews_collection_title(items)
+    description = _opennews_collection_description(items, aspect_ratio)
+    upload_result = upload_video_to_youtube(
+        YOUTUBE_TOKEN_STORE_PATH,
+        video_path,
+        title=title,
+        description=description,
+        tags=["OpenNews", "iHouse", "新闻合集"],
+        privacy_status=privacy_status,
+        category_id="25",
+        made_for_kids=False,
+    )
+    record = {
+        "job_id": f"opennews_collection_youtube_{int(time.time())}",
+        "collection_id": job_id,
+        "aspect_ratio": aspect_ratio,
+        "video_path": str(video_path),
+        "privacy_status": privacy_status,
+        "created_at": time.time(),
+        **upload_result,
+    }
+    records = result.get("youtube_publish_records")
+    if not isinstance(records, list):
+        records = []
+    records.insert(0, record)
+    result["youtube_publish_records"] = records[:20]
+    result["youtube_publish_latest"] = record
+    result["youtube_title"] = title
+    result["youtube_description"] = description
+    result["youtube_error"] = ""
+    update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, result=result, youtube_error="")
+    return record
+
+
+def _auto_build_opennews_collections_if_ready(reason: str = "") -> None:
+    if os.getenv("OPENNEWS_COLLECTION_AUTO_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    if not OPENNEWS_COLLECTION_AUTO_LOCK.acquire(blocking=False):
+        return
+    try:
+        batch_size = max(2, min(int(os.getenv("OPENNEWS_COLLECTION_BATCH_SIZE", "10") or 10), 20))
+        privacy_status = os.getenv("OPENNEWS_COLLECTION_YOUTUBE_PRIVACY", "public").strip() or "public"
+        auto_started_at = ensure_collection_auto_started_at(OPENNEWS_COLLECTION_DIR)
+        while True:
+            pool = list_collection_pool(
+                OPENNEWS_COLLECTION_DIR,
+                OUTPUT_DIR,
+                limit=200,
+                include_used=False,
+                min_created_at=auto_started_at,
+            )
+            if len(pool) < batch_size:
+                return
+            selected = sorted(pool, key=lambda item: float(item.get("created_at") or 0))[:batch_size]
+            history_ids = [str(item.get("history_id") or "") for item in selected if item.get("history_id")]
+            if len(history_ids) < batch_size:
+                return
+            base_title = _short_opennews_collection_title(selected)
+            jobs = []
+            for aspect_ratio in ("horizontal", "vertical"):
+                job = create_collection_job(
+                    OPENNEWS_COLLECTION_DIR,
+                    OUTPUT_DIR,
+                    history_ids=history_ids,
+                    aspect_ratio=aspect_ratio,
+                    title=f"{base_title}_{aspect_ratio}",
+                    username="auto_opennews",
+                )
+                update_collection_job(
+                    OPENNEWS_COLLECTION_DIR,
+                    str(job.get("job_id") or ""),
+                    auto_created=True,
+                    auto_reason=reason,
+                    message="自动合集任务已创建，等待生成...",
+                )
+                jobs.append(job)
+            success_count = 0
+            for job in jobs:
+                job_id = str(job.get("job_id") or "")
+                try:
+                    build_collection_video(OPENNEWS_COLLECTION_DIR, OUTPUT_DIR, job_id)
+                    update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, status="publishing_youtube", message="合集已生成，正在自动发布 YouTube...")
+                    record = _publish_opennews_collection_to_youtube(job_id, privacy_status=privacy_status)
+                    update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, status="done", message="自动合集已生成并发布 YouTube", youtube_latest=record)
+                    success_count += 1
+                except Exception as exc:
+                    update_collection_job(
+                        OPENNEWS_COLLECTION_DIR,
+                        job_id,
+                        status="failed",
+                        message=f"自动合集失败：{exc}",
+                        error=str(exc),
+                    )
+            if success_count == 0:
+                return
+            # Continue scanning in case more than 10 new clips are already waiting.
+    finally:
+        OPENNEWS_COLLECTION_AUTO_LOCK.release()
+
+
+def _trigger_opennews_collection_auto_check(reason: str = "") -> None:
+    thread = threading.Thread(target=_auto_build_opennews_collections_if_ready, args=(reason,), daemon=True)
+    thread.start()
+
+
 def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bool = False) -> list[dict]:
     items = []
     manifest = _load_avatar_library_manifest()
@@ -4055,6 +4244,119 @@ async def opennews_batches_jobs(request: Request, limit: int = 10):
     return {"jobs": jobs, "count": len(jobs)}
 
 
+@app.get("/api/opennews/collections/pool")
+async def opennews_collections_pool(request: Request, limit: int = 80, include_used: bool = False):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以管理 OpenNews 合集")
+    items = list_collection_pool(
+        OPENNEWS_COLLECTION_DIR,
+        OUTPUT_DIR,
+        limit=max(1, min(int(limit or 80), 200)),
+        include_used=bool(include_used),
+    )
+    return {"items": items, "count": len(items)}
+
+
+@app.post("/api/opennews/collections/build")
+async def opennews_collections_build(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以制作 OpenNews 合集")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    history_ids = payload.get("history_ids") or []
+    if isinstance(history_ids, str):
+        history_ids = [part.strip() for part in history_ids.split(",") if part.strip()]
+    if not isinstance(history_ids, list) or not history_ids:
+        return JSONResponse({"error": "请先选择要加入合集的成片视频。"}, status_code=400)
+    try:
+        job = create_collection_job(
+            OPENNEWS_COLLECTION_DIR,
+            OUTPUT_DIR,
+            history_ids=[str(item or "").strip() for item in history_ids if str(item or "").strip()],
+            aspect_ratio=str(payload.get("aspect_ratio") or "horizontal"),
+            title=str(payload.get("title") or ""),
+            username=str(user.get("username") or ""),
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    thread = threading.Thread(target=_run_opennews_collection_job, args=(str(job.get("job_id") or ""),), daemon=True)
+    thread.start()
+    return {"job": _serialize_opennews_collection_job(job, request), "job_id": job.get("job_id")}
+
+
+@app.get("/api/opennews/collections/jobs")
+async def opennews_collections_jobs(request: Request, limit: int = 20):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以查看 OpenNews 合集")
+    jobs = list_collection_jobs(OPENNEWS_COLLECTION_DIR, limit=max(1, min(int(limit or 20), 100)))
+    return {"jobs": [_serialize_opennews_collection_job(job, request) for job in jobs], "count": len(jobs)}
+
+
+@app.get("/api/opennews/collections/jobs/{job_id}")
+async def opennews_collections_job(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以查看 OpenNews 合集")
+    job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id)
+    if not job:
+        return JSONResponse({"error": "合集任务不存在"}, status_code=404)
+    return {"job": _serialize_opennews_collection_job(job, request)}
+
+
+@app.get("/api/opennews/collections/{job_id}/download")
+async def opennews_collections_download(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以下载 OpenNews 合集")
+    job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id)
+    result = (job or {}).get("result") if isinstance(job, dict) else {}
+    video_path = Path(str((result or {}).get("video_path") or ""))
+    if not job or not video_path.exists():
+        return JSONResponse({"error": "合集成片不存在或尚未生成完成"}, status_code=404)
+    return FileResponse(video_path, media_type="video/mp4", filename=video_path.name)
+
+
+@app.post("/api/opennews/collections/{job_id}/publish-youtube")
+async def opennews_collections_publish_youtube(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以发布 OpenNews 合集")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id)
+    result = (job or {}).get("result") if isinstance(job, dict) else {}
+    video_path = Path(str((result or {}).get("video_path") or ""))
+    if not job or job.get("status") != "done" or not video_path.exists():
+        return JSONResponse({"error": "合集成片尚未生成完成，不能发布 YouTube"}, status_code=400)
+    privacy_status = str(payload.get("privacy_status") or "public")
+    try:
+        record = _publish_opennews_collection_to_youtube(job_id, privacy_status=privacy_status)
+    except Exception as exc:
+        update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, youtube_error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    updated = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id) or job
+    return {"ok": True, "job": _serialize_opennews_collection_job(updated, request), "record": record}
+
+
 @app.get("/api/opennews/localtok/status")
 async def opennews_localtok_status(request: Request):
     user, error = _require_user(request)
@@ -4372,6 +4674,8 @@ def _external_opennews_job_result_payload(job: dict) -> dict:
             "message": item.get("message") or "",
             "task_id": item.get("task_id") or "",
             "history_id": item.get("history_id") or "",
+            "created_at": (item.get("video") or {}).get("created_at") if isinstance(item.get("video"), dict) else item.get("created_at") or 0,
+            "completed_at": (item.get("video") or {}).get("completed_at") if isinstance(item.get("video"), dict) else item.get("completed_at") or 0,
             "vertical_url": item.get("vertical_url") or ((item.get("video") or {}).get("vertical_url") if isinstance(item.get("video"), dict) else ""),
             "horizontal_url": item.get("horizontal_url") or ((item.get("video") or {}).get("horizontal_url") if isinstance(item.get("video"), dict) else ""),
             "video": item.get("video") or {},
@@ -4384,11 +4688,21 @@ def _external_opennews_job_result_payload(job: dict) -> dict:
             ],
             "error": item.get("error") or "",
         })
+    total_count = len(items)
+    completed_count = sum(1 for item in items if item.get("status") == "completed")
+    failed_count = sum(1 for item in items if item.get("status") == "failed")
+    publishing_count = sum(1 for item in items if item.get("status") == "publishing_youtube")
+    running_count = sum(1 for item in items if item.get("status") not in {"completed", "failed"})
     return {
         "ok": str(job.get("status") or "") in {"done", "partial"},
         "job_id": job.get("job_id") or "",
         "status": job.get("status") or "",
         "message": job.get("message") or "",
+        "total_count": total_count,
+        "completed_count": completed_count,
+        "failed_count": failed_count,
+        "publishing_count": publishing_count,
+        "running_count": running_count,
         "items": items,
     }
 
@@ -4447,12 +4761,14 @@ def _external_opennews_video_payload(request: Request, output_dir: Path, result:
     if not variants:
         return None
     source = (workflow_config.get("source") or {}).get("article") or {}
+    completed_at = int(output_dir.stat().st_mtime)
     return {
         "id": history_id,
         "history_id": history_id,
         "title": result.get("title") or (result.get("script") or {}).get("title") or result.get("topic") or "OpenNews 新闻",
         "topic": result.get("topic") or "",
-        "created_at": int(output_dir.stat().st_mtime),
+        "created_at": completed_at,
+        "completed_at": completed_at,
         "duration": result.get("total_duration") or 0,
         "language": (_get_target_market(str(workflow_config.get("target_market") or "cn")).get("content_language") or ""),
         "target_market": workflow_config.get("target_market") or "",
@@ -4560,6 +4876,13 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
     total_items = len(job.get("items") or [])
     for index, item in enumerate(job.get("items") or []):
         item_id = str(item.get("batch_item_id") or "")
+        if item.get("status") == "completed":
+            update_opennews_batch_job(
+                OPENNEWS_BATCH_DIR,
+                job_id,
+                lambda payload, idx=index: payload.update({"message": f"外部审核视频生产进度：{idx + 1}/{total_items}"}),
+            )
+            continue
 
         def mark_item(**updates: Any) -> None:
             def updater(payload: dict) -> None:
@@ -4627,6 +4950,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
     failed = sum(1 for item in final_job.get("items", []) or [] if item.get("status") == "failed")
     completed = sum(1 for item in final_job.get("items", []) or [] if item.get("status") == "completed")
     set_job_status("done" if failed == 0 else "partial", f"外部审核视频已完成：{completed} 条成功，{failed} 条失败。")
+    if completed:
+        _trigger_opennews_collection_auto_check(f"batch_job:{job_id}")
     if callback_url:
         latest_job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id) or final_job
         _notify_external_opennews_callback(callback_url, _external_opennews_job_result_payload(latest_job))
@@ -4721,7 +5046,27 @@ async def external_opennews_produce_selected(request: Request):
         return JSONResponse({"error": "一次最多触发 8 条新闻生成。"}, status_code=400)
     items = find_opennews_batch_items(OPENNEWS_BATCH_DIR, item_ids)
     if not items:
-        return JSONResponse({"error": "未找到对应候选新闻。"}, status_code=404)
+        return JSONResponse({
+            "error": "未找到对应候选新闻。",
+            "requested_count": len(item_ids),
+            "accepted_count": 0,
+            "missing_item_ids": item_ids,
+        }, status_code=404)
+    found_ids = {
+        str(item.get("batch_item_id") or item.get("id") or "").strip()
+        for item in items
+        if str(item.get("batch_item_id") or item.get("id") or "").strip()
+    }
+    missing_item_ids = [item_id for item_id in item_ids if item_id not in found_ids]
+    allow_partial = bool(payload.get("allow_partial"))
+    if missing_item_ids and not allow_partial:
+        return JSONResponse({
+            "error": "部分候选新闻 id 未找到，本次未启动生成。请重新从 candidate-batches 返回的 id/batch_item_id 中提交。",
+            "requested_count": len(item_ids),
+            "accepted_count": len(items),
+            "missing_item_ids": missing_item_ids,
+            "accepted_item_ids": sorted(found_ids),
+        }, status_code=400)
     user = _external_news_user()
     target_market = str(payload.get("target_market") or "cn")
     voice_preset_id = str(payload.get("voice_preset_id") or "")
@@ -4789,6 +5134,10 @@ async def external_opennews_produce_selected(request: Request):
         "youtube_auto_publish": youtube_auto_publish,
         "youtube_privacy_status": str(payload.get("youtube_privacy_status") or "public"),
         "youtube_aspects": youtube_aspects or ["horizontal", "vertical"],
+        "requested_count": len(item_ids),
+        "accepted_count": len(items),
+        "missing_item_ids": missing_item_ids,
+        "accepted_item_ids": sorted(found_ids),
         "mode": "sync" if wait_until_done else "async",
         "message": "已接收外部审核选择，开始自动生成新闻视频；完成后 job.items 会返回 vertical_url、horizontal_url 和 youtube_records。",
     }
@@ -4821,7 +5170,9 @@ async def external_opennews_job_status(job_id: str, request: Request):
     job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id)
     if not job:
         return JSONResponse({"error": "任务不存在"}, status_code=404)
-    return {"job": job}
+    payload = _external_opennews_job_result_payload(job)
+    payload["job"] = job
+    return payload
 
 
 @app.get("/api/external/opennews/ready-videos")

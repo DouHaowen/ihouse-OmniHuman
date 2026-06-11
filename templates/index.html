@@ -1654,6 +1654,40 @@
               <div class="file-board" id="openNewsLocalTokList" style="display:none;"></div>
             </div>
 
+            <div class="panel" id="openNewsCollectionPanel" style="padding:16px; gap:12px; margin-top:18px;">
+              <div class="panel-header" style="margin-bottom:0;">
+                <div>
+                  <div class="section-kicker">Collections</div>
+                  <h3 class="section-title" style="font-size:22px;">OpenNews 合集制作</h3>
+                  <p class="section-desc">把已经完成的单条新闻成片按顺序拼接成合集。第一阶段最多选择 10 条，默认不重复使用已经入过合集的视频。</p>
+                </div>
+              </div>
+              <div class="field-grid" style="grid-template-columns: 2fr 1fr 1fr;">
+                <div class="field">
+                  <label for="openNewsCollectionTitleInput">合集标题</label>
+                  <input id="openNewsCollectionTitleInput" class="select-input" type="text" placeholder="例如：OpenNews 今日十条｜AI 与全球局势">
+                </div>
+                <div class="field">
+                  <label for="openNewsCollectionAspectSelect">合集画幅</label>
+                  <select id="openNewsCollectionAspectSelect" class="select-input">
+                    <option value="horizontal" selected>横屏 16:9</option>
+                    <option value="vertical">竖屏 9:16</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>素材池</label>
+                  <button class="btn btn-secondary" id="openNewsCollectionRefreshBtn" type="button" style="width:100%;">刷新可入合集视频</button>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="btn btn-primary" id="openNewsCollectionBuildBtn" type="button">生成选中合集</button>
+                <button class="btn btn-secondary" id="openNewsCollectionJobsBtn" type="button">刷新合集任务</button>
+              </div>
+              <div class="topbar-status" id="openNewsCollectionStatus">选择已完成的新闻成片后，可以生成一个合集视频。</div>
+              <div class="file-board" id="openNewsCollectionPoolList"></div>
+              <div class="file-board" id="openNewsCollectionJobList" style="display:none;"></div>
+            </div>
+
             <div class="panel" id="openNewsDraftPanel" style="display:none; padding:16px; gap:12px; margin-top:18px;">
               <div class="panel-header" style="margin-bottom:0;">
                 <div>
@@ -2035,6 +2069,9 @@
       openNewsBatchConfig: null,
       openNewsBatchJobId: '',
       openNewsLocalTokProposals: [],
+      openNewsCollectionPool: [],
+      openNewsCollectionJobs: [],
+      openNewsCollectionJobId: '',
       openNewsSelectedArticle: null,
       openNewsDraft: null,
       workspaceMode: 'ai',
@@ -2158,6 +2195,15 @@
       openNewsBatchList: document.getElementById('openNewsBatchList'),
       openNewsBatchJobList: document.getElementById('openNewsBatchJobList'),
       openNewsLocalTokList: document.getElementById('openNewsLocalTokList'),
+      openNewsCollectionPanel: document.getElementById('openNewsCollectionPanel'),
+      openNewsCollectionTitleInput: document.getElementById('openNewsCollectionTitleInput'),
+      openNewsCollectionAspectSelect: document.getElementById('openNewsCollectionAspectSelect'),
+      openNewsCollectionRefreshBtn: document.getElementById('openNewsCollectionRefreshBtn'),
+      openNewsCollectionBuildBtn: document.getElementById('openNewsCollectionBuildBtn'),
+      openNewsCollectionJobsBtn: document.getElementById('openNewsCollectionJobsBtn'),
+      openNewsCollectionStatus: document.getElementById('openNewsCollectionStatus'),
+      openNewsCollectionPoolList: document.getElementById('openNewsCollectionPoolList'),
+      openNewsCollectionJobList: document.getElementById('openNewsCollectionJobList'),
       openNewsDraftPanel: document.getElementById('openNewsDraftPanel'),
       openNewsDraftMeta: document.getElementById('openNewsDraftMeta'),
       openNewsScriptTextarea: document.getElementById('openNewsScriptTextarea'),
@@ -3960,6 +4006,8 @@
         await loadOpenNewsBatchConfig();
         await loadOpenNewsBatches();
         await loadOpenNewsLocalTokProposals();
+        await loadOpenNewsCollectionPool();
+        await loadOpenNewsCollectionJobs();
         return;
       }
       setOpenNewsStatus('正在加载 OpenNews 热点源...');
@@ -3976,6 +4024,8 @@
         await loadOpenNewsBatchConfig();
         await loadOpenNewsBatches();
         await loadOpenNewsLocalTokProposals();
+        await loadOpenNewsCollectionPool();
+        await loadOpenNewsCollectionJobs();
       } catch (error) {
         setOpenNewsStatus(error.message || '热点源加载失败', true);
       }
@@ -4387,6 +4437,201 @@
           els.openNewsBatchProduceBtn.disabled = false;
           els.openNewsBatchProduceBtn.textContent = '一键制作选中新闻视频';
         }
+      }
+    }
+
+    function setOpenNewsCollectionStatus(message, error = false) {
+      if (!els.openNewsCollectionStatus) return;
+      els.openNewsCollectionStatus.textContent = message;
+      els.openNewsCollectionStatus.classList.toggle('error', !!error);
+    }
+
+    function selectedOpenNewsCollectionIds() {
+      return Array.from(document.querySelectorAll('.opennews-collection-check:checked')).map(input => input.value).filter(Boolean);
+    }
+
+    function updateOpenNewsCollectionSelectionStatus() {
+      const count = selectedOpenNewsCollectionIds().length;
+      setOpenNewsCollectionStatus(count ? `已选择 ${count} 条成片，最多 10 条。` : '选择已完成的新闻成片后，可以生成一个合集视频。');
+    }
+
+    function renderOpenNewsCollectionPool(items = []) {
+      if (!els.openNewsCollectionPoolList) return;
+      state.openNewsCollectionPool = Array.isArray(items) ? items : [];
+      if (!state.openNewsCollectionPool.length) {
+        els.openNewsCollectionPoolList.innerHTML = '<div class="empty-box">暂时没有可入合集的 OpenNews 成片。请先完成单条新闻视频，或稍后刷新。</div>';
+        return;
+      }
+      els.openNewsCollectionPoolList.innerHTML = state.openNewsCollectionPool.map(item => `
+        <label class="history-card" style="display:flex; align-items:flex-start; gap:12px; cursor:pointer;">
+          <input class="opennews-collection-check" type="checkbox" value="${escapeHtml(item.history_id || '')}" style="margin-top:5px;">
+          <div style="flex:1; min-width:0;">
+            <div class="history-top">
+              <div>
+                <div class="history-title">${escapeHtml(item.title || 'OpenNews 新闻')}</div>
+                <div class="history-topic">${escapeHtml(item.source_name || 'OpenNews')}${item.published_at ? `｜${escapeHtml(item.published_at)}` : ''}</div>
+              </div>
+              <span class="badge">${escapeHtml(item.horizontal_path ? '横屏' : '')}${item.horizontal_path && item.vertical_path ? ' / ' : ''}${escapeHtml(item.vertical_path ? '竖屏' : '')}</span>
+            </div>
+            ${item.source_url ? `<a href="${escapeHtml(item.source_url)}" target="_blank" rel="noopener">查看来源</a>` : ''}
+          </div>
+        </label>
+      `).join('');
+      els.openNewsCollectionPoolList.querySelectorAll('.opennews-collection-check').forEach(input => {
+        input.addEventListener('change', () => {
+          if (selectedOpenNewsCollectionIds().length > 10) {
+            input.checked = false;
+            setOpenNewsCollectionStatus('第一阶段一个合集最多选择 10 条新闻。', true);
+            return;
+          }
+          updateOpenNewsCollectionSelectionStatus();
+        });
+      });
+    }
+
+    function renderOpenNewsCollectionJobs(jobs = []) {
+      if (!els.openNewsCollectionJobList) return;
+      state.openNewsCollectionJobs = Array.isArray(jobs) ? jobs : [];
+      els.openNewsCollectionJobList.style.display = 'grid';
+      if (!state.openNewsCollectionJobs.length) {
+        els.openNewsCollectionJobList.innerHTML = '<div class="empty-box">还没有合集任务。</div>';
+        return;
+      }
+      els.openNewsCollectionJobList.innerHTML = state.openNewsCollectionJobs.map(job => {
+        const status = job.status || 'queued';
+        const result = job.result || {};
+        const records = Array.isArray(result.youtube_publish_records) ? result.youtube_publish_records : [];
+        return `
+          <div class="history-card">
+            <div class="history-top">
+              <div>
+                <div class="section-kicker">${escapeHtml(job.aspect_ratio || result.aspect_ratio || '')}</div>
+                <div class="history-title">${escapeHtml(job.title || result.title || 'OpenNews 新闻合集')}</div>
+                <div class="history-topic">${escapeHtml(job.message || '')}</div>
+              </div>
+              <span class="badge">${escapeHtml(status)}</span>
+            </div>
+            <div class="history-topic">包含 ${Array.isArray(job.items) ? job.items.length : 0} 条新闻</div>
+            ${job.error ? `<div class="topbar-status error">${escapeHtml(job.error)}</div>` : ''}
+            ${records.length ? `<div class="social-card" style="margin-top:10px;"><strong>YouTube 已发布</strong>${records.map(record => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>${escapeHtml(record.privacy_status || '')}</span><a href="${escapeHtml(record.youtube_url || '#')}" target="_blank" rel="noopener">打开 YouTube</a></div>`).join('')}</div>` : ''}
+            <div class="actions" style="margin-top:10px;">
+              ${status === 'done' && job.download_url ? `<a class="btn btn-secondary" href="${escapeHtml(job.download_url)}" target="_blank" rel="noopener">下载合集</a>` : ''}
+              ${status === 'done' ? `<button class="btn btn-primary opennews-collection-publish" type="button" data-job-id="${escapeHtml(job.job_id || '')}">发布 YouTube</button>` : ''}
+              ${status === 'running' || status === 'queued' ? `<button class="btn btn-secondary opennews-collection-poll" type="button" data-job-id="${escapeHtml(job.job_id || '')}">刷新进度</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+      els.openNewsCollectionJobList.querySelectorAll('.opennews-collection-publish').forEach(btn => {
+        btn.addEventListener('click', () => publishOpenNewsCollectionYoutube(btn.dataset.jobId));
+      });
+      els.openNewsCollectionJobList.querySelectorAll('.opennews-collection-poll').forEach(btn => {
+        btn.addEventListener('click', () => pollOpenNewsCollectionJob(btn.dataset.jobId));
+      });
+    }
+
+    async function loadOpenNewsCollectionPool() {
+      if (!els.openNewsCollectionPoolList) return;
+      setOpenNewsCollectionStatus('正在加载可入合集的视频...');
+      try {
+        const res = await fetch('/api/opennews/collections/pool?limit=80');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '合集素材池加载失败');
+        renderOpenNewsCollectionPool(Array.isArray(data.items) ? data.items : []);
+        setOpenNewsCollectionStatus(`已加载 ${Number(data.count || 0)} 条可入合集成片。`);
+      } catch (error) {
+        if (els.openNewsCollectionPanel) els.openNewsCollectionPanel.style.display = 'none';
+        setOpenNewsCollectionStatus(friendlyRequestError(error, '合集素材池加载失败'), true);
+      }
+    }
+
+    async function loadOpenNewsCollectionJobs() {
+      if (!els.openNewsCollectionJobList) return;
+      try {
+        const res = await fetch('/api/opennews/collections/jobs?limit=10');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '合集任务加载失败');
+        renderOpenNewsCollectionJobs(Array.isArray(data.jobs) ? data.jobs : []);
+      } catch (error) {
+        if (els.openNewsCollectionPanel) els.openNewsCollectionPanel.style.display = 'none';
+      }
+    }
+
+    async function fetchOpenNewsCollectionJob(jobId) {
+      const res = await fetch(`/api/opennews/collections/jobs/${encodeURIComponent(jobId)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '合集任务查询失败');
+      return data.job || {};
+    }
+
+    async function pollOpenNewsCollectionJob(jobId) {
+      if (!jobId) return;
+      state.openNewsCollectionJobId = jobId;
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 900000) {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        const job = await fetchOpenNewsCollectionJob(jobId);
+        renderOpenNewsCollectionJobs([job, ...state.openNewsCollectionJobs.filter(item => item.job_id !== jobId)]);
+        if (['done', 'failed'].includes(job.status)) {
+          setOpenNewsCollectionStatus(job.status === 'done' ? '合集视频已生成，可下载或发布 YouTube。' : (job.message || '合集生成失败'), job.status === 'failed');
+          await loadOpenNewsCollectionPool();
+          return;
+        }
+        setOpenNewsCollectionStatus(job.message || '合集生成中...');
+      }
+      setOpenNewsCollectionStatus('合集仍在后台生成，稍后可刷新任务查看。');
+    }
+
+    async function buildOpenNewsCollection() {
+      const historyIds = selectedOpenNewsCollectionIds();
+      if (!historyIds.length) {
+        setOpenNewsCollectionStatus('请先选择要加入合集的成片视频。', true);
+        return;
+      }
+      if (els.openNewsCollectionBuildBtn) {
+        els.openNewsCollectionBuildBtn.disabled = true;
+        els.openNewsCollectionBuildBtn.textContent = '提交中...';
+      }
+      setOpenNewsCollectionStatus(`正在提交 ${historyIds.length} 条视频合集任务...`);
+      try {
+        const res = await fetch('/api/opennews/collections/build', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            history_ids: historyIds,
+            aspect_ratio: els.openNewsCollectionAspectSelect?.value || 'horizontal',
+            title: els.openNewsCollectionTitleInput?.value || '',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '合集任务提交失败');
+        renderOpenNewsCollectionJobs([data.job]);
+        await pollOpenNewsCollectionJob(data.job_id);
+      } catch (error) {
+        setOpenNewsCollectionStatus(friendlyRequestError(error, '合集任务提交失败'), true);
+      } finally {
+        if (els.openNewsCollectionBuildBtn) {
+          els.openNewsCollectionBuildBtn.disabled = false;
+          els.openNewsCollectionBuildBtn.textContent = '生成选中合集';
+        }
+      }
+    }
+
+    async function publishOpenNewsCollectionYoutube(jobId) {
+      if (!jobId) return;
+      setOpenNewsCollectionStatus('正在发布合集到 YouTube...');
+      try {
+        const res = await fetch(`/api/opennews/collections/${encodeURIComponent(jobId)}/publish-youtube`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ privacy_status: 'public' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'YouTube 发布失败');
+        renderOpenNewsCollectionJobs([data.job, ...state.openNewsCollectionJobs.filter(item => item.job_id !== jobId)]);
+        setOpenNewsCollectionStatus('合集已发布 YouTube。');
+      } catch (error) {
+        setOpenNewsCollectionStatus(friendlyRequestError(error, '合集 YouTube 发布失败'), true);
       }
     }
 
@@ -6454,6 +6699,9 @@
     els.openNewsBatchProduceBtn?.addEventListener('click', produceOpenNewsBatchVideos);
     els.openNewsLocalTokProposeBtn?.addEventListener('click', proposeOpenNewsToLocalTok);
     els.openNewsLocalTokRefreshBtn?.addEventListener('click', loadOpenNewsLocalTokProposals);
+    els.openNewsCollectionRefreshBtn?.addEventListener('click', loadOpenNewsCollectionPool);
+    els.openNewsCollectionJobsBtn?.addEventListener('click', loadOpenNewsCollectionJobs);
+    els.openNewsCollectionBuildBtn?.addEventListener('click', buildOpenNewsCollection);
     els.openNewsBatchMarketSelect?.addEventListener('change', renderOpenNewsOptions);
     els.openNewsCategorySelect?.addEventListener('change', () => {
       renderOpenNewsOptions();

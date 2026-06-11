@@ -6,7 +6,8 @@
 import os
 import re
 import hashlib
-from urllib.parse import urlparse
+import time
+from urllib.parse import urljoin, urlparse
 import requests
 from dotenv import load_dotenv
 from material_library import copy_material_to_output, search_material_library
@@ -19,6 +20,24 @@ PEXELS_VIDEO_URL = "https://api.pexels.com/videos/search"
 OPENNEWS_MAX_MATERIALS = 10
 OPENNEWS_MAX_SOURCE_VIDEOS = 1
 OPENNEWS_MAX_SOURCE_IMAGES = 10
+OPENNEWS_AI_IMAGE_ENABLED = os.getenv("OPENNEWS_AI_IMAGE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_AI_IMAGE_REPLACE_SOURCE = os.getenv("OPENNEWS_AI_IMAGE_REPLACE_SOURCE", "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_IMAGE_SERVICE_URL = os.getenv("OPENNEWS_IMAGE_SERVICE_URL", "http://192.168.0.34:8894").strip().rstrip("/")
+OPENNEWS_IMAGE_SERVICE_TOKEN = os.getenv("OPENNEWS_IMAGE_SERVICE_TOKEN", "local-image-5090").strip()
+OPENNEWS_IMAGE_MAX_IMAGES = max(1, min(10, int(os.getenv("OPENNEWS_IMAGE_MAX_IMAGES", "10") or "10")))
+OPENNEWS_IMAGE_ASPECT_RATIO = os.getenv("OPENNEWS_IMAGE_ASPECT_RATIO", "square").strip().lower() or "square"
+OPENNEWS_IMAGE_TIMEOUT_SECONDS = max(45, int(os.getenv("OPENNEWS_IMAGE_TIMEOUT_SECONDS", "360") or "360"))
+OPENNEWS_IMAGE_MODEL = os.getenv("OPENNEWS_IMAGE_MODEL", "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors").strip()
+OPENNEWS_IMAGE_STEPS = max(8, min(40, int(os.getenv("OPENNEWS_IMAGE_STEPS", "24") or "24")))
+OPENNEWS_IMAGE_CFG = float(os.getenv("OPENNEWS_IMAGE_CFG", "6.5") or "6.5")
+OPENNEWS_IMAGE_NEGATIVE_PROMPT = os.getenv(
+    "OPENNEWS_IMAGE_NEGATIVE_PROMPT",
+    (
+        "low quality, blurry, soft focus, plastic skin, waxy texture, cartoon, anime, illustration, "
+        "3d render, CGI, fake UI, readable text, random letters, watermark, logo, brand mark, subtitles, "
+        "poster, infographic, distorted hands, deformed people, bad anatomy, oversaturated, noisy"
+    ),
+).strip()
 
 
 def _asset_kind_for_suffix(path: str) -> str:
@@ -137,6 +156,149 @@ def download_file(url: str, output_path: str) -> str:
             f.write(chunk)
     
     return output_path
+
+
+def _clean_ai_prompt_piece(value: str, *, max_chars: int = 220) -> str:
+    text = re.sub(r"<[^>]+>", " ", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars].strip()
+
+
+def _opennews_ai_image_prompts(seg: dict, *, limit: int = 10) -> list[dict]:
+    """Build stable image prompts from the OpenNews visual plan."""
+    prompts: list[dict] = []
+    seen: set[str] = set()
+    themes = seg.get("material_theme_plan") or []
+    if isinstance(themes, list):
+        for index, theme in enumerate(themes):
+            if not isinstance(theme, dict):
+                continue
+            queries = [
+                _clean_ai_prompt_piece(query, max_chars=80)
+                for query in (theme.get("queries") or [])
+                if _clean_ai_prompt_piece(query, max_chars=80)
+            ]
+            visual_need = _clean_ai_prompt_piece(theme.get("visual_need") or theme.get("title") or "", max_chars=180)
+            script_context = _clean_ai_prompt_piece(theme.get("script") or "", max_chars=220)
+            subject = ", ".join(queries[:3]) or visual_need or script_context
+            if not subject:
+                continue
+            prompt = (
+                f"{subject}, high-end realistic editorial news photography, documentary b-roll still, "
+                "photojournalism style, natural available light, realistic camera perspective, sharp details, "
+                "clean composition, cinematic but believable, no on-screen text, no logos, no watermark"
+            )
+            key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", prompt.lower())[:120]
+            if key in seen:
+                continue
+            seen.add(key)
+            prompts.append({
+                "prompt": prompt,
+                "news_hint": script_context or visual_need,
+                "theme_index": index,
+                "theme_title": theme.get("title") or visual_need or subject,
+                "queries": queries,
+            })
+            if len(prompts) >= limit:
+                return prompts
+
+    if not prompts:
+        fallback = _clean_ai_prompt_piece(
+            " ".join([
+                str(seg.get("material_search_keyword") or ""),
+                str(seg.get("material_keyword") or ""),
+                str(seg.get("script") or "")[:500],
+            ]),
+            max_chars=260,
+        )
+        if fallback:
+            prompts.append({
+                "prompt": (
+                    f"{fallback}, high-end realistic editorial news photography, documentary b-roll still, "
+                    "photojournalism style, natural available light, sharp details, no on-screen text, no logos"
+                ),
+                "news_hint": _clean_ai_prompt_piece(seg.get("script") or "", max_chars=220),
+                "theme_index": 0,
+                "theme_title": str(seg.get("material_keyword") or "OpenNews AI素材"),
+                "queries": [],
+            })
+    return prompts[:limit]
+
+
+def _generate_opennews_ai_image_materials(seg: dict, output_dir: str, segment_index: int, existing_count: int) -> list[dict]:
+    if not OPENNEWS_AI_IMAGE_ENABLED or not OPENNEWS_IMAGE_SERVICE_URL:
+        return []
+
+    prompts = _opennews_ai_image_prompts(seg, limit=OPENNEWS_IMAGE_MAX_IMAGES)
+    if not prompts:
+        return []
+
+    materials_dir = os.path.join(output_dir, "materials")
+    os.makedirs(materials_dir, exist_ok=True)
+    generated: list[dict] = []
+    headers = {"Content-Type": "application/json"}
+    if OPENNEWS_IMAGE_SERVICE_TOKEN:
+        headers["X-Token"] = OPENNEWS_IMAGE_SERVICE_TOKEN
+
+    for prompt_index, prompt_item in enumerate(prompts):
+        material_index = existing_count + len(generated)
+        job_seed = hashlib.sha1(
+            f"{segment_index}:{prompt_index}:{prompt_item.get('prompt')}:{time.time_ns()}".encode("utf-8")
+        ).hexdigest()[:12]
+        payload = {
+            "job_id": f"opennews_seg{segment_index:02d}_{job_seed}",
+            "prompt": prompt_item.get("prompt") or "",
+            "news_hint": prompt_item.get("news_hint") or "",
+            "aspect_ratio": OPENNEWS_IMAGE_ASPECT_RATIO,
+            "timeout_seconds": OPENNEWS_IMAGE_TIMEOUT_SECONDS,
+            "model": OPENNEWS_IMAGE_MODEL,
+            "steps": OPENNEWS_IMAGE_STEPS,
+            "cfg": OPENNEWS_IMAGE_CFG,
+            "negative_prompt": OPENNEWS_IMAGE_NEGATIVE_PROMPT,
+        }
+        try:
+            response = requests.post(
+                f"{OPENNEWS_IMAGE_SERVICE_URL}/generate",
+                json=payload,
+                headers=headers,
+                timeout=(10, OPENNEWS_IMAGE_TIMEOUT_SECONDS + 30),
+            )
+            response.raise_for_status()
+            data = response.json()
+            images = data.get("images") or []
+            if not data.get("ok") or not images:
+                raise RuntimeError(data.get("error") or "图片服务未返回图片")
+            image_url = str(images[0].get("url") or "").strip()
+            if not image_url:
+                raise RuntimeError("图片服务返回缺少下载地址")
+            download_url = urljoin(f"{OPENNEWS_IMAGE_SERVICE_URL}/", image_url.lstrip("/"))
+            image_response = requests.get(download_url, headers=headers, stream=True, timeout=45)
+            image_response.raise_for_status()
+            content_type = image_response.headers.get("Content-Type", "")
+            ext = _extension_from_url_or_content_type(download_url, content_type, ".png")
+            output_path = os.path.join(materials_dir, f"material_{segment_index:02d}_ai_{material_index}{ext}")
+            with open(output_path, "wb") as f:
+                for chunk in image_response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            if os.path.getsize(output_path) < 25 * 1024:
+                os.remove(output_path)
+                raise RuntimeError("生成图片文件过小，已跳过")
+            entry = _material_entry(output_path, kind="image", source="opennews_ai_image")
+            entry["title"] = prompt_item.get("theme_title") or "OpenNews AI生成素材"
+            entry["prompt"] = prompt_item.get("prompt") or ""
+            entry["image_service_url"] = OPENNEWS_IMAGE_SERVICE_URL
+            entry["image_job_id"] = data.get("job_id") or payload["job_id"]
+            if prompt_item.get("theme_index") is not None:
+                entry["theme_index"] = prompt_item.get("theme_index")
+            if prompt_item.get("queries"):
+                entry["related_query"] = " | ".join(prompt_item.get("queries") or [])
+            generated.append(entry)
+            print(f"  ✅ 已生成5090 AI新闻素材：{os.path.basename(output_path)}")
+        except Exception as exc:
+            print(f"  ⚠️ 5090 AI新闻素材生成失败：{prompt_item.get('theme_title') or prompt_item.get('prompt')}｜{exc}")
+            continue
+    return generated
 
 
 def _extension_from_url_or_content_type(url: str, content_type: str = "", fallback: str = ".jpg") -> str:
@@ -664,6 +826,25 @@ def fetch_materials_for_segment(
         source_materials.sort(key=_rank_source_material, reverse=True)
     source_video_count = 0
     source_image_count = 0
+    if is_opennews_material_only:
+        ai_materials = _generate_opennews_ai_image_materials(
+            seg,
+            output_dir,
+            segment_index,
+            len(material_items),
+        )
+        for entry in ai_materials:
+            if len(material_items) >= max_total_materials:
+                break
+            material_items.append(entry)
+            material_paths.append(entry["path"])
+            if entry.get("kind") == "video":
+                source_video_count += 1
+            else:
+                source_image_count += 1
+        if ai_materials and OPENNEWS_AI_IMAGE_REPLACE_SOURCE:
+            source_materials = []
+
     source_attempt_limit = 260 if is_opennews_material_only else 24
     for item in source_materials[:source_attempt_limit]:
         if len(material_items) >= max_total_materials:

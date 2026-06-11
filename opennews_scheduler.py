@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,7 @@ VALID_STATUSES = {"pending", "ignored", "drafted", "produced"}
 _FILE_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()
 _SCHEDULER_STARTED = False
+RETENTION_SECONDS = max(3600, int(os.getenv("OPENNEWS_AUTO_RETENTION_SECONDS", str(2 * 24 * 60 * 60)) or str(2 * 24 * 60 * 60)))
 
 
 def _config_path(root: Path) -> Path:
@@ -64,6 +67,78 @@ def _write_json(path: Path, payload: Any) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def _safe_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return fallback
+
+
+def _parse_news_timestamp(value: Any) -> float:
+    if value in (None, "", 0, "0"):
+        return 0.0
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts > 10_000_000_000:
+            ts = ts / 1000
+        return ts if ts > 0 else 0.0
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return _parse_news_timestamp(float(text))
+    except Exception:
+        pass
+    for fmt in ("%Y%m%dT%H%M%SZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            continue
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
+def _candidate_reference_timestamp(item: dict) -> float:
+    for key in ("published_ts", "published_at", "news_time", "date", "auto_fetched_at", "auto_created_at"):
+        ts = _parse_news_timestamp(item.get(key))
+        if ts:
+            return ts
+    return 0.0
+
+
+def _is_recent_candidate(item: dict, *, now: float | None = None) -> bool:
+    now = now or time.time()
+    ts = _candidate_reference_timestamp(item)
+    if not ts:
+        return True
+    if ts > now + 6 * 60 * 60:
+        return True
+    return ts >= now - RETENTION_SECONDS
+
+
+def _prune_old_candidates_locked(root: Path, *, now: float | None = None) -> dict:
+    now = now or time.time()
+    items = _read_json(_candidates_path(root), [])
+    if not isinstance(items, list):
+        return {"removed_items": 0}
+    fresh = [item for item in items if isinstance(item, dict) and _is_recent_candidate(item, now=now)]
+    if len(fresh) != len(items):
+        _write_json(_candidates_path(root), fresh)
+    return {"removed_items": max(0, len(items) - len(fresh))}
+
+
+def cleanup_old_auto_candidates(root: Path) -> dict:
+    _ensure_root(root)
+    with _FILE_LOCK:
+        return _prune_old_candidates_locked(root)
 
 
 def _candidate_key(candidate: dict) -> str:
@@ -142,6 +217,7 @@ def list_auto_candidates(root: Path, status: str = "pending", limit: int = 120) 
     _ensure_root(root)
     status = str(status or "pending").strip().lower()
     with _FILE_LOCK:
+        _prune_old_candidates_locked(root)
         items = _read_json(_candidates_path(root), [])
     if not isinstance(items, list):
         items = []
@@ -175,6 +251,7 @@ def update_auto_candidate_status(root: Path, candidate_id: str, status: str, *, 
 def _merge_candidates(root: Path, candidates: list[dict], *, category: str, run_id: str) -> dict:
     now = time.time()
     with _FILE_LOCK:
+        _prune_old_candidates_locked(root, now=now)
         existing = _read_json(_candidates_path(root), [])
         if not isinstance(existing, list):
             existing = []
