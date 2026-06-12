@@ -2453,17 +2453,25 @@ def _parse_bool_form(value) -> bool:
 
 def _get_current_user(request: Request) -> Optional[dict]:
     username = request.session.get("username")
-    if not username:
-        return None
-    profile = USERS.get(username)
-    if not profile:
-        request.session.pop("username", None)
-        return None
-    return _public_user(username, profile)
+    if username:
+        profile = USERS.get(username)
+        if not profile:
+            request.session.pop("username", None)
+            return None
+        return _public_user(username, profile)
+    bearer_user = _verify_app_api_token(_bearer_token_from_request(request))
+    if bearer_user:
+        return bearer_user
+    return None
 
 
 def _auth_error(message: str = "请先登录") -> JSONResponse:
     return JSONResponse({"error": message}, status_code=401)
+
+
+def _base64url_encode_json(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
 
 
 def _base64url_decode_json(value: str) -> dict[str, Any]:
@@ -2482,6 +2490,67 @@ def _jwt_hs256_signature(signing_input: str, secret: str) -> str:
 def _jwt_hs256_signature_with_key(signing_input: str, secret_key: bytes) -> str:
     digest = hmac.new(secret_key, signing_input.encode("utf-8"), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def _app_api_token_secret() -> str:
+    return os.getenv("APP_API_TOKEN_SECRET") or os.getenv("SESSION_SECRET") or "ihouse-content-studio-session"
+
+
+def _create_app_api_token(username: str, *, ttl_seconds: Optional[int] = None) -> dict:
+    now = int(time.time())
+    ttl = int(ttl_seconds or int(os.getenv("APP_API_TOKEN_TTL_SECONDS", str(60 * 60 * 24 * 30))))
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "iss": "ihouse-aiagent",
+        "aud": "ihouse-app",
+        "sub": username,
+        "iat": now,
+        "exp": now + max(60, ttl),
+        "scope": "app",
+    }
+    signing_input = f"{_base64url_encode_json(header)}.{_base64url_encode_json(payload)}"
+    token = f"{signing_input}.{_jwt_hs256_signature(signing_input, _app_api_token_secret())}"
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_at": payload["exp"],
+        "expires_in": payload["exp"] - now,
+    }
+
+
+def _bearer_token_from_request(request: Request) -> str:
+    auth = str(request.headers.get("Authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return ""
+
+
+def _verify_app_api_token(token: str) -> Optional[dict]:
+    parts = str(token or "").split(".")
+    if len(parts) != 3 or not all(parts):
+        return None
+    header_b64, payload_b64, signature = parts
+    try:
+        header = _base64url_decode_json(header_b64)
+        payload = _base64url_decode_json(payload_b64)
+    except Exception:
+        return None
+    if header.get("alg") != "HS256":
+        return None
+    signing_input = f"{header_b64}.{payload_b64}"
+    expected = _jwt_hs256_signature(signing_input, _app_api_token_secret())
+    if not hmac.compare_digest(signature, expected):
+        return None
+    now = int(time.time())
+    if payload.get("iss") != "ihouse-aiagent" or payload.get("aud") != "ihouse-app":
+        return None
+    if int(payload.get("exp") or 0) <= now:
+        return None
+    username = str(payload.get("sub") or "").strip()
+    profile = USERS.get(username)
+    if not profile:
+        return None
+    return _public_user(username, profile)
 
 
 def _jclaw_handoff_secret_keys(secret: str) -> list[tuple[str, bytes]]:
@@ -3810,6 +3879,178 @@ async def me(request: Request):
     if not user:
         return _auth_error()
     return {"user": user}
+
+
+@app.post("/api/app/auth/login")
+async def app_auth_login(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    profile = USERS.get(username)
+    if not profile or profile.get("password") != password:
+        return JSONResponse({"ok": False, "error": "账号或密码错误"}, status_code=401)
+    token_payload = _create_app_api_token(username)
+    return {"ok": True, "user": _public_user(username, profile), **token_payload}
+
+
+@app.post("/api/app/auth/logout")
+async def app_auth_logout(request: Request):
+    # Bearer token is stateless; the client only needs to discard it locally.
+    request.session.clear()
+    return {"ok": True}
+
+
+@app.get("/api/app/me")
+async def app_me(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    return {"ok": True, "user": user}
+
+
+def _app_task_status_payload(task_id: str, task: dict) -> dict:
+    tracker = task.get("tracker")
+    messages = []
+    if tracker and getattr(tracker, "messages", None):
+        messages = [
+            {
+                "message": item.get("message", ""),
+                "step": item.get("step", 0),
+                "total_steps": item.get("total_steps", 0),
+                "time": item.get("time", 0),
+            }
+            for item in tracker.messages[-80:]
+        ]
+    result = task.get("result") or {}
+    output_dir = str(task.get("output_dir") or "")
+    return {
+        "task_id": task_id,
+        "mode": task.get("mode") or "full",
+        "topic": task.get("topic") or "",
+        "status": getattr(tracker, "status", "unknown") if tracker else "unknown",
+        "step": getattr(tracker, "step", 0) if tracker else 0,
+        "total_steps": getattr(tracker, "total_steps", 0) if tracker else 0,
+        "created_at": task.get("created_at") or 0,
+        "history_id": Path(output_dir).name if output_dir else "",
+        "output_dir": output_dir,
+        "messages": messages,
+        "result_ready": bool(result),
+        "result_summary": {
+            "title": result.get("title") or "",
+            "total_duration": result.get("total_duration") or 0,
+            "segment_count": result.get("segment_count") or 0,
+        } if isinstance(result, dict) else {},
+    }
+
+
+@app.get("/api/app/bootstrap")
+async def app_bootstrap(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    return {
+        "ok": True,
+        "user": user,
+        "options": {
+            "voice_presets": VOICE_PRESETS,
+            "avatars": _list_avatar_options(),
+            "interface_languages": INTERFACE_LANGUAGES,
+            "departments": DEPARTMENTS,
+            "target_markets": TARGET_MARKETS,
+            "composition_transitions": COMPOSITION_TRANSITIONS,
+            "subtitle_templates": SUBTITLE_TEMPLATES,
+            "digital_human_engines": _digital_human_engine_options_for_user(user),
+            "script_models": _script_model_options_for_user(user),
+            "property_bgm_tracks": _property_bgm_track_payloads(),
+        },
+        "active_tasks": _build_active_tasks_payload(user),
+    }
+
+
+@app.get("/api/app/tasks")
+async def app_tasks(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    items = []
+    for task_id, task in tasks.items():
+        if _user_can_access_task(user, task):
+            items.append(_app_task_status_payload(task_id, task))
+    items.sort(key=lambda item: float(item.get("created_at") or 0), reverse=True)
+    return {"ok": True, "items": items, "count": len(items)}
+
+
+@app.get("/api/app/tasks/{task_id}")
+async def app_task_status(task_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    task = tasks.get(task_id)
+    if not task:
+        return JSONResponse({"ok": False, "error": "任务不存在"}, status_code=404)
+    if not _user_can_access_task(user, task):
+        return _forbidden_error()
+    return {"ok": True, "task": _app_task_status_payload(task_id, task)}
+
+
+@app.get("/api/app/history")
+async def app_history(request: Request, limit: int = 50):
+    user, error = _require_user(request)
+    if error:
+        return error
+    items = _list_history_items(user)
+    max_items = max(1, min(int(limit or 50), 200))
+    return {"ok": True, "items": items[:max_items], "count": min(len(items), max_items), "total_count": len(items)}
+
+
+@app.get("/api/app/history/{history_id}")
+async def app_history_detail(history_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    output_dir, result, access_error = _resolve_history_for_user(history_id, user)
+    if access_error:
+        return access_error
+    return {
+        "ok": True,
+        "history": _serialize_result_for_ui(str(output_dir), result, result.get("topic", "")),
+        "files": _build_file_entries(str(output_dir)),
+    }
+
+
+@app.get("/api/app/ready-videos")
+async def app_ready_videos(request: Request, limit: int = 50, video_type: str = "all"):
+    user, error = _require_user(request)
+    if error:
+        return error
+    requested_type = str(video_type or "all").strip().lower()
+    if requested_type not in {"all", "digital_human", "property_video", "opennews"}:
+        return JSONResponse({"ok": False, "error": "video_type 只支持 all、digital_human、property_video、opennews"}, status_code=400)
+    videos: list[dict] = []
+    max_items = max(1, min(int(limit or 50), 200))
+    for output_dir in sorted([p for p in OUTPUT_DIR.iterdir() if p.is_dir()], key=lambda p: p.stat().st_mtime, reverse=True):
+        result = _load_result_from_output_dir(output_dir) or {}
+        if not _history_visible_to_user(result, user):
+            continue
+        payload = None
+        if _is_opennews_result(result):
+            payload = _external_opennews_video_payload(request, output_dir, result)
+            if payload:
+                payload["type"] = "opennews"
+                payload["type_label"] = "OpenNews 新闻视频"
+        else:
+            payload = _external_general_video_payload(request, output_dir, result)
+        if not payload:
+            continue
+        if requested_type != "all" and payload.get("type") != requested_type:
+            continue
+        videos.append(payload)
+        if len(videos) >= max_items:
+            break
+    return {"ok": True, "videos": videos, "count": len(videos)}
 
 
 @app.get("/api/costs/summary")
