@@ -35,9 +35,18 @@ OPENNEWS_IMAGE_NEGATIVE_PROMPT = os.getenv(
     (
         "low quality, blurry, soft focus, plastic skin, waxy texture, cartoon, anime, illustration, "
         "3d render, CGI, fake UI, readable text, random letters, watermark, logo, brand mark, subtitles, "
-        "poster, infographic, distorted hands, deformed people, bad anatomy, oversaturated, noisy"
+        "poster, infographic, distorted hands, deformed people, bad anatomy, oversaturated, noisy, "
+        "nudity, nude, naked, explicit, sexual, erotic, pornographic, lingerie, underwear, bikini, swimsuit, "
+        "cleavage, bare chest, exposed skin, shirtless, see-through clothing, intimate pose, fetish, "
+        "patient body, medical nudity, surgery close-up, wound, blood, gore, anatomy close-up, body scan of torso"
     ),
 ).strip()
+
+OPENNEWS_IMAGE_SAFE_SUFFIX = (
+    "safe for YouTube news use, family-safe, fully clothed adults only, no exposed skin, "
+    "no nudity, no sexual content, no underwear, no patient body, no surgery, no blood, "
+    "no graphic medical content"
+)
 
 
 def _asset_kind_for_suffix(path: str) -> str:
@@ -164,6 +173,22 @@ def _clean_ai_prompt_piece(value: str, *, max_chars: int = 220) -> str:
     return text[:max_chars].strip()
 
 
+def _opennews_safe_ai_subject(subject: str) -> str:
+    text = _clean_ai_prompt_piece(subject, max_chars=260)
+    lower = text.lower()
+    medical_markers = [
+        "medical", "healthcare", "clinical", "doctor", "hospital", "imaging", "diagnosis",
+        "医学", "医疗", "临床", "医生", "医院", "影像", "诊断", "药物研发",
+    ]
+    if any(marker in lower or marker in text for marker in medical_markers):
+        return (
+            "healthcare AI software dashboard in a modern hospital office, fully clothed doctor "
+            "reviewing abstract analytics on a computer monitor, laboratory equipment and data screens, "
+            "no patients visible, no human body, no anatomy images, no surgery"
+        )
+    return text
+
+
 def _opennews_ai_image_prompts(seg: dict, *, limit: int = 10) -> list[dict]:
     """Build stable image prompts from the OpenNews visual plan."""
     prompts: list[dict] = []
@@ -183,10 +208,12 @@ def _opennews_ai_image_prompts(seg: dict, *, limit: int = 10) -> list[dict]:
             subject = ", ".join(queries[:3]) or visual_need or script_context
             if not subject:
                 continue
+            subject = _opennews_safe_ai_subject(subject)
             prompt = (
                 f"{subject}, high-end realistic editorial news photography, documentary b-roll still, "
                 "photojournalism style, natural available light, realistic camera perspective, sharp details, "
-                "clean composition, cinematic but believable, no on-screen text, no logos, no watermark"
+                f"clean composition, cinematic but believable, no on-screen text, no logos, no watermark, "
+                f"{OPENNEWS_IMAGE_SAFE_SUFFIX}"
             )
             key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", prompt.lower())[:120]
             if key in seen:
@@ -212,10 +239,12 @@ def _opennews_ai_image_prompts(seg: dict, *, limit: int = 10) -> list[dict]:
             max_chars=260,
         )
         if fallback:
+            fallback = _opennews_safe_ai_subject(fallback)
             prompts.append({
                 "prompt": (
                     f"{fallback}, high-end realistic editorial news photography, documentary b-roll still, "
-                    "photojournalism style, natural available light, sharp details, no on-screen text, no logos"
+                    "photojournalism style, natural available light, sharp details, no on-screen text, no logos, "
+                    f"{OPENNEWS_IMAGE_SAFE_SUFFIX}"
                 ),
                 "news_hint": _clean_ai_prompt_piece(seg.get("script") or "", max_chars=220),
                 "theme_index": 0,
@@ -353,6 +382,9 @@ def _download_source_material(url: str, output_dir: str, segment_index: int, mat
     os.makedirs(os.path.join(output_dir, "materials"), exist_ok=True)
     last_error = ""
     for download_url in _source_material_url_variants(url):
+        if _looks_like_unsafe_source_material_url(download_url):
+            last_error = "素材 URL 命中成人/裸露站点黑名单，已跳过"
+            continue
         try:
             response = requests.get(download_url, stream=True, timeout=25, headers={"User-Agent": "iHouse-OpenNews-Media/0.1"})
             response.raise_for_status()
@@ -407,6 +439,15 @@ SOURCE_MATERIAL_BAD_TOKENS = (
     "advert",
     "/ads/",
     "banner-ad",
+)
+
+SOURCE_MATERIAL_ADULT_TOKENS = (
+    "porn", "porno", "xxx", "sex", "sexy", "adult", "erotic", "hentai", "jav",
+    "avdebut", "avdebyu", "nude", "naked", "nsfw", "boobs", "breast", "pussy",
+    "eporner", "xvideos", "xnxx", "pornhub", "redtube", "youporn", "xhamster",
+    "spankbang", "tube8", "youjizz", "brazzers", "onlyfans", "chaturbate",
+    "camgirl", "stripchat", "bongacams", "javhd", "javdb", "missav",
+    "fc2ppv", "tokyomotion", "mgstage",
 )
 
 OPENNEWS_VISUAL_DOMAIN_TOKENS = {
@@ -478,8 +519,30 @@ def _source_identity_keys(url: str) -> set[str]:
 def _looks_like_bad_source_material(item: dict) -> bool:
     url = str(item.get("url") or "")
     title = str(item.get("title") or "")
-    text = f"{url} {title}".lower()
+    source_url = str(item.get("source_url") or "")
+    related_query = str(item.get("related_query") or "")
+    text = f"{url} {source_url} {title} {related_query}".lower()
     return any(token in text for token in SOURCE_MATERIAL_BAD_TOKENS)
+
+
+def _looks_like_unsafe_source_material_url(value: str) -> bool:
+    text = str(value or "").lower()
+    if not text:
+        return False
+    parsed = urlparse(text)
+    host = parsed.netloc.lower()
+    haystack = f"{host} {parsed.path.lower()} {parsed.query.lower()}"
+    return any(token in haystack for token in SOURCE_MATERIAL_ADULT_TOKENS)
+
+
+def _looks_like_unsafe_source_material(item: dict) -> bool:
+    values = [
+        item.get("url"),
+        item.get("source_url"),
+        item.get("title"),
+        item.get("related_query"),
+    ]
+    return any(_looks_like_unsafe_source_material_url(str(value or "")) for value in values)
 
 
 def _rank_source_material(item: dict) -> int:
@@ -784,7 +847,13 @@ def fetch_materials_for_segment(
         identity_keys = _source_identity_keys(str(item.get("url") or ""))
         if not identity_keys or identity_keys & seen_source_urls or identity_keys & used_source_urls:
             continue
-        if _looks_like_bad_source_material(item):
+        if _looks_like_bad_source_material(item) or _looks_like_unsafe_source_material(item):
+            rejection_log.append({
+                "url": item.get("url") or "",
+                "title": item.get("title") or "",
+                "reason": "素材 URL 命中成人/裸露站点黑名单",
+            })
+            print(f"  ⚠️ 新闻素材安全过滤：成人/裸露站点｜{item.get('url')}")
             continue
         relevance_score = _source_material_relevance_score(item, relevance_tokens) if relevance_tokens else 1
         min_relevance_score = _opennews_min_relevance_score(item)
