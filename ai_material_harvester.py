@@ -4,7 +4,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import requests
@@ -31,6 +31,128 @@ WHITESPACE_RE = re.compile(r"\s+")
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
+
+NEWS_HARVEST_PRESETS = {
+    "军事": {
+        "topic": "military defense news b-roll warship fighter jet drone missile military exercise press briefing",
+        "notes": "优先官方军方、政府、通讯社和新闻机构页面；避免血腥、尸体、受伤人员和暴力近景。",
+        "tags": ["军事", "国防", "军演", "舰艇", "战机", "无人机", "导弹"],
+    },
+    "政治": {
+        "topic": "politics government news b-roll White House parliament congress press conference diplomacy leaders",
+        "notes": "优先政府官网、议会、白宫、外交部门、新闻发布会和官方会议画面。",
+        "tags": ["政治", "政府", "白宫", "国会", "外交", "记者会"],
+    },
+    "科技": {
+        "topic": "technology news b-roll semiconductor chip data center robotics laboratory innovation conference",
+        "notes": "优先芯片、数据中心、机器人、实验室、发布会、科技公司办公场景。",
+        "tags": ["科技", "芯片", "数据中心", "机器人", "实验室"],
+    },
+    "AI": {
+        "topic": "artificial intelligence AI news b-roll data center GPU servers robot machine learning technology",
+        "notes": "优先 AI 数据中心、GPU、服务器机房、机器人、企业 AI 工具、科技会议画面。",
+        "tags": ["AI", "人工智能", "GPU", "服务器", "数据中心", "机器人"],
+    },
+    "金融": {
+        "topic": "finance market news b-roll stock exchange central bank trading floor oil price economy banking",
+        "notes": "优先交易所、央行、银行、交易屏幕、油价、财经新闻背景。",
+        "tags": ["金融", "股市", "央行", "银行", "交易所", "油价"],
+    },
+    "房产": {
+        "topic": "real estate housing market news b-roll apartment building homes mortgage city skyline property",
+        "notes": "优先住宅、公寓、城市街景、房贷、售楼、房地产市场相关画面。",
+        "tags": ["房产", "房地产", "住宅", "公寓", "房贷", "城市街景"],
+    },
+    "移民": {
+        "topic": "immigration visa passport airport border news b-roll migration government office students",
+        "notes": "优先签证、护照、机场、移民局、边境、留学、政府窗口类画面；避免敏感人脸特写。",
+        "tags": ["移民", "签证", "护照", "机场", "边境", "留学"],
+    },
+    "通用新闻": {
+        "topic": "breaking news b-roll press conference city street newsroom official building map data screen",
+        "notes": "优先新闻通用场景：记者会、城市、办公楼、资料图、地图、数据屏。",
+        "tags": ["新闻", "记者会", "城市", "资料图", "办公楼"],
+    },
+}
+
+CATEGORY_SEARCH_FALLBACKS = {
+    "军事": [
+        "DVIDS military exercise b-roll",
+        "defense news warship fighter jet drone missile official photo",
+        "US Department of Defense military press briefing photo",
+        "NATO military exercise official photo",
+    ],
+    "政治": [
+        "government press conference official photo",
+        "White House parliament congress diplomacy official photo",
+        "political leaders summit press briefing news photo",
+    ],
+    "科技": [
+        "technology semiconductor chip data center robotics news photo",
+        "tech conference laboratory innovation official photo",
+    ],
+    "AI": [
+        "artificial intelligence data center GPU servers robot news photo",
+        "AI conference machine learning technology official photo",
+    ],
+    "金融": [
+        "stock exchange central bank trading floor economy news photo",
+        "finance market oil price banking official photo",
+    ],
+    "房产": [
+        "real estate housing market apartment mortgage city skyline news photo",
+        "property market homes residential building official photo",
+    ],
+    "移民": [
+        "immigration visa passport airport border government office news photo",
+        "migration students visa office official photo",
+    ],
+    "通用新闻": [
+        "breaking news press conference city street newsroom official building photo",
+    ],
+}
+
+CATEGORY_SEED_SOURCE_URLS = {
+    "军事": [
+        "https://www.dvidshub.net/search?q=military+exercise&type=image",
+        "https://www.defense.gov/Multimedia/Photos/",
+        "https://www.nato.int/cps/en/natohq/photos.htm",
+    ],
+    "政治": [
+        "https://www.whitehouse.gov/briefing-room/",
+        "https://www.state.gov/press-releases/",
+        "https://www.gov.uk/search/news-and-communications",
+    ],
+    "科技": [
+        "https://www.nasa.gov/images/",
+        "https://www.nist.gov/news-events/news",
+        "https://www.energy.gov/listings/articles",
+    ],
+    "AI": [
+        "https://openai.com/news/",
+        "https://www.nvidia.com/en-us/about-nvidia/newsroom/",
+        "https://blog.google/technology/ai/",
+    ],
+    "金融": [
+        "https://www.federalreserve.gov/newsevents.htm",
+        "https://www.ecb.europa.eu/press/html/index.en.html",
+        "https://www.nyse.com/news",
+    ],
+    "房产": [
+        "https://www.nar.realtor/newsroom",
+        "https://www.redfin.com/news/",
+        "https://www.zillow.com/research/",
+    ],
+    "移民": [
+        "https://www.uscis.gov/newsroom",
+        "https://www.dhs.gov/news-releases",
+        "https://www.canada.ca/en/immigration-refugees-citizenship/news.html",
+    ],
+    "通用新闻": [
+        "https://www.reuters.com/pictures/",
+        "https://apnews.com/",
+    ],
+}
 
 
 def _now() -> float:
@@ -86,9 +208,11 @@ def _save_candidates(rows: list[dict]) -> None:
 
 
 def _normalize_job(job: dict) -> dict:
+    category = _clean_text(job.get("category") or "")
     return {
         "id": str(job.get("id") or uuid.uuid4().hex[:12]),
         "topic": _clean_text(job.get("topic") or ""),
+        "category": category,
         "source_urls": _extract_urls("\n".join(job.get("source_urls") or [])),
         "discovered_source_urls": _extract_urls("\n".join(job.get("discovered_source_urls") or [])),
         "search_notes": _clean_text(job.get("search_notes") or ""),
@@ -110,6 +234,8 @@ def _normalize_candidate(candidate: dict) -> dict:
         "id": str(candidate.get("id") or uuid.uuid4().hex[:12]),
         "job_id": str(candidate.get("job_id") or "").strip(),
         "topic": _clean_text(candidate.get("topic") or ""),
+        "category": _clean_text(candidate.get("category") or ""),
+        "tags": list(candidate.get("tags") or []),
         "kind": str(candidate.get("kind") or "image"),
         "title": _clean_text(candidate.get("title") or ""),
         "page_title": _clean_text(candidate.get("page_title") or ""),
@@ -117,6 +243,10 @@ def _normalize_candidate(candidate: dict) -> dict:
         "source_url": str(candidate.get("source_url") or "").strip(),
         "asset_url": asset_url,
         "domain": parsed.netloc.lower(),
+        "source_site": parsed.netloc.lower(),
+        "source_type": _clean_text(candidate.get("source_type") or "web"),
+        "safety_status": _clean_text(candidate.get("safety_status") or "needs_review"),
+        "license_note": _clean_text(candidate.get("license_note") or "网页公开候选素材，导入前请管理员确认来源和画面安全。"),
         "status": str(candidate.get("status") or "pending"),
         "notes": _clean_text(candidate.get("notes") or ""),
         "created_at": float(candidate.get("created_at") or _now()),
@@ -230,6 +360,12 @@ def _discover_source_urls_from_duckduckgo(query: str, limit: int = 8) -> list[st
     urls = []
     for href, label in ANCHOR_RE.findall(html_text):
         url = _clean_text(urljoin(search_url, href))
+        parsed = urlparse(url)
+        if "duckduckgo.com" in parsed.netloc.lower():
+            params = parse_qs(parsed.query)
+            redirect_target = (params.get("uddg") or params.get("u") or [""])[0]
+            if redirect_target:
+                url = unquote(redirect_target)
         if not url.startswith(("http://", "https://")):
             continue
         host = urlparse(url).netloc.lower()
@@ -244,18 +380,73 @@ def _discover_source_urls_from_duckduckgo(query: str, limit: int = 8) -> list[st
     return urls
 
 
-def discover_source_urls(topic: str, search_notes: str = "", limit: int = 10) -> list[str]:
-    query_parts = [topic.strip(), search_notes.strip()]
-    query = " ".join(part for part in query_parts if part)
-    if not query:
+def _preset_for_category(category: str) -> dict:
+    return NEWS_HARVEST_PRESETS.get(str(category or "").strip(), {})
+
+
+def build_harvest_query(topic: str, search_notes: str = "", category: str = "") -> str:
+    preset = _preset_for_category(category)
+    query_parts = [topic.strip(), preset.get("topic", "").strip(), search_notes.strip(), "image video news official source"]
+    return " ".join(part for part in query_parts if part)
+
+
+def _harvest_query_variants(topic: str, search_notes: str = "", category: str = "") -> list[str]:
+    preset = _preset_for_category(category)
+    variants = [
+        build_harvest_query(topic, search_notes, category),
+        " ".join(part for part in [topic.strip(), "news photo b-roll official source"] if part),
+        " ".join(part for part in [preset.get("topic", "").strip(), "photo video b-roll"] if part),
+    ]
+    variants.extend(CATEGORY_SEARCH_FALLBACKS.get(str(category or "").strip(), []))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in variants:
+        query = _clean_text(query)
+        if not query or query in seen:
+            continue
+        seen.add(query)
+        deduped.append(query)
+    return deduped
+
+
+def _fallback_search_source_urls(topic: str, category: str = "", limit: int = 10) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    queries = _harvest_query_variants(topic, "", category)
+    for query in queries[:4]:
+        for url in (
+            f"https://www.bing.com/images/search?q={quote_plus(query)}",
+            f"https://www.bing.com/news/search?q={quote_plus(query)}",
+        ):
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+            if len(urls) >= limit:
+                return urls
+    for url in CATEGORY_SEED_SOURCE_URLS.get(str(category or "").strip(), []):
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls[:limit]
+
+
+def discover_source_urls(topic: str, search_notes: str = "", limit: int = 10, category: str = "") -> list[str]:
+    queries = _harvest_query_variants(topic, search_notes, category)
+    if not queries:
         return []
     candidates = []
     errors = []
-    for fn in (_discover_source_urls_from_bing_news, _discover_source_urls_from_duckduckgo):
-        try:
-            candidates.extend(fn(query, limit=limit))
-        except Exception as exc:
-            errors.append(str(exc))
+    for query in queries:
+        remaining = max(limit - len(candidates), 1)
+        for fn in (_discover_source_urls_from_bing_news, _discover_source_urls_from_duckduckgo):
+            try:
+                candidates.extend(fn(query, limit=remaining))
+            except Exception as exc:
+                errors.append(str(exc))
+        if len(candidates) >= limit:
+            break
     deduped = []
     seen = set()
     for url in candidates:
@@ -265,10 +456,12 @@ def discover_source_urls(topic: str, search_notes: str = "", limit: int = 10) ->
         deduped.append(url)
         if len(deduped) >= limit:
             break
-    return deduped
+    if not deduped:
+        deduped = _fallback_search_source_urls(topic, category=category, limit=limit)
+    return deduped[:limit]
 
 
-def _fetch_candidate_rows(topic: str, source_url: str) -> list[dict]:
+def _fetch_candidate_rows(topic: str, source_url: str, *, category: str = "", tags: list[str] | None = None) -> list[dict]:
     response = requests.get(source_url, headers=DEFAULT_HEADERS, timeout=20, allow_redirects=True)
     response.raise_for_status()
     html_text = response.text or ""
@@ -280,12 +473,16 @@ def _fetch_candidate_rows(topic: str, source_url: str) -> list[dict]:
             _normalize_candidate(
                 {
                     "topic": topic,
+                    "category": category,
+                    "tags": tags or [],
                     "kind": kind,
                     "title": page_title or f"{topic or '候选素材'} {index}",
                     "page_title": page_title,
                     "page_excerpt": page_excerpt,
                     "source_url": source_url,
                     "asset_url": asset_url,
+                    "source_type": "web_page_asset",
+                    "safety_status": "needs_review",
                     "status": "pending",
                 }
             )
@@ -298,12 +495,19 @@ def create_harvest_job(
     topic: str,
     source_text: str,
     search_notes: str,
+    category: str = "",
     created_by_username: str,
     created_by_display_name: str,
 ) -> dict:
+    preset = _preset_for_category(category)
+    if category and not topic.strip():
+        topic = preset.get("topic", category)
+    if preset.get("notes") and preset.get("notes") not in search_notes:
+        search_notes = " ".join(part for part in [search_notes, preset.get("notes")] if part)
     job = _normalize_job(
         {
             "topic": topic,
+            "category": category,
             "source_urls": _extract_urls(source_text),
             "search_notes": search_notes,
             "status": "queued",
@@ -370,9 +574,11 @@ def _append_candidates(job_id: str, rows: list[dict]) -> list[dict]:
 def run_harvest_job(job_id: str) -> dict:
     job = _update_job(job_id, {"status": "running", "message": "正在抓取网页素材候选"})
     source_urls = list(job.get("source_urls") or [])
+    category = str(job.get("category") or "").strip()
+    preset_tags = list((_preset_for_category(category).get("tags") or []))
     discovered_source_urls = []
     if not source_urls:
-        discovered_source_urls = discover_source_urls(job.get("topic", ""), job.get("search_notes", ""), limit=10)
+        discovered_source_urls = discover_source_urls(job.get("topic", ""), job.get("search_notes", ""), limit=10, category=category)
         if discovered_source_urls:
             job = _update_job(
                 job_id,
@@ -389,7 +595,7 @@ def run_harvest_job(job_id: str) -> dict:
     errors: list[str] = []
     for source_url in source_urls:
         try:
-            collected.extend(_fetch_candidate_rows(job.get("topic", ""), source_url))
+            collected.extend(_fetch_candidate_rows(job.get("topic", ""), source_url, category=category, tags=preset_tags))
         except Exception as exc:
             errors.append(f"{source_url}: {exc}")
 
@@ -429,6 +635,30 @@ def update_harvest_candidate(candidate_id: str, updates: dict) -> dict:
         rows[index] = normalized
         _save_candidates(rows)
     return normalized
+
+
+def delete_harvest_candidate(candidate_id: str) -> dict:
+    with HARVEST_LOCK:
+        rows = _load_candidates()
+        index = next((idx for idx, row in enumerate(rows) if str(row.get("id")) == str(candidate_id)), -1)
+        if index < 0:
+            raise FileNotFoundError("候选素材不存在")
+        deleted = _normalize_candidate(rows[index])
+        rows.pop(index)
+        _save_candidates(rows)
+    return deleted
+
+
+def clear_harvest_candidates(*, keep_imported: bool = True) -> int:
+    with HARVEST_LOCK:
+        rows = _load_candidates()
+        if keep_imported:
+            kept = [row for row in rows if str((row or {}).get("status") or "") == "imported"]
+        else:
+            kept = []
+        removed_count = max(0, len(rows) - len(kept))
+        _save_candidates(kept)
+    return removed_count
 
 
 def import_harvest_candidate_to_material_library(
@@ -480,11 +710,17 @@ def import_harvest_candidate_to_material_library(
         temp_path=str(temp_path),
         original_filename=original_name or f"harvest_{candidate_id}{suffix}",
         title=candidate.get("page_title") or candidate.get("title") or f"候选素材 {candidate_id}",
-        category=category,
+        category=category or candidate.get("category") or "",
+        tags=candidate.get("tags") or [],
         notes=notes or candidate.get("page_excerpt") or candidate.get("notes") or "",
         uploader_username=uploader_username,
         uploader_display_name=uploader_display_name,
         source="ai_harvest_import",
+        source_url=candidate.get("source_url") or "",
+        source_site=candidate.get("source_site") or candidate.get("domain") or "",
+        license_note=candidate.get("license_note") or "",
+        safety_status=candidate.get("safety_status") or "needs_review",
+        news_topics=[candidate.get("topic") or "", candidate.get("category") or ""],
     )
     update_harvest_candidate(candidate_id, {"status": "imported", "imported_material_id": item.get("id", "")})
     return item

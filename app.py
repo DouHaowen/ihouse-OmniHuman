@@ -36,7 +36,10 @@ load_dotenv(override=False)
 
 from avatar_generator import AvatarGenerationError, generate_avatar_candidates
 from ai_material_harvester import (
+    NEWS_HARVEST_PRESETS,
+    clear_harvest_candidates,
     create_harvest_job,
+    delete_harvest_candidate,
     import_harvest_candidate_to_material_library,
     list_harvest_candidates,
     list_harvest_jobs,
@@ -93,8 +96,10 @@ from opennews_batch import (
     list_batches as list_opennews_batches,
     load_batch_config as load_opennews_batch_config,
     load_batch_job as load_opennews_batch_job,
+    mark_batch_items as mark_opennews_batch_items,
     run_batch_fetch_once as run_opennews_batch_fetch_once,
     save_batch_config as save_opennews_batch_config,
+    set_after_fetch_callback as set_opennews_batch_after_fetch_callback,
     start_batch_scheduler as start_opennews_batch_scheduler,
     update_batch_job as update_opennews_batch_job,
 )
@@ -164,6 +169,7 @@ OPENNEWS_DRAFT_LOCK = threading.Lock()
 YOUTUBE_UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
 YOUTUBE_UPLOAD_LOCK = threading.Lock()
 OPENNEWS_COLLECTION_AUTO_LOCK = threading.Lock()
+OPENNEWS_BATCH_AUTO_PRODUCE_LOCK = threading.Lock()
 ASSETS_DIR = BASE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
 AVATAR_LIBRARY_MANIFEST_PATH = ASSETS_DIR / "avatar_library_manifest.json"
@@ -252,6 +258,7 @@ YOUTUBE_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 @app.on_event("startup")
 async def _start_opennews_batch_scheduler() -> None:
     ensure_collection_auto_started_at(OPENNEWS_COLLECTION_DIR)
+    set_opennews_batch_after_fetch_callback(_handle_opennews_batch_after_fetch)
     start_opennews_batch_scheduler(OPENNEWS_BATCH_DIR, poll_seconds=20)
 
 VOICE_PRESETS = [
@@ -598,6 +605,17 @@ COST_RULES = {
     "tos_upload": {"provider": "volc_tos", "minimum": 0.0, "per_mb": 0.0},
     "compose_video": {"provider": "ffmpeg", "base": 0.0, "per_second": 0.0},
 }
+OPENNEWS_QWEN_TTS_ENABLED = (os.getenv("OPENNEWS_QWEN_TTS_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_QWEN_TTS_BASE_URL = (os.getenv("OPENNEWS_QWEN_TTS_BASE_URL") or "http://192.168.0.34:8895").strip().rstrip("/")
+OPENNEWS_QWEN_TTS_TOKEN = os.getenv("OPENNEWS_QWEN_TTS_TOKEN", "local-qwen3-tts-5090").strip()
+OPENNEWS_QWEN_TTS_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_SPEAKER", "serena").strip() or "serena"
+OPENNEWS_QWEN_TTS_LANGUAGE = os.getenv("OPENNEWS_QWEN_TTS_LANGUAGE", "chinese").strip() or "chinese"
+OPENNEWS_QWEN_TTS_TIMEOUT = max(15, int(os.getenv("OPENNEWS_QWEN_TTS_TIMEOUT", "180") or "180"))
+OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX = (os.getenv("OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_QWEN_TTS_INSTRUCT = os.getenv(
+    "OPENNEWS_QWEN_TTS_INSTRUCT",
+    "用自然、清晰、专业的中文新闻女主播语气朗读，节奏稳定，声音有亲和力。",
+).strip()
 
 AVATAR_STYLE_PROMPTS = [
     "人物面向镜头自然讲述，表情亲和，口型清晰，动作克制但真实，轻微点头和手势配合内容节奏",
@@ -712,6 +730,13 @@ def _material_library_item_payload(item: dict, current_user: Optional[dict] = No
         if str(payload.get("kind") or "") in {"video", "audio"} and float(payload.get("duration_seconds") or 0) > 0
         else ""
     )
+    payload["source_url"] = str(payload.get("source_url") or "")
+    payload["source_site"] = str(payload.get("source_site") or "")
+    payload["license_note"] = str(payload.get("license_note") or "")
+    payload["safety_status"] = str(payload.get("safety_status") or "unchecked")
+    payload["news_topics"] = payload.get("news_topics") or []
+    payload["usage_count"] = int(payload.get("usage_count") or 0)
+    payload["last_used_at"] = float(payload.get("last_used_at") or 0)
     payload["can_review"] = bool(current_user and _is_admin(current_user))
     payload["can_delete"] = bool(
         current_user
@@ -759,6 +784,11 @@ def _harvest_job_payload(job: dict) -> dict:
 def _harvest_candidate_payload(candidate: dict, current_user: Optional[dict] = None) -> dict:
     payload = dict(candidate or {})
     payload["preview_url"] = str(payload.get("asset_url") or "").strip()
+    payload["category"] = str(payload.get("category") or "")
+    payload["tags"] = payload.get("tags") or []
+    payload["source_site"] = str(payload.get("source_site") or payload.get("domain") or "")
+    payload["safety_status"] = str(payload.get("safety_status") or "needs_review")
+    payload["license_note"] = str(payload.get("license_note") or "")
     payload["can_import"] = bool(current_user and _is_admin(current_user) and payload.get("status") == "pending")
     payload["can_reject"] = bool(current_user and _is_admin(current_user) and payload.get("status") == "pending")
     return payload
@@ -1315,13 +1345,16 @@ def run_pipeline_with_progress(
             tracker.log(f"配音生成中（{index}/{total_segments}）：{script_text[:28]}...")
             seg_type = seg.get("type", "")
             audio_path = os.path.join(output_dir, "audio", f"segment_{index - 1:02d}_{seg_type}.mp3")
-            generate_audio(
-                script_text,
-                audio_path,
-                tts_voice,
+            audio_path, tts_provider = _generate_audio_for_workflow(
+                script_text=script_text,
+                audio_path=audio_path,
+                voice=tts_voice,
                 speed=tts_speed,
                 volume=tts_volume,
                 language=voice_preset.get("language", ""),
+                workflow_config=workflow_config,
+                generate_audio_fn=generate_audio,
+                log=tracker.log,
             )
             seg_with_audio = dict(seg)
             seg_with_audio["audio_path"] = audio_path
@@ -1332,7 +1365,7 @@ def run_pipeline_with_progress(
             _record_cost_entry(
                 event_type="tts_generate",
                 amount=_estimate_tts_cost(script_text, audio_path),
-                provider=COST_RULES["tts_generate"]["provider"],
+                provider=tts_provider,
                 task=task,
                 meta={"segment_index": index, "audio_path": audio_path, "scope": "produce"},
             )
@@ -1445,10 +1478,18 @@ def run_pipeline_with_progress(
             _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续匹配素材")
             final_segments = fetch_all_materials(segments=segments_with_dh, output_dir=output_dir)
             _raise_if_task_cancel_requested(task_id, "已停止当前任务，素材匹配完成后未继续收尾")
-            tracker.log(f"素材匹配完成，共 {sum(1 for seg in final_segments if seg.get('material_paths'))} 组素材")
+            material_group_count = sum(1 for seg in final_segments if seg.get("material_paths"))
+            if (
+                (workflow_config.get("opennews") or workflow_config.get("opennews_material_only") or digital_human_engine == "opennews_material_only")
+                and not _opennews_result_has_material_assets({"segments": final_segments}, Path(output_dir))
+            ):
+                raise RuntimeError("OpenNews 素材为空：5090 AI图片和严格新闻源兜底都没有拿到可用素材，已中止以避免生成白底占位视频。")
+            tracker.log(f"素材匹配完成，共 {material_group_count} 组素材")
         except TaskCancelled:
             raise
         except Exception as exc:
+            if workflow_config.get("opennews") or workflow_config.get("opennews_material_only") or digital_human_engine == "opennews_material_only":
+                raise RuntimeError(f"OpenNews 素材匹配失败，已中止成片：{exc}") from exc
             tracker.log(f"素材匹配失败：{exc}，已跳过该步骤")
             final_segments = segments_with_dh
 
@@ -1624,20 +1665,23 @@ def run_resume_pipeline_with_progress(task_id: str):
                 seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
             else:
                 tracker.log(f"补生成配音（{index}/{len(base_segments)}）：{script_text[:28]}...")
-                generate_audio(
-                    script_text,
-                    audio_path,
-                    tts_voice,
+                audio_path, tts_provider = _generate_audio_for_workflow(
+                    script_text=script_text,
+                    audio_path=audio_path,
+                    voice=tts_voice,
                     speed=tts_speed,
                     volume=tts_volume,
                     language=voice_cfg.get("language", voice_preset.get("language", "")),
+                    workflow_config=workflow_config,
+                    generate_audio_fn=generate_audio,
+                    log=tracker.log,
                 )
                 seg["audio_path"] = audio_path
                 seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
                 _record_cost_entry(
                     event_type="tts_generate",
                     amount=_estimate_tts_cost(script_text, audio_path),
-                    provider=COST_RULES["tts_generate"]["provider"],
+                    provider=tts_provider,
                     task=task,
                     meta={"segment_index": index, "audio_path": audio_path, "scope": "resume"},
                 )
@@ -2200,6 +2244,117 @@ def _probe_media_duration(file_path: str) -> float:
     except Exception:
         return 0.0
     return 0.0
+
+
+def _should_use_qwen_tts_for_workflow(workflow_config: dict) -> bool:
+    if not OPENNEWS_QWEN_TTS_ENABLED:
+        return False
+    source = workflow_config.get("source") or {}
+    source_kind = str(source.get("kind") or "").strip().lower() if isinstance(source, dict) else ""
+    engine = str(workflow_config.get("digital_human_engine") or "").strip().lower()
+    return (
+        bool(workflow_config.get("opennews"))
+        or bool(workflow_config.get("opennews_material_only"))
+        or engine == "opennews_material_only"
+        or source_kind == "opennews"
+    )
+
+
+def _generate_opennews_qwen_tts_audio(script_text: str, output_path: str) -> str:
+    if not OPENNEWS_QWEN_TTS_BASE_URL or not OPENNEWS_QWEN_TTS_TOKEN:
+        raise RuntimeError("OpenNews Qwen3-TTS 未配置 base_url 或 token")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    headers = {
+        "X-Token": OPENNEWS_QWEN_TTS_TOKEN,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": script_text,
+        "language": OPENNEWS_QWEN_TTS_LANGUAGE,
+        "speaker": OPENNEWS_QWEN_TTS_SPEAKER,
+        "instruct": OPENNEWS_QWEN_TTS_INSTRUCT,
+    }
+    response = requests.post(
+        f"{OPENNEWS_QWEN_TTS_BASE_URL}/tts",
+        headers=headers,
+        json=payload,
+        timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not data.get("ok") or not data.get("url"):
+        raise RuntimeError(f"Qwen3-TTS 返回异常：{data}")
+    audio_url = str(data["url"])
+    if audio_url.startswith("/"):
+        audio_url = f"{OPENNEWS_QWEN_TTS_BASE_URL}{audio_url}"
+    wav_response = requests.get(
+        audio_url,
+        headers={"X-Token": OPENNEWS_QWEN_TTS_TOKEN},
+        timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
+    )
+    wav_response.raise_for_status()
+    wav_path = output.with_suffix(output.suffix + ".qwen.wav")
+    wav_path.write_bytes(wav_response.content)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(wav_path),
+            "-vn",
+            "-ar",
+            "32000",
+            "-ac",
+            "1",
+            "-b:a",
+            "128k",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    try:
+        wav_path.unlink()
+    except Exception:
+        pass
+    return str(output)
+
+
+def _generate_audio_for_workflow(
+    *,
+    script_text: str,
+    audio_path: str,
+    voice: str,
+    speed: float,
+    volume: float,
+    language: str,
+    workflow_config: dict,
+    generate_audio_fn,
+    log=None,
+) -> tuple[str, str]:
+    if _should_use_qwen_tts_for_workflow(workflow_config):
+        try:
+            if log:
+                log(f"OpenNews 使用 5090 Qwen3-TTS 本地配音：{OPENNEWS_QWEN_TTS_SPEAKER}")
+            _generate_opennews_qwen_tts_audio(script_text, audio_path)
+            return audio_path, "qwen3-tts"
+        except Exception as exc:
+            if not OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX:
+                raise
+            if log:
+                log(f"Qwen3-TTS 配音失败，已回退 MiniMax：{exc}")
+    generate_audio_fn(
+        script_text,
+        audio_path,
+        voice,
+        speed=speed,
+        volume=volume,
+        language=language,
+    )
+    return audio_path, COST_RULES["tts_generate"]["provider"]
 
 
 def _estimate_tts_cost(script_text: str, audio_path: str = "") -> float:
@@ -3377,6 +3532,46 @@ def _publish_opennews_result_to_youtube(
     return records
 
 
+def _opennews_material_review_status(result: dict) -> dict:
+    segments = result.get("segments") if isinstance(result, dict) else []
+    fallback_items: list[dict] = []
+    source_counts: dict[str, int] = {}
+    if not isinstance(segments, list):
+        segments = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        quality = segment.get("material_quality") if isinstance(segment.get("material_quality"), dict) else {}
+        if quality.get("strict_source_fallback_used"):
+            fallback_items.append({
+                "segment_index": segment.get("index") or segment.get("segment_index") or len(fallback_items) + 1,
+                "reason": "5090 AI图片完全不可用，使用了严格新闻源兜底素材",
+                "quality": quality,
+            })
+        for item in segment.get("material_items") or []:
+            if not isinstance(item, dict):
+                continue
+            source = str(item.get("source") or "unknown")
+            source_counts[source] = source_counts.get(source, 0) + 1
+            if item.get("strict_fallback") or source == "opennews_source":
+                fallback_items.append({
+                    "segment_index": segment.get("index") or segment.get("segment_index") or len(fallback_items) + 1,
+                    "source": source,
+                    "path": item.get("path") or "",
+                    "source_url": item.get("source_url") or "",
+                    "title": item.get("title") or "",
+                    "reason": item.get("fallback_reason") or "使用了严格新闻源兜底素材",
+                })
+    return {
+        "requires_human_review": False,
+        "auto_publish_allowed": True,
+        "uses_strict_source_fallback": bool(fallback_items),
+        "reason": "5090 AI图片完全不可用，成片使用了严格新闻源兜底素材，已允许自动发布。" if fallback_items else "",
+        "fallback_items": fallback_items[:30],
+        "source_counts": source_counts,
+    }
+
+
 def _run_opennews_collection_job(job_id: str) -> None:
     try:
         build_collection_video(OPENNEWS_COLLECTION_DIR, OUTPUT_DIR, job_id)
@@ -3444,7 +3639,7 @@ def _publish_opennews_collection_to_youtube(job_id: str, *, privacy_status: str 
         raise YouTubePublishError("合集任务不存在")
     result = job.get("result") if isinstance(job.get("result"), dict) else {}
     video_path = Path(str(result.get("video_path") or ""))
-    if job.get("status") != "done" or not video_path.exists():
+    if str(job.get("status") or "") not in {"done", "publishing_youtube"} or not video_path.exists():
         raise YouTubePublishError("合集成片尚未生成完成，不能发布 YouTube")
     items = list(result.get("items") or job.get("items") or [])
     aspect_ratio = str(result.get("aspect_ratio") or job.get("aspect_ratio") or "")
@@ -3507,7 +3702,7 @@ def _auto_build_opennews_collections_if_ready(reason: str = "") -> None:
                 return
             base_title = _short_opennews_collection_title(selected)
             jobs = []
-            for aspect_ratio in ("horizontal", "vertical"):
+            for aspect_ratio in ("horizontal",):
                 job = create_collection_job(
                     OPENNEWS_COLLECTION_DIR,
                     OUTPUT_DIR,
@@ -4420,6 +4615,9 @@ async def opennews_batches_produce(request: Request):
     items = find_opennews_batch_items(OPENNEWS_BATCH_DIR, item_ids)
     if not items:
         return JSONResponse({"error": "未找到已勾选的批次新闻。"}, status_code=404)
+    items = [item for item in items if str(item.get("status") or "") != "auto_producing"]
+    if not items:
+        return JSONResponse({"error": "勾选的新闻已经进入热度前三自动生产任务，请选择其他新闻。"}, status_code=400)
     target_market = str(payload.get("target_market") or user.get("target_market") or "cn")
     voice_preset_id = str(payload.get("voice_preset_id") or "")
     aspect_ratio = str(payload.get("aspect_ratio") or "horizontal")
@@ -5037,6 +5235,84 @@ def _external_news_user() -> dict:
     return _public_user(username, USERS[username])
 
 
+def _opennews_batch_auto_top_count() -> int:
+    try:
+        return max(0, min(int(os.getenv("OPENNEWS_BATCH_AUTO_TOP_COUNT", "3") or 3), 8))
+    except Exception:
+        return 3
+
+
+def _opennews_batch_item_score(item: dict) -> tuple[float, float]:
+    try:
+        trend_score = float(item.get("trend_score") or 0)
+    except Exception:
+        trend_score = 0.0
+    try:
+        published_ts = float(item.get("published_ts") or item.get("batch_fetched_at") or 0)
+    except Exception:
+        published_ts = 0.0
+    return trend_score, published_ts
+
+
+def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
+    if os.getenv("OPENNEWS_BATCH_AUTO_TOP_PRODUCE", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    config = load_opennews_batch_config(root)
+    triggered_by = str(payload.get("triggered_by") or "")
+    if triggered_by != "scheduler" and not config.get("enabled"):
+        return
+    items = [item for item in (payload.get("items") or []) if isinstance(item, dict)]
+    top_count = _opennews_batch_auto_top_count()
+    if top_count <= 0 or not items:
+        return
+    selected = sorted(items, key=_opennews_batch_item_score, reverse=True)[:top_count]
+    selected_ids = [str(item.get("batch_item_id") or item.get("id") or "").strip() for item in selected]
+    selected_ids = [item_id for item_id in selected_ids if item_id]
+    if not selected_ids or not OPENNEWS_BATCH_AUTO_PRODUCE_LOCK.acquire(blocking=False):
+        return
+    try:
+        user = _external_news_user()
+        job = create_opennews_batch_job(
+            root,
+            username="auto_opennews_top3",
+            items=selected,
+            options={
+                "target_market": os.getenv("OPENNEWS_BATCH_AUTO_TARGET_MARKET", "cn"),
+                "department_id": user.get("department_id") or "real_estate",
+                "voice_preset_id": os.getenv("OPENNEWS_BATCH_AUTO_VOICE_PRESET_ID", ""),
+                "aspect_ratio": os.getenv("OPENNEWS_BATCH_AUTO_PREVIEW_ASPECT", "horizontal"),
+                "notes": "自动抓取批次热度前三，生成简洁专业中文新闻短片。",
+                "youtube_auto_publish": True,
+                "youtube_privacy_status": os.getenv("OPENNEWS_BATCH_AUTO_YOUTUBE_PRIVACY", "public"),
+                "youtube_aspects": ["horizontal", "vertical"],
+                "auto_top_batch_id": payload.get("batch_id") or "",
+                "auto_top_ranked_item_ids": selected_ids,
+            },
+        )
+        mark_opennews_batch_items(
+            root,
+            selected_ids,
+            {
+                "status": "auto_producing",
+                "auto_produce_job_id": job.get("job_id") or "",
+                "auto_produce_selected_at": time.time(),
+                "auto_produce_reason": "trend_top3",
+            },
+        )
+        thread = threading.Thread(
+            target=_run_opennews_external_produce_job,
+            kwargs={
+                "job_id": job.get("job_id"),
+                "user": dict(user),
+                "public_base_url": os.getenv("PUBLIC_BASE_URL", "https://aiagent.office.ihousejapan.cn"),
+            },
+            daemon=True,
+        )
+        thread.start()
+    finally:
+        OPENNEWS_BATCH_AUTO_PRODUCE_LOCK.release()
+
+
 def _external_candidate_payload(item: dict) -> dict:
     return {
         "id": str(item.get("batch_item_id") or item.get("id") or ""),
@@ -5088,6 +5364,13 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             job_id,
             lambda job: job.update({"status": status, "message": message}),
         )
+
+    def sync_batch_item(item_id: str, **updates: Any) -> None:
+        if not item_id:
+            return
+        payload = dict(updates)
+        payload["auto_produce_job_id"] = job_id
+        mark_opennews_batch_items(OPENNEWS_BATCH_DIR, [item_id], payload)
 
     job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id)
     if not job:
@@ -5153,13 +5436,20 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             task = _wait_for_opennews_task_done(task_id)
             mark_item(status="composing", message="中间产物完成，正在自动合成横屏和竖屏成片...")
             composed_result = _compose_opennews_task_video(task_id, preferred_aspect_ratio=preferred_aspect_ratio)
+            material_review = _opennews_material_review_status(composed_result)
+            if material_review.get("uses_strict_source_fallback"):
+                composed_result["material_review"] = material_review
+                _save_result_to_output_dir(Path(task.get("output_dir") or ""), composed_result)
             output_dir = Path(task.get("output_dir") or "")
             video_payload = _external_video_urls_for_result(public_base_url, output_dir, composed_result)
             youtube_records: list[dict] = []
             youtube_error = ""
             if youtube_auto_publish:
                 try:
-                    mark_item(status="publishing_youtube", message="成片完成，正在自动发布到 YouTube...")
+                    publish_message = "成片完成，正在自动发布到 YouTube..."
+                    if material_review.get("uses_strict_source_fallback"):
+                        publish_message = "成片使用严格新闻源兜底素材，安全过滤通过，正在自动发布到 YouTube..."
+                    mark_item(status="publishing_youtube", message=publish_message, material_review=material_review)
                     youtube_records = _publish_opennews_result_to_youtube(
                         output_dir,
                         composed_result,
@@ -5168,19 +5458,41 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                     )
                 except Exception as youtube_exc:
                     youtube_error = str(youtube_exc)
+            final_status = "completed"
+            final_message = (
+                "成片已完成，可直接下载。"
+                if not youtube_auto_publish
+                else ("成片已完成，YouTube 已发布。" if not youtube_error else f"成片已完成，但 YouTube 发布失败：{youtube_error}")
+            )
             mark_item(
-                status="completed",
-                message="成片已完成，可直接下载。" if not youtube_auto_publish else ("成片已完成，YouTube 已发布。" if not youtube_error else f"成片已完成，但 YouTube 发布失败：{youtube_error}"),
+                status=final_status,
+                message=final_message,
                 history_id=output_dir.name,
                 video=video_payload,
                 vertical_url=video_payload.get("vertical_url", ""),
                 horizontal_url=video_payload.get("horizontal_url", ""),
                 youtube_records=youtube_records,
                 youtube_error=youtube_error,
+                material_review=material_review,
                 error="",
+            )
+            sync_batch_item(
+                item_id,
+                status=final_status,
+                message=final_message,
+                history_id=output_dir.name,
+                video=video_payload,
+                vertical_url=video_payload.get("vertical_url", ""),
+                horizontal_url=video_payload.get("horizontal_url", ""),
+                youtube_records=youtube_records,
+                youtube_error=youtube_error,
+                material_review=material_review,
+                error="",
+                completed_at=time.time(),
             )
         except Exception as exc:
             mark_item(status="failed", message=f"生成失败：{exc}", error=str(exc))
+            sync_batch_item(item_id, status="failed", message=f"生成失败：{exc}", error=str(exc), completed_at=time.time())
         update_opennews_batch_job(
             OPENNEWS_BATCH_DIR,
             job_id,
@@ -5993,6 +6305,30 @@ def _localtok_choice_index(choice: str) -> int:
     return ord(match.group(1).upper()) - ord("A")
 
 
+def _opennews_result_has_material_assets(result: dict, output_path: Path) -> bool:
+    for segment in result.get("segments") or []:
+        if not isinstance(segment, dict) or segment.get("type") != "material":
+            continue
+        for item in segment.get("material_items") or []:
+            if not isinstance(item, dict):
+                continue
+            raw_path = str(item.get("path") or "").strip()
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if not path.is_absolute():
+                path = output_path / raw_path
+            if path.exists() and path.stat().st_size > 0:
+                return True
+        for raw_path in segment.get("material_paths") or []:
+            path = Path(str(raw_path))
+            if not path.is_absolute():
+                path = output_path / str(raw_path)
+            if path.exists() and path.stat().st_size > 0:
+                return True
+    return False
+
+
 def _compose_opennews_task_video(task_id: str, *, preferred_aspect_ratio: str = "vertical") -> dict:
     task = tasks.get(task_id) or {}
     output_dir = task.get("output_dir")
@@ -6002,6 +6338,8 @@ def _compose_opennews_task_video(task_id: str, *, preferred_aspect_ratio: str = 
     output_path = Path(output_dir)
     if not output_path.exists():
         raise RuntimeError("OpenNews 输出目录不存在。")
+    if not _opennews_result_has_material_assets(result, output_path):
+        raise RuntimeError("OpenNews 成片中止：没有可用素材，已阻止生成白底占位视频。请先恢复 5090 图片服务或确认严格新闻源兜底能下载到素材。")
     workflow_config = result.get("workflow_config") or {}
     transition_id = str(workflow_config.get("compose_transition_id") or "fade")
     subtitle_template_id = "property_clear"
@@ -7162,13 +7500,21 @@ async def material_harvest_payload(request: Request):
         return {"jobs": [], "candidates": []}
     jobs = [_harvest_job_payload(item) for item in list_harvest_jobs()]
     candidates = [_harvest_candidate_payload(item, user) for item in list_harvest_candidates()]
-    return {"jobs": jobs, "candidates": candidates}
+    return {
+        "jobs": jobs,
+        "candidates": candidates,
+        "presets": [
+            {"category": category, "topic": data.get("topic", ""), "notes": data.get("notes", ""), "tags": data.get("tags", [])}
+            for category, data in NEWS_HARVEST_PRESETS.items()
+        ],
+    }
 
 
 @app.post("/api/material-library/harvest/jobs")
 async def create_material_harvest_job(
     request: Request,
     topic: str = Form(""),
+    category: str = Form(""),
     source_text: str = Form(""),
     search_notes: str = Form(""),
 ):
@@ -7179,6 +7525,7 @@ async def create_material_harvest_job(
         return _forbidden_error("只有管理员可以发起采集任务")
     job = create_harvest_job(
         topic=topic,
+        category=category,
         source_text=source_text,
         search_notes=search_notes,
         created_by_username=user.get("username", ""),
@@ -7233,6 +7580,31 @@ async def reject_material_harvest_candidate(candidate_id: str, request: Request)
         return _forbidden_error("只有管理员可以拒绝候选素材")
     try:
         candidate = update_harvest_candidate(candidate_id, {"status": "rejected"})
+    except FileNotFoundError:
+        return JSONResponse({"error": "候选素材不存在"}, status_code=404)
+    return {"ok": True, "candidate": _harvest_candidate_payload(candidate, user)}
+
+
+@app.delete("/api/material-library/harvest/candidates")
+async def clear_material_harvest_candidates(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以清空候选素材")
+    removed_count = clear_harvest_candidates(keep_imported=True)
+    return {"ok": True, "removed_count": removed_count}
+
+
+@app.delete("/api/material-library/harvest/candidates/{candidate_id}")
+async def delete_material_harvest_candidate(candidate_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以删除候选素材")
+    try:
+        candidate = delete_harvest_candidate(candidate_id)
     except FileNotFoundError:
         return JSONResponse({"error": "候选素材不存在"}, status_code=404)
     return {"ok": True, "candidate": _harvest_candidate_payload(candidate, user)}

@@ -402,4 +402,3 @@ X-Token: NEWSdesk8821Aki6000HsVp
 7. `GET /api/app/ready-videos`
 8. 房源视频再接 `property-video/analyze` 和 `property-video/jobs`
 9. OpenNews 再接 batches 系列接口
-

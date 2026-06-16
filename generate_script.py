@@ -1090,6 +1090,8 @@ def _request_json_from_openai_responses(
     input_text = user_prompt
     if merge_instructions_into_input:
         input_text = f"{instruction_text}\n\n用户任务：\n{user_prompt}"
+    if "json" not in input_text.lower():
+        input_text = f"{input_text}\n\nReturn only a valid JSON object."
     payload = {
         "model": model_name,
         "input": input_text,

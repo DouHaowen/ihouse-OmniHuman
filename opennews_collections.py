@@ -267,6 +267,8 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
             str(normalized),
         ])
         clips.append(normalized)
+    if not clips:
+        raise RuntimeError("没有可用于合集的视频素材")
     concat_list = work_dir / "concat.txt"
     concat_list.write_text("".join(f"file '{clip.as_posix()}'\n" for clip in clips), encoding="utf-8")
     final_name = f"{_safe_name(job.get('title') or job_id)}_{aspect_ratio}.mp4"
@@ -281,7 +283,8 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
         "-movflags", "+faststart",
         str(final_path),
     ])
-    titles = [str(item.get("title") or "") for item in job.get("items") or []]
+    collection_items = list(job.get("items") or [])
+    titles = [str(item.get("title") or "") for item in collection_items]
     collection = {
         "collection_id": job_id,
         "job_id": job_id,
@@ -289,7 +292,7 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
         "aspect_ratio": aspect_ratio,
         "created_at": time.time(),
         "video_path": str(final_path),
-        "items": job.get("items") or [],
+        "items": collection_items,
         "description": "\n".join(f"{idx + 1}. {title}" for idx, title in enumerate(titles)),
     }
     with FILE_LOCK:
@@ -298,7 +301,7 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
         used = state.get("used_history_ids")
         if not isinstance(used, dict):
             used = {}
-        for item in job.get("items") or []:
+        for item in collection_items:
             used[item.get("history_id")] = job_id
         state["used_history_ids"] = used
         _save_collection_state(root, state)

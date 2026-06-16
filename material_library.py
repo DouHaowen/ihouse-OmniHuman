@@ -24,8 +24,15 @@ AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg"}
 ALLOWED_SUFFIXES = VIDEO_SUFFIXES | IMAGE_SUFFIXES | AUDIO_SUFFIXES
 MATERIAL_CATEGORIES = [
     "房地产",
+    "房产",
+    "移民",
     "科技",
+    "AI",
+    "金融",
+    "军事",
+    "政治",
     "新闻",
+    "通用新闻",
     "通用氛围",
     "城市街景",
     "室内空间",
@@ -220,6 +227,13 @@ def _normalize_item(item: dict) -> dict:
         "uploader_display_name": str(item.get("uploader_display_name") or "").strip(),
         "original_filename": str(item.get("original_filename") or filename),
         "source": str(item.get("source") or "manual"),
+        "source_url": str(item.get("source_url") or "").strip(),
+        "source_site": str(item.get("source_site") or "").strip(),
+        "license_note": str(item.get("license_note") or "").strip(),
+        "safety_status": str(item.get("safety_status") or "unchecked").strip() or "unchecked",
+        "news_topics": _normalize_list(item.get("news_topics")),
+        "usage_count": int(item.get("usage_count") or 0),
+        "last_used_at": float(item.get("last_used_at") or 0),
         "created_at": float(item.get("created_at") or _now()),
         "reviewed_at": float(item.get("reviewed_at") or 0),
         "reviewed_by_username": str(item.get("reviewed_by_username") or "").strip(),
@@ -262,6 +276,11 @@ def register_material_file(
     uploader_username: str = "",
     uploader_display_name: str = "",
     source: str = "manual",
+    source_url: str = "",
+    source_site: str = "",
+    license_note: str = "",
+    safety_status: str = "unchecked",
+    news_topics=None,
 ) -> dict:
     source_path = Path(temp_path).resolve()
     if not source_path.exists():
@@ -292,6 +311,11 @@ def register_material_file(
             "uploader_display_name": uploader_display_name,
             "original_filename": original_filename or source_path.name,
             "source": source,
+            "source_url": source_url,
+            "source_site": source_site,
+            "license_note": license_note,
+            "safety_status": safety_status,
+            "news_topics": news_topics,
             "created_at": _now(),
             "file_size_bytes": metadata.get("file_size_bytes", 0),
             "width": metadata.get("width", 0),
@@ -403,6 +427,9 @@ def _material_score(item: dict, seg: dict, *, target_market: str = "", departmen
             str(item.get("category") or ""),
             " ".join(item.get("tags") or []),
             str(item.get("notes") or ""),
+            str(item.get("source_url") or ""),
+            str(item.get("source_site") or ""),
+            " ".join(item.get("news_topics") or []),
             str(item.get("original_filename") or ""),
         ]
     ).lower()
@@ -456,6 +483,9 @@ def material_item_matches_filters(
             str(item.get("category") or ""),
             " ".join(item.get("tags") or []),
             str(item.get("notes") or ""),
+            str(item.get("source_url") or ""),
+            str(item.get("source_site") or ""),
+            " ".join(item.get("news_topics") or []),
             str(item.get("original_filename") or ""),
             uploader_blob,
         ]

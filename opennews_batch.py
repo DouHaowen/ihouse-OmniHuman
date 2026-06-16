@@ -42,6 +42,7 @@ VALID_CATEGORIES = {
 _FILE_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()
 _SCHEDULER_STARTED = False
+_AFTER_FETCH_CALLBACK = None
 RETENTION_SECONDS = max(3600, int(os.getenv("OPENNEWS_BATCH_RETENTION_SECONDS", str(2 * 24 * 60 * 60)) or str(2 * 24 * 60 * 60)))
 
 
@@ -258,6 +259,21 @@ def _job_path(root: Path, job_id: str) -> Path:
     return _jobs_dir(root) / f"{job_id}.json"
 
 
+def set_after_fetch_callback(callback) -> None:
+    global _AFTER_FETCH_CALLBACK
+    _AFTER_FETCH_CALLBACK = callback
+
+
+def _notify_after_fetch(root: Path, payload: dict) -> None:
+    callback = _AFTER_FETCH_CALLBACK
+    if not callback or not payload.get("ok"):
+        return
+    try:
+        callback(root, payload)
+    except Exception:
+        pass
+
+
 def _candidate_payload(candidate: dict, *, batch_id: str, category: str, fetched_at: float) -> dict:
     item = dict(candidate)
     item_id = _candidate_key(item)
@@ -338,7 +354,9 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
             config["last_run_message"] = payload["message"]
             config["last_run_error"] = ""
             _write_json(_config_path(root), _normalize_config(config))
-        return {"ok": True, **payload}
+        result_payload = {"ok": True, **payload}
+        _notify_after_fetch(root, result_payload)
+        return result_payload
     except Exception as exc:
         payload["finished_at"] = time.time()
         payload["message"] = f"抓取失败：{exc}"
@@ -377,6 +395,27 @@ def find_batch_items(root: Path, item_ids: list[str]) -> list[dict]:
             if str(item.get("batch_item_id") or item.get("id") or "") in wanted:
                 found.append(dict(item))
     return found
+
+
+def mark_batch_items(root: Path, item_ids: list[str], updates: dict) -> None:
+    wanted = {str(item or "").strip() for item in item_ids if str(item or "").strip()}
+    if not wanted:
+        return
+    _ensure_root(root)
+    with _FILE_LOCK:
+        for path in sorted(_batches_dir(root).glob("batch_*.json")):
+            payload = _read_json(path, {})
+            if not isinstance(payload, dict):
+                continue
+            changed = False
+            for item in payload.get("items", []) or []:
+                key = str(item.get("batch_item_id") or item.get("id") or "")
+                if key in wanted:
+                    item.update(updates or {})
+                    changed = True
+            if changed:
+                payload["updated_at"] = time.time()
+                _write_json(path, payload)
 
 
 def create_batch_job(root: Path, *, username: str, items: list[dict], options: dict) -> dict:

@@ -22,20 +22,26 @@ OPENNEWS_MAX_SOURCE_VIDEOS = 1
 OPENNEWS_MAX_SOURCE_IMAGES = 10
 OPENNEWS_AI_IMAGE_ENABLED = os.getenv("OPENNEWS_AI_IMAGE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_AI_IMAGE_REPLACE_SOURCE = os.getenv("OPENNEWS_AI_IMAGE_REPLACE_SOURCE", "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_AI_IMAGE_ONLY = os.getenv("OPENNEWS_AI_IMAGE_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL = (
+    os.getenv("OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
 OPENNEWS_IMAGE_SERVICE_URL = os.getenv("OPENNEWS_IMAGE_SERVICE_URL", "http://192.168.0.34:8894").strip().rstrip("/")
 OPENNEWS_IMAGE_SERVICE_TOKEN = os.getenv("OPENNEWS_IMAGE_SERVICE_TOKEN", "local-image-5090").strip()
-OPENNEWS_IMAGE_MAX_IMAGES = max(1, min(10, int(os.getenv("OPENNEWS_IMAGE_MAX_IMAGES", "10") or "10")))
+OPENNEWS_IMAGE_MAX_IMAGES = max(1, min(10, int(os.getenv("OPENNEWS_IMAGE_MAX_IMAGES", "8") or "8")))
+OPENNEWS_IMAGE_MIN_IMAGES = max(1, min(OPENNEWS_IMAGE_MAX_IMAGES, int(os.getenv("OPENNEWS_IMAGE_MIN_IMAGES", "6") or "6")))
 OPENNEWS_IMAGE_ASPECT_RATIO = os.getenv("OPENNEWS_IMAGE_ASPECT_RATIO", "square").strip().lower() or "square"
 OPENNEWS_IMAGE_TIMEOUT_SECONDS = max(45, int(os.getenv("OPENNEWS_IMAGE_TIMEOUT_SECONDS", "360") or "360"))
-OPENNEWS_IMAGE_MODEL = os.getenv("OPENNEWS_IMAGE_MODEL", "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors").strip()
-OPENNEWS_IMAGE_STEPS = max(8, min(40, int(os.getenv("OPENNEWS_IMAGE_STEPS", "24") or "24")))
-OPENNEWS_IMAGE_CFG = float(os.getenv("OPENNEWS_IMAGE_CFG", "6.5") or "6.5")
+OPENNEWS_IMAGE_MODEL = os.getenv("OPENNEWS_IMAGE_MODEL", "RealVisXL_V4.0_BakedVAE.safetensors").strip()
+OPENNEWS_IMAGE_STEPS = max(8, min(50, int(os.getenv("OPENNEWS_IMAGE_STEPS", "40") or "40")))
+OPENNEWS_IMAGE_CFG = float(os.getenv("OPENNEWS_IMAGE_CFG", "6.8") or "6.8")
 OPENNEWS_IMAGE_NEGATIVE_PROMPT = os.getenv(
     "OPENNEWS_IMAGE_NEGATIVE_PROMPT",
     (
-        "low quality, blurry, soft focus, plastic skin, waxy texture, cartoon, anime, illustration, "
+        "low quality, worst quality, blurry, soft focus, motion blur, plastic skin, waxy texture, cartoon, anime, illustration, "
         "3d render, CGI, fake UI, readable text, random letters, watermark, logo, brand mark, subtitles, "
-        "poster, infographic, distorted hands, deformed people, bad anatomy, oversaturated, noisy, "
+        "poster, infographic, collage, split screen, distorted hands, deformed people, bad anatomy, oversaturated, noisy, jpeg artifacts, "
         "nudity, nude, naked, explicit, sexual, erotic, pornographic, lingerie, underwear, bikini, swimsuit, "
         "cleavage, bare chest, exposed skin, shirtless, see-through clothing, intimate pose, fetish, "
         "patient body, medical nudity, surgery close-up, wound, blood, gore, anatomy close-up, body scan of torso"
@@ -43,10 +49,49 @@ OPENNEWS_IMAGE_NEGATIVE_PROMPT = os.getenv(
 ).strip()
 
 OPENNEWS_IMAGE_SAFE_SUFFIX = (
-    "safe for YouTube news use, family-safe, fully clothed adults only, no exposed skin, "
-    "no nudity, no sexual content, no underwear, no patient body, no surgery, no blood, "
+    "safe for YouTube news use, brand-safe editorial image, family-safe, fully clothed adults only, "
+    "business attire when people are present, no exposed skin, no nudity, no sexual content, "
+    "no underwear, no swimwear, no glamour model, no patient body, no surgery, no blood, "
     "no graphic medical content"
 )
+
+OPENNEWS_IMAGE_CAMERA_STYLES = [
+    "wide establishing shot with a clear single subject",
+    "medium documentary shot with realistic foreground depth",
+    "close-up detail shot with shallow depth of field",
+    "over-the-shoulder newsroom b-roll with a clean professional setup",
+    "cinematic telephoto compression, realistic editorial press photo",
+    "low angle corporate exterior shot with natural light",
+    "clean macro detail shot, crisp textures, premium lens",
+    "evening city documentary shot, realistic ambient light",
+]
+
+OPENNEWS_IMAGE_DOMAIN_STYLES = {
+    "ai": (
+        "AI data center, server racks, GPU infrastructure, semiconductor research lab, "
+        "enterprise AI pricing dashboard, engineers monitoring computing systems, high-tech investment atmosphere"
+    ),
+    "technology": (
+        "AI data center, server racks, GPU infrastructure, semiconductor research lab, "
+        "enterprise AI software office, engineers monitoring computing systems, high-tech investment atmosphere"
+    ),
+    "finance": (
+        "global finance district, institutional investors, stock market screens, modern trading floor, "
+        "sovereign wealth fund office atmosphere"
+    ),
+    "real_estate": (
+        "modern residential district, apartment construction, real estate market, city skyline, "
+        "property investment office"
+    ),
+    "military": (
+        "defense briefing room, military equipment silhouettes, naval and air defense context, "
+        "official strategic analysis atmosphere"
+    ),
+    "politics": (
+        "government building exterior, diplomatic meeting room, policy briefing atmosphere, "
+        "official documents and flags without readable text"
+    ),
+}
 
 
 def _asset_kind_for_suffix(path: str) -> str:
@@ -176,6 +221,17 @@ def _clean_ai_prompt_piece(value: str, *, max_chars: int = 220) -> str:
 def _opennews_safe_ai_subject(subject: str) -> str:
     text = _clean_ai_prompt_piece(subject, max_chars=260)
     lower = text.lower()
+    ai_model_markers = [
+        "ai model", "model cost", "model price", "model fee", "foundation model",
+        "llm", "large language model", "artificial intelligence market",
+        "模型费用", "模型价格", "模型成本", "大模型", "人工智能市场", "生成式ai",
+    ]
+    if any(marker in lower or marker in text for marker in ai_model_markers):
+        return (
+            "enterprise artificial intelligence pricing dashboard on a laptop, GPU server racks in the background, "
+            "business analysts reviewing AI infrastructure costs in a modern office, no fashion model, "
+            "no human body emphasis, no exposed skin"
+        )
     medical_markers = [
         "medical", "healthcare", "clinical", "doctor", "hospital", "imaging", "diagnosis",
         "医学", "医疗", "临床", "医生", "医院", "影像", "诊断", "药物研发",
@@ -189,10 +245,181 @@ def _opennews_safe_ai_subject(subject: str) -> str:
     return text
 
 
+def _opennews_visual_domain_from_text(*parts: str) -> str:
+    text = " ".join(str(part or "") for part in parts).lower()
+    domain_markers = {
+        "ai": ("ai", "artificial intelligence", "人工智能", "data center", "gpu", "chip", "semiconductor", "openai", "anthropic", "nvidia"),
+        "real_estate": ("real estate", "housing", "residential", "property", "房产", "住宅", "不动产", "地产"),
+        "finance": ("stock", "market", "fund", "investment", "investor", "sovereign wealth", "finance", "economy", "股市", "基金", "投资", "金融"),
+        "military": ("military", "defense", "missile", "drone", "war", "army", "navy", "军事", "国防", "导弹", "无人机"),
+        "politics": ("white house", "congress", "government", "policy", "minister", "diplomacy", "政治", "政府", "政策", "外交"),
+    }
+    for domain, markers in domain_markers.items():
+        if any(marker in text for marker in markers):
+            return domain
+    return "general"
+
+
+def _opennews_domain_style(domain: str) -> str:
+    return OPENNEWS_IMAGE_DOMAIN_STYLES.get(domain, "modern global news documentary scene, real-world editorial b-roll atmosphere")
+
+
+def _opennews_english_visual_subject(*parts: str) -> str:
+    text = " ".join(str(part or "") for part in parts).lower()
+    cn_text = " ".join(str(part or "") for part in parts)
+    rules = [
+        (
+            ("芯片", "半导体", "gpu", "nvidia", "semiconductor", "chip", "晶圆", "算力"),
+            "semiconductor wafers and GPU chips on a clean laboratory table, engineers in the background inspecting AI hardware",
+        ),
+        (
+            ("数据中心", "服务器", "云计算", "算力", "data center", "server", "cloud computing"),
+            "large AI data center server racks with cool blue lighting, network cables, engineers monitoring infrastructure",
+        ),
+        (
+            ("模型费用", "模型价格", "模型成本", "ai model", "model cost", "model price", "subscription"),
+            "enterprise AI subscription cost dashboard on a laptop, business analysts reviewing cloud computing expenses",
+        ),
+        (
+            ("人工智能", "生成式ai", "大模型", "openai", "anthropic", "artificial intelligence", "llm"),
+            "modern enterprise AI operations room, large screens showing abstract machine learning workflows without readable text",
+        ),
+        (
+            ("房产", "住宅", "不动产", "房地产", "租金", "housing", "property", "real estate", "mortgage"),
+            "modern residential apartment buildings and real estate contract documents, bright clean city property market scene",
+        ),
+        (
+            ("股市", "股票", "投资", "金融", "通胀", "利率", "ipo", "stock", "market", "investor", "inflation", "fed"),
+            "professional financial newsroom, trading screens with abstract market graphics, analysts reviewing investment data",
+        ),
+        (
+            ("移民", "签证", "入境", "visa", "immigration", "border", "passport"),
+            "passport and visa documents on an airport immigration desk, official travel process atmosphere, no readable personal data",
+        ),
+        (
+            ("军事", "国防", "导弹", "无人机", "军舰", "战机", "military", "defense", "missile", "drone", "warship", "fighter"),
+            "defense briefing room with maps and military equipment silhouettes, official analysis atmosphere, no gore, no combat casualties",
+        ),
+        (
+            ("白宫", "国会", "政府", "政策", "外交", "总统", "white house", "congress", "government", "policy", "diplomacy"),
+            "government building exterior and formal press briefing room, official policy news atmosphere, no unrelated politicians close-up",
+        ),
+        (
+            ("石油", "油价", "霍尔木兹", "oil", "crude", "hormuz", "tanker"),
+            "oil tanker at sea near a strategic shipping route, energy market news atmosphere, realistic maritime documentary photo",
+        ),
+        (
+            ("航空", "飞机", "航展", "air show", "aircraft", "aviation", "jet"),
+            "modern aircraft on an airshow runway, aerospace industry exhibition atmosphere, realistic telephoto documentary shot",
+        ),
+    ]
+    haystack = f"{text} {cn_text}"
+    for markers, subject in rules:
+        if any(marker in haystack for marker in markers):
+            return subject
+    return ""
+
+
+def _opennews_compose_ai_prompt(
+    *,
+    subject: str,
+    visual_need: str,
+    script_context: str,
+    queries: list[str],
+    theme_title: str,
+    index: int,
+) -> str:
+    domain = _opennews_visual_domain_from_text(subject, visual_need, script_context, " ".join(queries), theme_title)
+    camera_style = OPENNEWS_IMAGE_CAMERA_STYLES[index % len(OPENNEWS_IMAGE_CAMERA_STYLES)]
+    domain_style = _opennews_domain_style(domain)
+    mapped_subject = _opennews_english_visual_subject(subject, visual_need, script_context, " ".join(queries), theme_title)
+    focused_subject = mapped_subject or _opennews_safe_ai_subject(
+        ", ".join(part for part in [subject, visual_need, theme_title] if part) or script_context
+    )
+    context = _clean_ai_prompt_piece(script_context, max_chars=180)
+    query_text = ", ".join(queries[:4])
+    prompt_parts = [
+        focused_subject,
+        domain_style,
+        f"{camera_style}, high-end realistic editorial news photography, premium documentary b-roll still",
+        "award-winning photorealistic RAW photo, professional full-frame camera, 35mm or 50mm lens look, natural available light, realistic lens perspective, sharp focus, crisp textures, realistic materials, balanced contrast, rich but natural color grading",
+        "clean professional composition, credible business news visual, single clear subject, strong foreground-background separation, no collage, no symbolic generic illustration",
+        "match the current narration beat literally; the visible scene must correspond to the narration topic; do not show politicians, government meetings, hospitals, fashion models, or unrelated people unless the beat explicitly asks for them",
+    ]
+    if query_text:
+        prompt_parts.append(f"visual entities to imply: {query_text}")
+    if context:
+        prompt_parts.append(f"news context to match: {context}")
+    prompt_parts.append("no readable text, no fake letters, no charts with text, no logos, no watermark")
+    prompt_parts.append(OPENNEWS_IMAGE_SAFE_SUFFIX)
+    return ", ".join(part for part in prompt_parts if part)
+
+
+def _opennews_script_visual_beats(script: str, *, limit: int = 8) -> list[str]:
+    text = _clean_ai_prompt_piece(script, max_chars=1600)
+    if not text:
+        return []
+    pieces = [piece.strip(" ，。！？；,.!?;:\n\t") for piece in re.split(r"[。！？；!?;\n]+", text)]
+    if len([piece for piece in pieces if piece]) < 4:
+        pieces = [piece.strip(" ，。！？；,.!?;:\n\t") for piece in re.split(r"[，、,：:]+", text)]
+    pieces = [piece for piece in pieces if piece]
+    beats: list[str] = []
+    current = ""
+    for piece in pieces:
+        if len(current) < 90 and len(f"{current} {piece}".strip()) <= 180:
+            current = f"{current} {piece}".strip()
+            continue
+        beats.append(current[:220])
+        current = piece
+        if len(beats) >= limit:
+            break
+    if current and len(beats) < limit:
+        beats.append(current[:220])
+    return beats[:limit]
+
+
+def _append_opennews_ai_prompt(
+    prompts: list[dict],
+    seen: set[str],
+    *,
+    subject: str,
+    visual_need: str,
+    script_context: str,
+    queries: list[str],
+    theme_title: str,
+    index: int,
+    limit: int,
+) -> bool:
+    visual_subject = _opennews_english_visual_subject(subject, visual_need, script_context, " ".join(queries), theme_title)
+    prompt = _opennews_compose_ai_prompt(
+        subject=subject,
+        visual_need=visual_need,
+        script_context=script_context,
+        queries=queries,
+        theme_title=theme_title,
+        index=index,
+    )
+    key_source = "|".join([prompt, script_context, theme_title, str(index)])
+    key = hashlib.sha1(key_source.encode("utf-8", errors="ignore")).hexdigest()
+    if not key or key in seen:
+        return False
+    seen.add(key)
+    prompts.append({
+        "prompt": prompt,
+        "news_hint": script_context or visual_need,
+        "theme_index": index,
+        "theme_title": theme_title,
+        "queries": queries,
+        "visual_subject": visual_subject,
+    })
+    return len(prompts) >= limit
+
+
 def _opennews_ai_image_prompts(seg: dict, *, limit: int = 10) -> list[dict]:
     """Build stable image prompts from the OpenNews visual plan."""
     prompts: list[dict] = []
     seen: set[str] = set()
+    script_text = str(seg.get("script") or "")
     themes = seg.get("material_theme_plan") or []
     if isinstance(themes, list):
         for index, theme in enumerate(themes):
@@ -208,26 +435,130 @@ def _opennews_ai_image_prompts(seg: dict, *, limit: int = 10) -> list[dict]:
             subject = ", ".join(queries[:3]) or visual_need or script_context
             if not subject:
                 continue
-            subject = _opennews_safe_ai_subject(subject)
-            prompt = (
-                f"{subject}, high-end realistic editorial news photography, documentary b-roll still, "
-                "photojournalism style, natural available light, realistic camera perspective, sharp details, "
-                f"clean composition, cinematic but believable, no on-screen text, no logos, no watermark, "
-                f"{OPENNEWS_IMAGE_SAFE_SUFFIX}"
-            )
-            key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", prompt.lower())[:120]
-            if key in seen:
-                continue
-            seen.add(key)
-            prompts.append({
-                "prompt": prompt,
-                "news_hint": script_context or visual_need,
-                "theme_index": index,
-                "theme_title": theme.get("title") or visual_need or subject,
-                "queries": queries,
-            })
-            if len(prompts) >= limit:
+            theme_title = _clean_ai_prompt_piece(theme.get("title") or visual_need or subject, max_chars=120)
+            if _append_opennews_ai_prompt(
+                prompts,
+                seen,
+                subject=subject,
+                visual_need=visual_need,
+                script_context=script_context,
+                queries=queries,
+                theme_title=theme_title,
+                index=index,
+                limit=limit,
+            ):
                 return prompts
+
+    # 主题计划不足时，用口播文案本身拆成画面节拍补齐，避免整条新闻只靠一张泛图。
+    if len(prompts) < OPENNEWS_IMAGE_MIN_IMAGES:
+        base_queries = [
+            _clean_ai_prompt_piece(value, max_chars=80)
+            for value in [
+                str(seg.get("material_keyword") or ""),
+                str(seg.get("material_search_keyword") or ""),
+            ]
+            if _clean_ai_prompt_piece(value, max_chars=80)
+        ][:3]
+        for beat_index, beat in enumerate(_opennews_script_visual_beats(script_text, limit=limit)):
+            if len(prompts) >= limit:
+                break
+            title = f"新闻画面 {beat_index + 1}"
+            if _append_opennews_ai_prompt(
+                prompts,
+                seen,
+                subject=beat,
+                visual_need=f"visualize this narration beat as safe editorial b-roll: {beat}",
+                script_context=beat,
+                queries=base_queries,
+                theme_title=title,
+                index=len(prompts),
+                limit=limit,
+            ):
+                break
+
+    if len(prompts) < OPENNEWS_IMAGE_MIN_IMAGES:
+        script_context = _clean_ai_prompt_piece(script_text, max_chars=260)
+        keyword = _clean_ai_prompt_piece(
+            " ".join([
+                str(seg.get("material_keyword") or ""),
+                str(seg.get("material_search_keyword") or ""),
+            ]),
+            max_chars=180,
+        )
+        domain = _opennews_visual_domain_from_text(keyword, script_context)
+        supplemental_by_domain = {
+            "ai": [
+                "wide shot of AI data center server racks",
+                "close-up of GPU chips and semiconductor wafers",
+                "enterprise AI software dashboard in a modern office",
+                "engineers monitoring cloud computing infrastructure",
+                "business analysts reviewing AI investment costs",
+                "high-tech research lab with abstract machine learning screens",
+            ],
+            "technology": [
+                "semiconductor laboratory with engineers",
+                "modern technology company office and software dashboard",
+                "close-up of hardware components and circuit boards",
+                "data center operations room",
+                "product development meeting with laptops and prototypes",
+                "clean macro shot of advanced electronics",
+            ],
+            "finance": [
+                "professional trading floor with abstract market screens",
+                "financial district exterior with morning light",
+                "analysts reviewing investment documents",
+                "central bank and interest rate policy atmosphere",
+                "close-up of financial charts without readable text",
+                "business newsroom discussing market movement",
+            ],
+            "real_estate": [
+                "modern residential apartment exterior",
+                "real estate contract documents and house keys",
+                "city housing construction site",
+                "property agent reviewing housing market data",
+                "bright residential neighborhood street",
+                "apartment building lobby and property market atmosphere",
+            ],
+            "military": [
+                "defense briefing room with maps and equipment silhouettes",
+                "naval ship at sea in a documentary telephoto shot",
+                "military drone silhouette in a controlled test environment",
+                "air defense radar and command center",
+                "fighter aircraft on runway at a defense exhibition",
+                "official strategic analysis room, no casualties",
+            ],
+            "politics": [
+                "government building exterior",
+                "formal press briefing room without identifiable faces",
+                "policy documents on a desk without readable text",
+                "diplomatic meeting room, empty chairs and flags",
+                "city government district establishing shot",
+                "official newsroom policy analysis atmosphere",
+            ],
+            "general": [
+                "modern global news documentary establishing shot",
+                "professional newsroom b-roll scene",
+                "city exterior related to the news topic",
+                "documents and laptop on a clean editorial desk",
+                "wide urban documentary photo matching the topic",
+                "neutral business news visual without unrelated people",
+            ],
+        }
+        supplemental_angles = supplemental_by_domain.get(domain, supplemental_by_domain["general"])
+        for angle in supplemental_angles:
+            if len(prompts) >= min(limit, OPENNEWS_IMAGE_MIN_IMAGES):
+                break
+            _append_opennews_ai_prompt(
+                prompts,
+                seen,
+                subject=f"{keyword}, {angle}",
+                visual_need=angle,
+                script_context=script_context,
+                queries=[query for query in [keyword] if query],
+                theme_title=f"补充安全画面 {len(prompts) + 1}",
+                index=len(prompts),
+                limit=limit,
+            )
 
     if not prompts:
         fallback = _clean_ai_prompt_piece(
@@ -239,12 +570,14 @@ def _opennews_ai_image_prompts(seg: dict, *, limit: int = 10) -> list[dict]:
             max_chars=260,
         )
         if fallback:
-            fallback = _opennews_safe_ai_subject(fallback)
             prompts.append({
-                "prompt": (
-                    f"{fallback}, high-end realistic editorial news photography, documentary b-roll still, "
-                    "photojournalism style, natural available light, sharp details, no on-screen text, no logos, "
-                    f"{OPENNEWS_IMAGE_SAFE_SUFFIX}"
+                "prompt": _opennews_compose_ai_prompt(
+                    subject=fallback,
+                    visual_need=str(seg.get("material_desc") or ""),
+                    script_context=_clean_ai_prompt_piece(seg.get("script") or "", max_chars=220),
+                    queries=[],
+                    theme_title=str(seg.get("material_keyword") or "OpenNews AI素材"),
+                    index=0,
                 ),
                 "news_hint": _clean_ai_prompt_piece(seg.get("script") or "", max_chars=220),
                 "theme_index": 0,
@@ -316,6 +649,8 @@ def _generate_opennews_ai_image_materials(seg: dict, output_dir: str, segment_in
             entry = _material_entry(output_path, kind="image", source="opennews_ai_image")
             entry["title"] = prompt_item.get("theme_title") or "OpenNews AI生成素材"
             entry["prompt"] = prompt_item.get("prompt") or ""
+            if prompt_item.get("visual_subject"):
+                entry["visual_subject"] = prompt_item.get("visual_subject")
             entry["image_service_url"] = OPENNEWS_IMAGE_SERVICE_URL
             entry["image_job_id"] = data.get("job_id") or payload["job_id"]
             if prompt_item.get("theme_index") is not None:
@@ -444,6 +779,9 @@ SOURCE_MATERIAL_BAD_TOKENS = (
 SOURCE_MATERIAL_ADULT_TOKENS = (
     "porn", "porno", "xxx", "sex", "sexy", "adult", "erotic", "hentai", "jav",
     "avdebut", "avdebyu", "nude", "naked", "nsfw", "boobs", "breast", "pussy",
+    "lingerie", "underwear", "bikini", "swimsuit", "cleavage", "shirtless",
+    "topless", "see-through", "fetish", "escort", "only fans", "onlyfans",
+    "patient body", "anatomy", "surgery", "wound", "gore",
     "eporner", "xvideos", "xnxx", "pornhub", "redtube", "youporn", "xhamster",
     "spankbang", "tube8", "youjizz", "brazzers", "onlyfans", "chaturbate",
     "camgirl", "stripchat", "bongacams", "javhd", "javdb", "missav",
@@ -489,6 +827,8 @@ OPENNEWS_GENERIC_MEDIA_TOKENS = {
     "news", "photo", "image", "video", "official", "media", "press", "latest",
     "footage", "b-roll", "article", "source", "public domain", "archive",
 }
+
+OPENNEWS_STRICT_FALLBACK_SOURCES = {"article", "related_article", "opengraph", "news_source"}
 
 
 def _normalized_media_basename(path: str) -> str:
@@ -841,58 +1181,80 @@ def fetch_materials_for_segment(
     relevance_tokens = _opennews_relevance_tokens(seg) if is_opennews_material_only and seg.get("strict_news_media_only") else set()
     visual_domain = _opennews_visual_domain(seg, relevance_tokens) if relevance_tokens else "general"
     rejection_log: list[dict] = []
-    for item in (seg.get("source_materials") or []):
-        if not isinstance(item, dict) or not item.get("url"):
-            continue
-        identity_keys = _source_identity_keys(str(item.get("url") or ""))
-        if not identity_keys or identity_keys & seen_source_urls or identity_keys & used_source_urls:
-            continue
-        if _looks_like_bad_source_material(item) or _looks_like_unsafe_source_material(item):
-            rejection_log.append({
-                "url": item.get("url") or "",
-                "title": item.get("title") or "",
-                "reason": "素材 URL 命中成人/裸露站点黑名单",
-            })
-            print(f"  ⚠️ 新闻素材安全过滤：成人/裸露站点｜{item.get('url')}")
-            continue
-        relevance_score = _source_material_relevance_score(item, relevance_tokens) if relevance_tokens else 1
-        min_relevance_score = _opennews_min_relevance_score(item)
-        if relevance_tokens and relevance_score < min_relevance_score:
-            rejection_log.append({
-                "url": item.get("url") or "",
-                "title": item.get("title") or "",
-                "reason": f"基础相关性不足：{relevance_score}/{min_relevance_score}",
-            })
-            print(
-                "  ⚠️ 新闻素材相关性不足，已跳过："
-                f"{item.get('title') or item.get('url')}｜score={relevance_score}/{min_relevance_score}"
-            )
-            continue
-        if relevance_tokens:
-            keep_item, quality_reason, quality_score = _opennews_quality_decision(item, relevance_tokens, visual_domain)
-            if not keep_item:
+    source_fallback_available = (
+        is_opennews_material_only
+        and OPENNEWS_AI_IMAGE_ONLY
+        and OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL
+    )
+    if is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY and not source_fallback_available:
+        print("  ℹ️ OpenNews AI图片专用模式：跳过新闻网页/网络图片素材，只使用5090生成图")
+    elif is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY:
+        print("  ℹ️ OpenNews AI图片优先模式：先用5090生成图，若不足再启用严格新闻源图片兜底")
+    else:
+        source_fallback_available = False
+    if not (is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY and not source_fallback_available):
+        for item in (seg.get("source_materials") or []):
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            identity_keys = _source_identity_keys(str(item.get("url") or ""))
+            if not identity_keys or identity_keys & seen_source_urls or identity_keys & used_source_urls:
+                continue
+            if _looks_like_bad_source_material(item) or _looks_like_unsafe_source_material(item):
                 rejection_log.append({
                     "url": item.get("url") or "",
                     "title": item.get("title") or "",
-                    "reason": quality_reason,
-                    "score": quality_score,
-                    "domain": visual_domain,
+                    "reason": "素材 URL 命中成人/裸露站点黑名单",
                 })
-                print(f"  ⚠️ 新闻素材质量过滤：{quality_reason}｜{item.get('title') or item.get('url')}")
+                print(f"  ⚠️ 新闻素材安全过滤：成人/裸露站点｜{item.get('url')}")
                 continue
+            if is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY:
+                kind = str(item.get("kind") or "").strip().lower()
+                source = str(item.get("source") or "").strip().lower()
+                if kind == "video" or source not in OPENNEWS_STRICT_FALLBACK_SOURCES:
+                    rejection_log.append({
+                        "url": item.get("url") or "",
+                        "title": item.get("title") or "",
+                        "reason": "严格兜底只允许新闻原文/相关报道/OG主图图片",
+                    })
+                    continue
+            relevance_score = _source_material_relevance_score(item, relevance_tokens) if relevance_tokens else 1
+            min_relevance_score = _opennews_min_relevance_score(item)
+            if relevance_tokens and relevance_score < min_relevance_score:
+                rejection_log.append({
+                    "url": item.get("url") or "",
+                    "title": item.get("title") or "",
+                    "reason": f"基础相关性不足：{relevance_score}/{min_relevance_score}",
+                })
+                print(
+                    "  ⚠️ 新闻素材相关性不足，已跳过："
+                    f"{item.get('title') or item.get('url')}｜score={relevance_score}/{min_relevance_score}"
+                )
+                continue
+            if relevance_tokens:
+                keep_item, quality_reason, quality_score = _opennews_quality_decision(item, relevance_tokens, visual_domain)
+                if not keep_item:
+                    rejection_log.append({
+                        "url": item.get("url") or "",
+                        "title": item.get("title") or "",
+                        "reason": quality_reason,
+                        "score": quality_score,
+                        "domain": visual_domain,
+                    })
+                    print(f"  ⚠️ 新闻素材质量过滤：{quality_reason}｜{item.get('title') or item.get('url')}")
+                    continue
+            else:
+                quality_reason = "非严格模式"
+                quality_score = relevance_score
+            item = dict(item)
+            item["_relevance_score"] = relevance_score
+            item["_quality_score"] = quality_score
+            item["_quality_reason"] = quality_reason
+            seen_source_urls.update(identity_keys)
+            source_materials.append(item)
+        if is_opennews_material_only:
+            source_materials = _theme_balanced_source_materials(source_materials, relevance_tokens)
         else:
-            quality_reason = "非严格模式"
-            quality_score = relevance_score
-        item = dict(item)
-        item["_relevance_score"] = relevance_score
-        item["_quality_score"] = quality_score
-        item["_quality_reason"] = quality_reason
-        seen_source_urls.update(identity_keys)
-        source_materials.append(item)
-    if is_opennews_material_only:
-        source_materials = _theme_balanced_source_materials(source_materials, relevance_tokens)
-    else:
-        source_materials.sort(key=_rank_source_material, reverse=True)
+            source_materials.sort(key=_rank_source_material, reverse=True)
     source_video_count = 0
     source_image_count = 0
     if is_opennews_material_only:
@@ -911,8 +1273,21 @@ def fetch_materials_for_segment(
                 source_video_count += 1
             else:
                 source_image_count += 1
-        if ai_materials and OPENNEWS_AI_IMAGE_REPLACE_SOURCE:
+        ai_image_count = sum(1 for item in material_items if item.get("source") == "opennews_ai_image")
+        allow_strict_source_fallback_now = (
+            OPENNEWS_AI_IMAGE_ONLY
+            and OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL
+            and ai_image_count == 0
+        )
+        if ai_materials and OPENNEWS_AI_IMAGE_REPLACE_SOURCE and not allow_strict_source_fallback_now:
             source_materials = []
+        if OPENNEWS_AI_IMAGE_ONLY and not allow_strict_source_fallback_now:
+            source_materials = []
+        elif allow_strict_source_fallback_now:
+            print(
+                "  ⚠️ 5090 AI图片不足，启用严格新闻源图片兜底："
+                f"AI={ai_image_count}"
+            )
 
     source_attempt_limit = 260 if is_opennews_material_only else 24
     for item in source_materials[:source_attempt_limit]:
@@ -922,6 +1297,8 @@ def fetch_materials_for_segment(
             break
         kind = str(item.get("kind") or "").strip().lower()
         if kind == "video" and source_video_count >= max_source_videos:
+            continue
+        if is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY and kind == "video":
             continue
         if kind != "video" and source_image_count >= max_source_images:
             continue
@@ -950,6 +1327,9 @@ def fetch_materials_for_segment(
         entry["title"] = item.get("title", "")
         entry["quality_score"] = item.get("_quality_score", 0)
         entry["quality_reason"] = item.get("_quality_reason", "")
+        if is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY:
+            entry["strict_fallback"] = True
+            entry["fallback_reason"] = "5090 AI图片完全不可用，使用严格新闻源图片兜底"
         if item.get("theme_index") is not None:
             entry["theme_index"] = item.get("theme_index")
         if item.get("theme_title"):
@@ -965,7 +1345,7 @@ def fetch_materials_for_segment(
 
     remaining_slots = max(0, max_total_materials - len(material_items))
     library_items = []
-    if remaining_slots:
+    if remaining_slots and not (is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY):
         library_items = search_material_library(
             seg,
             target_market=target_market or str(seg.get("target_market") or ""),
@@ -1000,10 +1380,16 @@ def fetch_materials_for_segment(
             library_image_count += 1
         print(f"  ✅ 已命中本地素材库：{os.path.basename(copied_path)}")
 
-    disable_free_fallback = bool(seg.get("disable_free_material_fallback"))
+    disable_free_fallback = True if is_opennews_material_only else bool(seg.get("disable_free_material_fallback"))
     allow_opennews_quality_fallback = False
     if is_opennews_material_only:
-        print("  ℹ️ OpenNews 已禁用免费素材库兜底，仅使用新闻源、公开网页爬取和本地素材库")
+        if OPENNEWS_AI_IMAGE_ONLY:
+            if OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL:
+                print("  ℹ️ OpenNews 已禁用本地素材库/免费素材库兜底；5090不足时仅允许严格新闻源图片兜底")
+            else:
+                print("  ℹ️ OpenNews 已禁用新闻源/本地素材库/免费素材库兜底，仅使用5090 AI生成图片")
+        else:
+            print("  ℹ️ OpenNews 已禁用免费素材库兜底，仅使用新闻源、公开网页爬取和本地素材库")
 
     fallback_queries = _opennews_theme_queries(seg) if is_opennews_material_only else []
     if keyword and keyword not in fallback_queries:
@@ -1070,6 +1456,19 @@ def fetch_materials_for_segment(
     if is_opennews_material_only:
         seg_with_materials["material_quality"] = {
             "domain": visual_domain,
+            "ai_image_only": OPENNEWS_AI_IMAGE_ONLY,
+            "ai_image_target_min": OPENNEWS_IMAGE_MIN_IMAGES,
+            "ai_image_target_max": OPENNEWS_IMAGE_MAX_IMAGES,
+            "ai_image_count": sum(1 for item in material_items if item.get("source") == "opennews_ai_image"),
+            "strict_source_fallback_enabled": OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL,
+            "strict_source_fallback_used": any(item.get("source") == "opennews_source" for item in material_items),
+            "requires_human_review": False,
+            "review_reason": "",
+            "auto_publish_allowed": True,
+            "source_counts": {
+                source: sum(1 for item in material_items if item.get("source") == source)
+                for source in sorted({str(item.get("source") or "unknown") for item in material_items})
+            },
             "relevance_tokens": sorted(relevance_tokens)[:80],
             "accepted_count": len(material_items),
             "rejected_count": len(rejection_log),

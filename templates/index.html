@@ -1975,9 +1975,19 @@
               <strong style="font-size:16px;">AI 爬虫候选池</strong>
               <div class="helper" style="margin-top:6px;">先抓网页候选素材，再人工导入正式素材库。当前阶段不会直接参与生产匹配。</div>
             </div>
-            <button class="btn btn-secondary" id="materialHarvestRefreshBtn" type="button">刷新候选池</button>
+            <div class="actions" style="margin:0;">
+              <button class="btn btn-secondary" id="materialHarvestRefreshBtn" type="button">刷新候选池</button>
+              <button class="btn btn-ghost" id="materialHarvestClearBtn" type="button">清空未导入候选</button>
+            </div>
           </div>
           <div class="panel" style="padding:16px; background:rgba(255,255,255,0.56);">
+            <div class="field">
+              <label for="materialHarvestCategory">新闻素材分类</label>
+              <select id="materialHarvestCategory" class="select-input">
+                <option value="">手动主题</option>
+              </select>
+              <div class="helper">选择军事、政治、科技、AI、金融、房产、移民等分类后，系统会自动补充更适合新闻素材库的检索词。</div>
+            </div>
             <div class="field">
               <label for="materialHarvestTopic">采集主题</label>
               <input id="materialHarvestTopic" class="select-input" type="text" placeholder="例如：日本买房、东京街景、机器人发布会。留好主题后，即使不贴链接也能自动搜索来源。">
@@ -2059,6 +2069,7 @@
       materialLibrarySelection: [],
       materialHarvestJobs: [],
       materialHarvestCandidates: [],
+      materialHarvestPresets: [],
       openNewsSources: [],
       openNewsCategories: [],
       openNewsTrendCategories: [],
@@ -2262,11 +2273,13 @@
       materialLibraryClearSelectionBtn: document.getElementById('materialLibraryClearSelectionBtn'),
       materialLibrarySelectionHint: document.getElementById('materialLibrarySelectionHint'),
       materialHarvestPanel: document.getElementById('materialHarvestPanel'),
+      materialHarvestCategory: document.getElementById('materialHarvestCategory'),
       materialHarvestTopic: document.getElementById('materialHarvestTopic'),
       materialHarvestSourceText: document.getElementById('materialHarvestSourceText'),
       materialHarvestNotes: document.getElementById('materialHarvestNotes'),
       materialHarvestStartBtn: document.getElementById('materialHarvestStartBtn'),
       materialHarvestRefreshBtn: document.getElementById('materialHarvestRefreshBtn'),
+      materialHarvestClearBtn: document.getElementById('materialHarvestClearBtn'),
       materialHarvestStatus: document.getElementById('materialHarvestStatus'),
       materialHarvestJobList: document.getElementById('materialHarvestJobList'),
       materialHarvestCandidateList: document.getElementById('materialHarvestCandidateList'),
@@ -2780,6 +2793,26 @@
       }
     }
 
+    function renderMaterialHarvestPresetOptions() {
+      const presets = Array.isArray(state.materialHarvestPresets) ? state.materialHarvestPresets : [];
+      if (!els.materialHarvestCategory) return;
+      const current = els.materialHarvestCategory.value || '';
+      els.materialHarvestCategory.innerHTML = `<option value="">手动主题</option>` + presets.map(item => `<option value="${escapeHtml(item.category)}">${escapeHtml(item.category)}</option>`).join('');
+      els.materialHarvestCategory.value = current;
+    }
+
+    function applyMaterialHarvestPreset() {
+      const selected = els.materialHarvestCategory?.value || '';
+      const preset = (state.materialHarvestPresets || []).find(item => item.category === selected);
+      if (!preset) return;
+      if (els.materialHarvestTopic && !els.materialHarvestTopic.value.trim()) {
+        els.materialHarvestTopic.value = preset.topic || selected;
+      }
+      if (els.materialHarvestNotes && !els.materialHarvestNotes.value.trim()) {
+        els.materialHarvestNotes.value = preset.notes || '';
+      }
+    }
+
     function renderMaterialLibrary(items = []) {
       state.materialLibraryItems = Array.isArray(items) ? items : [];
       if (els.materialLibraryApprovedCount) {
@@ -2813,6 +2846,7 @@
               <div class="history-title">${escapeHtml(item.title || item.filename || '未命名素材')}</div>
               <div class="history-topic">${escapeHtml(formatMaterialMetaLine(item))}</div>
               <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at || 0))} · ${escapeHtml(item.uploader_display_name || item.uploader_username || '未记录上传人')}${markets ? ` · 市场 ${escapeHtml(markets)}` : ''}${departments ? ` · 部门 ${escapeHtml(departments)}` : ''}</div>
+              ${(item.source_site || item.source_url || item.safety_status) ? `<div class="helper">来源：${escapeHtml(item.source_site || item.source_url || '未记录')} · 安全状态：${escapeHtml(item.safety_status || 'unchecked')}${item.usage_count ? ` · 使用 ${escapeHtml(String(item.usage_count))} 次` : ''}</div>` : ''}
               ${tags.length ? `<div style="display:flex; gap:8px; flex-wrap:wrap;">${tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
               ${item.notes ? `<div class="helper">${escapeHtml(item.notes)}</div>` : ''}
               ${item.original_filename ? `<div class="helper">原始文件：${escapeHtml(item.original_filename)}</div>` : ''}
@@ -2899,6 +2933,7 @@
             <div class="history-actions">
               <button class="btn btn-primary material-review-approve-btn" type="button" data-material-id="${item.id}">审核通过</button>
               <button class="btn btn-ghost material-review-reject-btn" type="button" data-material-id="${item.id}">拒绝</button>
+              <button class="btn btn-ghost material-library-delete-btn" type="button" data-material-id="${item.id}">删除</button>
             </div>
           </div>
         `;
@@ -2908,6 +2943,9 @@
       });
       document.querySelectorAll('.material-review-reject-btn').forEach(btn => {
         btn.addEventListener('click', () => reviewMaterialLibraryItem(btn.dataset.materialId, 'rejected', btn));
+      });
+      document.querySelectorAll('#materialLibraryPendingList .material-library-delete-btn').forEach(btn => {
+        btn.addEventListener('click', () => deleteMaterialLibraryItem(btn.dataset.materialId));
       });
       document.querySelectorAll('#materialLibraryPendingList img').forEach(img => {
         img.style.cursor = 'zoom-in';
@@ -3029,9 +3067,6 @@
 
     async function deleteMaterialLibraryItem(itemId) {
       if (!itemId) return;
-      if (!window.confirm('确定要删除这条素材吗？')) {
-        return;
-      }
       try {
         const res = await fetch(`/api/material-library/${itemId}`, { method: 'DELETE' });
         const data = await res.json();
@@ -3047,9 +3082,6 @@
       const selectedIds = Array.isArray(state.materialLibrarySelection) ? state.materialLibrarySelection : [];
       if (!selectedIds.length) {
         alert('请先选择要处理的素材');
-        return;
-      }
-      if (action === 'delete' && !window.confirm(`确定要批量删除这 ${selectedIds.length} 条素材吗？`)) {
         return;
       }
       const formData = new FormData();
@@ -3096,7 +3128,7 @@
           <div class="history-main">
             <div class="history-title">${escapeHtml(job.topic || '未命名采集任务')}</div>
             <div class="history-topic">${escapeHtml(job.message || '等待开始')}</div>
-            <div class="history-meta">${escapeHtml(formatHistoryTime(job.created_at || 0))} · 共 ${escapeHtml(String(job.source_count || 0))} 个来源${job.manual_source_count ? `（手动 ${escapeHtml(String(job.manual_source_count || 0))}` : ''}${job.discovered_source_count ? `${job.manual_source_count ? ' / ' : '（'}自动 ${escapeHtml(String(job.discovered_source_count || 0))}` : ''}${job.source_count ? '）' : ''} · ${escapeHtml(String(job.candidate_count || 0))} 条候选 · ${escapeHtml(job.status || 'queued')}</div>
+            <div class="history-meta">${job.category ? `${escapeHtml(job.category)} · ` : ''}${escapeHtml(formatHistoryTime(job.created_at || 0))} · 共 ${escapeHtml(String(job.source_count || 0))} 个来源${job.manual_source_count ? `（手动 ${escapeHtml(String(job.manual_source_count || 0))}` : ''}${job.discovered_source_count ? `${job.manual_source_count ? ' / ' : '（'}自动 ${escapeHtml(String(job.discovered_source_count || 0))}` : ''}${job.source_count ? '）' : ''} · ${escapeHtml(String(job.candidate_count || 0))} 条候选 · ${escapeHtml(job.status || 'queued')}</div>
             ${job.error ? `<div class="helper" style="color:var(--danger);">${escapeHtml(job.error)}</div>` : ''}
           </div>
         </div>
@@ -3123,12 +3155,15 @@
             <div class="history-main" style="display:grid; gap:12px;">
               <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                 <span class="tag">${escapeHtml(item.kind === 'video' ? '视频候选' : '图片候选')}</span>
+                ${item.category ? `<span class="tag">${escapeHtml(item.category)}</span>` : ''}
                 <span class="tag" style="${item.status === 'imported' ? 'background:rgba(18,146,101,0.10); color:var(--success);' : item.status === 'rejected' ? 'background:rgba(205,77,77,0.10); color:var(--danger);' : 'background:rgba(187,132,65,0.10); color:var(--accent);'}">${escapeHtml(item.status || 'pending')}</span>
+                <span class="tag" style="background:rgba(205,77,77,0.08); color:var(--muted);">${escapeHtml(item.safety_status || 'needs_review')}</span>
               </div>
               ${preview}
               <div class="history-title">${escapeHtml(item.page_title || item.title || '未命名候选素材')}</div>
-              <div class="history-topic">${escapeHtml(item.domain || '')}</div>
+              <div class="history-topic">${escapeHtml(item.source_site || item.domain || '')}</div>
               ${item.page_excerpt ? `<div class="helper">${escapeHtml(item.page_excerpt)}</div>` : ''}
+              ${item.license_note ? `<div class="helper">${escapeHtml(item.license_note)}</div>` : ''}
               <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at || 0))}</div>
             </div>
             <div class="history-actions">
@@ -3136,6 +3171,7 @@
               <a class="btn btn-secondary" href="${item.preview_url}" target="_blank" rel="noreferrer" style="text-decoration:none;">查看候选</a>
               ${item.can_import ? `<button class="btn btn-primary material-harvest-import-btn" type="button" data-candidate-id="${item.id}">导入正式素材库</button>` : ''}
               ${item.can_reject ? `<button class="btn btn-ghost material-harvest-reject-btn" type="button" data-candidate-id="${item.id}">拒绝</button>` : ''}
+              <button class="btn btn-ghost material-harvest-delete-btn" type="button" data-candidate-id="${item.id}">删除</button>
             </div>
           </div>
         `;
@@ -3146,6 +3182,9 @@
       document.querySelectorAll('.material-harvest-reject-btn').forEach(btn => {
         btn.addEventListener('click', () => rejectHarvestCandidate(btn.dataset.candidateId, btn));
       });
+      document.querySelectorAll('.material-harvest-delete-btn').forEach(btn => {
+        btn.addEventListener('click', () => deleteHarvestCandidate(btn.dataset.candidateId, btn));
+      });
     }
 
     async function loadMaterialHarvest() {
@@ -3154,6 +3193,8 @@
         const res = await fetch('/api/material-library/harvest');
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || '候选池加载失败');
+        state.materialHarvestPresets = Array.isArray(data.presets) ? data.presets : [];
+        renderMaterialHarvestPresetOptions();
         renderMaterialHarvestJobs(data.jobs || []);
         renderMaterialHarvestCandidates(data.candidates || []);
         if (els.materialHarvestStatus) {
@@ -3168,13 +3209,15 @@
 
     async function startMaterialHarvestJob() {
       const topic = els.materialHarvestTopic?.value.trim() || '';
+      const category = els.materialHarvestCategory?.value.trim() || '';
       const sourceText = els.materialHarvestSourceText?.value.trim() || '';
-      if (!sourceText && !topic) {
+      if (!sourceText && !topic && !category) {
         alert('请先填写采集主题，或贴至少一条来源链接');
         return;
       }
       const formData = new FormData();
       formData.append('topic', topic);
+      formData.append('category', category);
       formData.append('source_text', sourceText);
       formData.append('search_notes', els.materialHarvestNotes?.value.trim() || '');
       const originalText = els.materialHarvestStartBtn?.textContent || '开始采集候选素材';
@@ -3205,7 +3248,8 @@
 
     async function importHarvestCandidate(candidateId, button) {
       if (!candidateId) return;
-      const category = window.prompt('导入到正式素材库时的分类（可留空）', '') || '';
+      const candidate = (state.materialHarvestCandidates || []).find(item => item.id === candidateId) || {};
+      const category = window.prompt('导入到正式素材库时的分类（可留空）', candidate.category || '') || '';
       const notes = window.prompt('导入备注（可留空）', '') || '';
       const formData = new FormData();
       formData.append('category', category.trim());
@@ -3249,6 +3293,52 @@
         if (button) {
           button.disabled = false;
           button.textContent = originalText;
+        }
+      }
+    }
+
+    async function deleteHarvestCandidate(candidateId, button) {
+      if (!candidateId) return;
+      const originalText = button?.textContent || '删除';
+      if (button) {
+        button.disabled = true;
+        button.textContent = '删除中...';
+      }
+      try {
+        const res = await fetch(`/api/material-library/harvest/candidates/${candidateId}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '删除候选素材失败');
+        await loadMaterialHarvest();
+      } catch (error) {
+        alert(error.message || '删除候选素材失败');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
+      }
+    }
+
+    async function clearHarvestCandidates() {
+      const originalText = els.materialHarvestClearBtn?.textContent || '清空未导入候选';
+      if (els.materialHarvestClearBtn) {
+        els.materialHarvestClearBtn.disabled = true;
+        els.materialHarvestClearBtn.textContent = '清空中...';
+      }
+      try {
+        const res = await fetch('/api/material-library/harvest/candidates', { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '清空候选池失败');
+        if (els.materialHarvestStatus) {
+          els.materialHarvestStatus.textContent = `已清空 ${String(data.removed_count || 0)} 条未导入候选素材，正式素材库已保留。`;
+        }
+        await loadMaterialHarvest();
+      } catch (error) {
+        alert(error.message || '清空候选池失败');
+      } finally {
+        if (els.materialHarvestClearBtn) {
+          els.materialHarvestClearBtn.disabled = false;
+          els.materialHarvestClearBtn.textContent = originalText;
         }
       }
     }
@@ -4129,18 +4219,20 @@
           const displayTitle = item.title_zh || item.translated_title || item.title || '未命名新闻';
           const displaySummary = item.summary_zh || item.translated_summary || item.summary || '';
           const originalTitle = item.title_zh || item.translated_title ? item.title : '';
+          const isAutoProducing = item.status === 'auto_producing';
           return `
-            <label class="history-card" style="cursor:pointer;">
+            <label class="history-card" style="${isAutoProducing ? 'opacity:.72;' : 'cursor:pointer;'}">
               <div class="history-top">
                 <div style="display:flex; gap:10px; align-items:flex-start;">
-                  <input class="opennews-batch-check" type="checkbox" value="${escapeHtml(itemId)}" style="margin-top:5px;">
+                  <input class="opennews-batch-check" type="checkbox" value="${escapeHtml(itemId)}" style="margin-top:5px;" ${isAutoProducing ? 'disabled' : ''}>
                   <div>
                     <div class="history-title">${escapeHtml(displayTitle)}</div>
                     ${originalTitle ? `<div class="history-topic">英文原题：${escapeHtml(originalTitle)}</div>` : ''}
                     <div class="history-topic">${escapeHtml(item.source_name || item.trend_domain || '')} · ${escapeHtml(item.category_name || '')}</div>
+                    ${isAutoProducing ? `<div class="history-topic">已进入热度前三自动生产任务：${escapeHtml(item.auto_produce_job_id || '')}</div>` : ''}
                   </div>
                 </div>
-                <span class="badge">热度 ${escapeHtml(item.trend_score || '-')}</span>
+                <span class="badge">${isAutoProducing ? '自动制作中' : `热度 ${escapeHtml(item.trend_score || '-')}`}</span>
               </div>
               <div class="history-topic">新闻时间：${escapeHtml(item.published_at || '来源页面未标注明确发布时间')}</div>
               ${displaySummary ? `<div class="social-card">${escapeHtml(displaySummary)}</div>` : ''}
@@ -6760,6 +6852,8 @@
     els.materialLibraryClearSelectionBtn?.addEventListener('click', () => setMaterialLibrarySelection([]));
     els.materialHarvestStartBtn?.addEventListener('click', startMaterialHarvestJob);
     els.materialHarvestRefreshBtn?.addEventListener('click', loadMaterialHarvest);
+    els.materialHarvestClearBtn?.addEventListener('click', clearHarvestCandidates);
+    els.materialHarvestCategory?.addEventListener('change', applyMaterialHarvestPreset);
     if (els.composeVideoBtn) els.composeVideoBtn.addEventListener('click', composeFinalVideo);
     els.loginForm.addEventListener('submit', handleLogin);
     els.logoutBtn.addEventListener('click', handleLogout);
