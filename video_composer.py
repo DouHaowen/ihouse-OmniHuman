@@ -230,9 +230,11 @@ def _landscape_foreground_filter() -> str:
 
 
 def _card_overlay_expr(duration: float, intensity: int = 8) -> str:
+    y_shift = -150 if WIDTH == 1080 and HEIGHT == 1920 else 0
+    y_base = f"(H-h)/2{y_shift:+d}"
     return (
         f"overlay=(W-w)/2+{intensity}*sin(t/({max(duration, 0.1):.3f}/2+0.55)):"
-        f"(H-h)/2+{max(10, intensity + 4)}*cos(t/({max(duration, 0.1):.3f}/2+0.75))"
+        f"{y_base}+{max(10, intensity + 4)}*cos(t/({max(duration, 0.1):.3f}/2+0.75))"
     )
 
 

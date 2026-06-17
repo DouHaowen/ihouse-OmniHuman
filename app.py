@@ -617,7 +617,9 @@ OPENNEWS_QWEN_TTS_INSTRUCT = os.getenv(
     "用自然、清晰、专业的中文新闻女主播语气朗读，节奏稳定，声音有亲和力。",
 ).strip()
 OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID = os.getenv("OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID", "mandarin_female").strip() or "mandarin_female"
-OPENNEWS_COLLECTION_INTRO_ENABLED = (os.getenv("OPENNEWS_COLLECTION_INTRO_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+# Default off for now: collection intro digital-human clips are costly/slow.
+# Set OPENNEWS_COLLECTION_INTRO_ENABLED=1 when we want to restore this feature.
+OPENNEWS_COLLECTION_INTRO_ENABLED = (os.getenv("OPENNEWS_COLLECTION_INTRO_ENABLED", "0") or "0").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH = ASSETS_DIR / os.getenv("OPENNEWS_COLLECTION_INTRO_ANCHOR_FILENAME", "opennews_anchor_daily.png").strip()
 OPENNEWS_COLLECTION_INTRO_LOCAL_DIGITAL_ENABLED = (
     (os.getenv("OPENNEWS_COLLECTION_INTRO_LOCAL_DIGITAL_ENABLED", "1") or "1").strip().lower()
@@ -3431,6 +3433,22 @@ def _resolve_youtube_publish_video(output_dir: Path, result: dict, aspect_ratio:
     raise YouTubePublishError("当前历史记录还没有可上传的成片 mp4，请先生成成片。")
 
 
+def _resolve_youtube_thumbnail(output_dir: Path, result: dict, aspect_ratio: str = "vertical") -> Path | None:
+    aspect_ratio = (aspect_ratio or "vertical").strip().lower()
+    variants = result.get("final_video_variants")
+    if isinstance(variants, dict):
+        preferred = variants.get(aspect_ratio) if isinstance(variants.get(aspect_ratio), dict) else None
+        if preferred and preferred.get("cover_image_path"):
+            rel = _history_relpath_from_value(str(output_dir), str(preferred.get("cover_image_path") or ""))
+            if rel and (output_dir / rel).exists():
+                return output_dir / rel
+    cover_image_path = str(result.get("cover_image_path") or "")
+    rel = _history_relpath_from_value(str(output_dir), cover_image_path)
+    if rel and (output_dir / rel).exists():
+        return output_dir / rel
+    return None
+
+
 def _build_default_youtube_metadata(result: dict, *, title: str = "", description: str = "", tags: Any = None) -> dict:
     workflow_config = result.get("workflow_config") or {}
     source = (workflow_config.get("source") or {}).get("article") or {}
@@ -3534,6 +3552,7 @@ def _publish_opennews_result_to_youtube(
         if aspect_key not in {"horizontal", "vertical"}:
             continue
         video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_key)
+        thumbnail_path = _resolve_youtube_thumbnail(output_dir, result, aspect_ratio=aspect_key)
         upload_result = upload_video_to_youtube(
             YOUTUBE_TOKEN_STORE_PATH,
             video_path,
@@ -3543,12 +3562,14 @@ def _publish_opennews_result_to_youtube(
             privacy_status=privacy_status,
             category_id=category_id,
             made_for_kids=False,
+            thumbnail_path=thumbnail_path,
         )
         record = {
             "job_id": f"auto_opennews_{aspect_key}_{int(time.time())}",
             "history_id": output_dir.name,
             "aspect_ratio": aspect_key,
             "video_path": str(video_path),
+            "thumbnail_path": str(thumbnail_path) if thumbnail_path else "",
             "created_at": time.time(),
             **upload_result,
         }
@@ -4090,6 +4111,15 @@ def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dic
 
 def _attach_opennews_collection_intro(job_id: str, *, message_suffix: str = "正在生成合集...") -> dict:
     job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id) or {"job_id": job_id}
+    if not OPENNEWS_COLLECTION_INTRO_ENABLED:
+        intro_result = {"ok": False, "skipped": True, "reason": "intro_disabled"}
+        update_collection_job(
+            OPENNEWS_COLLECTION_DIR,
+            job_id,
+            intro_result=intro_result,
+            message=f"数字人开场片头已停用，{message_suffix}",
+        )
+        return intro_result
     try:
         update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, message="正在生成数字人开场片头...")
         intro_result = _create_opennews_collection_intro_video(job, OUTPUT_DIR)
@@ -6050,6 +6080,15 @@ def _select_opennews_auto_collection_items(items: list[dict], *, time_range: str
     return selected[:total]
 
 
+def _select_opennews_batch_top_item(items: list[dict]) -> Optional[dict]:
+    ranked = sorted(
+        [item for item in items if isinstance(item, dict)],
+        key=_opennews_batch_item_score,
+        reverse=True,
+    )
+    return dict(ranked[0]) if ranked else None
+
+
 def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
     if os.getenv("OPENNEWS_BATCH_AUTO_COLLECTION_PRODUCE", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
@@ -6062,10 +6101,15 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
         items,
         time_range=str(payload.get("time_range") or config.get("time_range") or "6h"),
     )
+    top_item = _select_opennews_batch_top_item(items) or _select_opennews_batch_top_item(selected)
     if not selected:
         return
+    job_items = list(selected)
     selected_ids = [str(item.get("batch_item_id") or item.get("id") or "").strip() for item in selected]
     selected_ids = [item_id for item_id in selected_ids if item_id]
+    top_item_id = str((top_item or {}).get("batch_item_id") or (top_item or {}).get("id") or "").strip()
+    if top_item and top_item_id and top_item_id not in selected_ids:
+        job_items.insert(0, top_item)
     if not selected_ids or not OPENNEWS_BATCH_AUTO_PRODUCE_LOCK.acquire(blocking=False):
         return
     try:
@@ -6073,18 +6117,19 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
         job = create_opennews_batch_job(
             root,
             username="auto_opennews_collection",
-            items=selected,
+            items=job_items,
             options={
                 "target_market": os.getenv("OPENNEWS_BATCH_AUTO_TARGET_MARKET", "cn"),
                 "department_id": user.get("department_id") or "real_estate",
                 "voice_preset_id": os.getenv("OPENNEWS_BATCH_AUTO_VOICE_PRESET_ID", ""),
-                "aspect_ratio": os.getenv("OPENNEWS_BATCH_AUTO_PREVIEW_ASPECT", "horizontal"),
-                "notes": "自动抓取批次按 AI 4、机器人 1、其他热点 5 的比例生成新闻合集素材。每条短片只作为合集片段，不单独发布 YouTube。",
+                "aspect_ratio": os.getenv("OPENNEWS_BATCH_AUTO_PREVIEW_ASPECT", "vertical"),
+                "notes": "自动抓取批次：最高热度单条发布竖屏 Shorts；同时按 AI 4、机器人 1、其他热点 5 的比例生成横屏新闻合集。",
                 "youtube_auto_publish": False,
                 "youtube_privacy_status": os.getenv("OPENNEWS_BATCH_AUTO_YOUTUBE_PRIVACY", "public"),
-                "youtube_aspects": ["horizontal"],
+                "youtube_aspects": ["vertical"],
                 "auto_collection_batch_id": payload.get("batch_id") or "",
                 "auto_collection_item_ids": selected_ids,
+                "auto_single_shorts_item_ids": [top_item_id] if top_item_id else [],
                 "auto_collection_mix_counts": _opennews_auto_collection_mix_counts(),
                 "auto_collection_direct": True,
             },
@@ -6096,10 +6141,22 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
                 "status": "auto_producing",
                 "auto_produce_job_id": job.get("job_id") or "",
                 "auto_produce_selected_at": time.time(),
-                "auto_produce_reason": "hourly_collection_mix",
+                "auto_produce_reason": "two_hour_collection_mix",
                 "auto_collection_mix_counts": _opennews_auto_collection_mix_counts(),
             },
         )
+        if top_item_id:
+            mark_opennews_batch_items(
+                root,
+                [top_item_id],
+                {
+                    "status": "auto_producing",
+                    "auto_produce_job_id": job.get("job_id") or "",
+                    "auto_produce_selected_at": time.time(),
+                    "auto_produce_reason": "top_shorts",
+                    "auto_single_shorts": True,
+                },
+            )
         thread = threading.Thread(
             target=_run_opennews_external_produce_job,
             kwargs={
@@ -6215,6 +6272,16 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
         youtube_aspects = [str(part).strip() for part in youtube_aspects_raw if str(part).strip()]
     else:
         youtube_aspects = ["horizontal", "vertical"]
+    auto_single_shorts_ids = {
+        str(item_id or "").strip()
+        for item_id in (options.get("auto_single_shorts_item_ids") or [])
+        if str(item_id or "").strip()
+    }
+    auto_collection_item_ids = {
+        str(item_id or "").strip()
+        for item_id in (options.get("auto_collection_item_ids") or [])
+        if str(item_id or "").strip()
+    }
     set_job_status("running", "外部审核已确认，正在一站式生成新闻视频成片...")
 
     total_items = len(job.get("items") or [])
@@ -6264,16 +6331,20 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             video_payload = _external_video_urls_for_result(public_base_url, output_dir, composed_result)
             youtube_records: list[dict] = []
             youtube_error = ""
-            if youtube_auto_publish:
+            publish_this_item = youtube_auto_publish or item_id in auto_single_shorts_ids
+            item_youtube_aspects = ["vertical"] if item_id in auto_single_shorts_ids else youtube_aspects
+            if publish_this_item:
                 try:
                     publish_message = "成片完成，正在自动发布到 YouTube..."
+                    if item_id in auto_single_shorts_ids:
+                        publish_message = "本批次最高热度新闻成片完成，正在发布竖屏 Shorts..."
                     if material_review.get("uses_strict_source_fallback"):
                         publish_message = "成片使用严格新闻源兜底素材，安全过滤通过，正在自动发布到 YouTube..."
                     mark_item(status="publishing_youtube", message=publish_message, material_review=material_review)
                     youtube_records = _publish_opennews_result_to_youtube(
                         output_dir,
                         composed_result,
-                        aspects=youtube_aspects,
+                        aspects=item_youtube_aspects,
                         privacy_status=youtube_privacy_status,
                     )
                 except Exception as youtube_exc:
@@ -6281,7 +6352,7 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             final_status = "completed"
             final_message = (
                 "成片已完成，可直接下载。"
-                if not youtube_auto_publish
+                if not publish_this_item
                 else ("成片已完成，YouTube 已发布。" if not youtube_error else f"成片已完成，但 YouTube 发布失败：{youtube_error}")
             )
             mark_item(
@@ -6327,7 +6398,12 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
         history_ids = [
             str(item.get("history_id") or "").strip()
             for item in final_job.get("items", []) or []
-            if item.get("status") == "completed" and str(item.get("history_id") or "").strip()
+            if item.get("status") == "completed"
+            and str(item.get("history_id") or "").strip()
+            and (
+                not auto_collection_item_ids
+                or str(item.get("batch_item_id") or "").strip() in auto_collection_item_ids
+            )
         ]
         try:
             collection_result = _build_and_publish_opennews_collection(
@@ -6338,12 +6414,12 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             update_opennews_batch_job(
                 OPENNEWS_BATCH_DIR,
                 job_id,
-                lambda job: job.update({
+                lambda job, collection_count=len(history_ids): job.update({
                     "collection_status": "done",
                     "collection_job_id": collection_result.get("job_id") or "",
                     "collection_message": "自动合集已生成并发布 YouTube。",
                     "collection_youtube_record": collection_result.get("youtube_record") or {},
-                    "message": f"自动合集已完成：{completed} 条短片入合集，已发布 YouTube。",
+                    "message": f"自动流程已完成：最高热度 Shorts 已处理，{collection_count} 条短片入横屏合集并发布 YouTube。",
                 }),
             )
         except Exception as collection_exc:
