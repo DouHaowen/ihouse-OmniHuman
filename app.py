@@ -616,6 +616,7 @@ OPENNEWS_QWEN_TTS_INSTRUCT = os.getenv(
     "OPENNEWS_QWEN_TTS_INSTRUCT",
     "用自然、清晰、专业的中文新闻女主播语气朗读，节奏稳定，声音有亲和力。",
 ).strip()
+OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID = os.getenv("OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID", "mandarin_female").strip() or "mandarin_female"
 OPENNEWS_COLLECTION_INTRO_ENABLED = (os.getenv("OPENNEWS_COLLECTION_INTRO_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH = ASSETS_DIR / os.getenv("OPENNEWS_COLLECTION_INTRO_ANCHOR_FILENAME", "opennews_anchor_daily.png").strip()
 OPENNEWS_COLLECTION_INTRO_LOCAL_DIGITAL_ENABLED = (
@@ -2338,6 +2339,15 @@ def _generate_opennews_qwen_tts_audio(script_text: str, output_path: str) -> str
     return str(output)
 
 
+def _opennews_minimax_fallback_voice() -> tuple[str, str]:
+    preset = _get_voice_preset(OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID, "cn")
+    voice_id = str(preset.get("voice_id") or "").strip()
+    if not voice_id:
+        voice_id = "Chinese (Mandarin)_Warm_Bestie"
+    language = str(preset.get("language") or "zh").strip() or "zh"
+    return voice_id, language
+
+
 def _generate_audio_for_workflow(
     *,
     script_text: str,
@@ -2350,7 +2360,8 @@ def _generate_audio_for_workflow(
     generate_audio_fn,
     log=None,
 ) -> tuple[str, str]:
-    if _should_use_qwen_tts_for_workflow(workflow_config):
+    opennews_tts = _should_use_qwen_tts_for_workflow(workflow_config)
+    if opennews_tts:
         try:
             if log:
                 log(f"OpenNews 使用 5090 Qwen3-TTS 本地配音：{OPENNEWS_QWEN_TTS_SPEAKER}")
@@ -2361,6 +2372,9 @@ def _generate_audio_for_workflow(
                 raise
             if log:
                 log(f"Qwen3-TTS 配音失败，已回退 MiniMax：{exc}")
+        voice, language = _opennews_minimax_fallback_voice()
+        if log:
+            log(f"OpenNews MiniMax 兜底固定女声音色：{OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID}")
     generate_audio_fn(
         script_text,
         audio_path,

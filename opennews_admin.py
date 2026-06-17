@@ -273,11 +273,7 @@ def _request_opennews_claude_json(prompt: str, *, max_output_tokens: int = 4096)
 
 
 def _request_opennews_model_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
-    try:
-        return _request_opennews_claude_json(prompt, max_output_tokens=max_output_tokens)
-    except Exception as claude_error:
-        print(f"[opennews_claude_fallback] {claude_error!r} -> api_relay")
-        return _request_opennews_relay_json(prompt, max_output_tokens=max_output_tokens)
+    return _request_opennews_relay_json(prompt, max_output_tokens=max_output_tokens)
 
 
 def _ensure_string_list(value: object, *, limit: int = 8) -> list[str]:
@@ -2430,8 +2426,8 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
     )
     article_media = _merge_media_items(article_media, related_article_media, related_media, limit=180)
     draft["_meta"] = {
-        "model": os.getenv("ANTHROPIC_OPENNEWS_MODEL", "claude-sonnet-4-6") if ANTHROPIC_CLIENT else _get_openai_relay_model(),
-        "model_provider": "Claude" if ANTHROPIC_CLIENT else "API中转模型",
+        "model": _get_openai_relay_model(),
+        "model_provider": "API中转模型",
         "source_url": url,
         "source_name": article.get("source_name"),
         "license": article.get("license"),
