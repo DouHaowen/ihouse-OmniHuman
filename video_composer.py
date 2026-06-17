@@ -230,7 +230,8 @@ def _landscape_foreground_filter() -> str:
 
 
 def _card_overlay_expr(duration: float, intensity: int = 8) -> str:
-    y_shift = -150 if WIDTH == 1080 and HEIGHT == 1920 else 0
+    # OpenNews Shorts reserve more breathing room for bottom subtitles.
+    y_shift = -230 if WIDTH == 1080 and HEIGHT == 1920 else 0
     y_base = f"(H-h)/2{y_shift:+d}"
     return (
         f"overlay=(W-w)/2+{intensity}*sin(t/({max(duration, 0.1):.3f}/2+0.55)):"
@@ -248,7 +249,7 @@ def _subtitle_filter(subtitle_path: Path, template_id: str) -> str:
                 "size": 22,
                 "outline_width": 3.0,
                 "shadow": 1.6,
-                "margin_v": 58,
+                "margin_v": 38,
                 "margin_l": 64,
                 "margin_r": 64,
             })
