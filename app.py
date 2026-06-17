@@ -605,7 +605,7 @@ COST_RULES = {
     "tos_upload": {"provider": "volc_tos", "minimum": 0.0, "per_mb": 0.0},
     "compose_video": {"provider": "ffmpeg", "base": 0.0, "per_second": 0.0},
 }
-OPENNEWS_QWEN_TTS_ENABLED = (os.getenv("OPENNEWS_QWEN_TTS_ENABLED", "0") or "0").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_QWEN_TTS_ENABLED = (os.getenv("OPENNEWS_QWEN_TTS_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_QWEN_TTS_BASE_URL = (os.getenv("OPENNEWS_QWEN_TTS_BASE_URL") or "http://192.168.0.34:8895").strip().rstrip("/")
 OPENNEWS_QWEN_TTS_TOKEN = os.getenv("OPENNEWS_QWEN_TTS_TOKEN", "local-qwen3-tts-5090").strip()
 OPENNEWS_QWEN_TTS_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_SPEAKER", "serena").strip() or "serena"
@@ -618,6 +618,15 @@ OPENNEWS_QWEN_TTS_INSTRUCT = os.getenv(
 ).strip()
 OPENNEWS_COLLECTION_INTRO_ENABLED = (os.getenv("OPENNEWS_COLLECTION_INTRO_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH = ASSETS_DIR / os.getenv("OPENNEWS_COLLECTION_INTRO_ANCHOR_FILENAME", "opennews_anchor_daily.png").strip()
+OPENNEWS_COLLECTION_INTRO_LOCAL_DIGITAL_ENABLED = (
+    (os.getenv("OPENNEWS_COLLECTION_INTRO_LOCAL_DIGITAL_ENABLED", "1") or "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_COLLECTION_INTRO_LOCAL_ENGINES = [
+    part.strip()
+    for part in (os.getenv("OPENNEWS_COLLECTION_INTRO_LOCAL_ENGINES", INFINITETALK_ENGINE_ID) or "").split(",")
+    if part.strip()
+]
 
 AVATAR_STYLE_PROMPTS = [
     "人物面向镜头自然讲述，表情亲和，口型清晰，动作克制但真实，轻微点头和手势配合内容节奏",
@@ -3934,6 +3943,67 @@ def _burn_opennews_intro_subtitles(video_path: Path, script_text: str, output_pa
     return output_path
 
 
+def _generate_opennews_collection_intro_digital_human(
+    *,
+    job_id: str,
+    image_url: str,
+    image_path: str,
+    audio_url: str,
+    audio_path: str,
+    output_path: str,
+    prompt: str,
+) -> tuple[str, str, list[dict]]:
+    attempts: list[dict] = []
+    local_engines = [engine for engine in OPENNEWS_COLLECTION_INTRO_LOCAL_ENGINES if engine == INFINITETALK_ENGINE_ID]
+    if OPENNEWS_COLLECTION_INTRO_LOCAL_DIGITAL_ENABLED:
+        for engine_id in local_engines:
+            local_output_path = str(Path(output_path).with_name(f"{Path(output_path).stem}_{engine_id}.mp4"))
+            try:
+                video_result = _run_omnihuman_job_with_retry(
+                    task_id=job_id,
+                    job_id=f"{job_id}:collection_intro:{engine_id}",
+                    label=f"OpenNews 合集数字人开场：{_digital_human_engine_label(engine_id)}",
+                    tracker=None,
+                    retries=1,
+                    runner=lambda engine_id=engine_id, local_output_path=local_output_path: _generate_digital_human_video_by_engine(
+                        engine_id=engine_id,
+                        image_url=image_url,
+                        image_path=image_path,
+                        audio_url=audio_url,
+                        audio_path=audio_path,
+                        output_path=local_output_path,
+                        prompt=prompt,
+                        task_id=job_id,
+                        segment_index=0,
+                    ),
+                )
+                attempts.append({"engine": engine_id, "ok": True, "path": str(video_result)})
+                return str(video_result), engine_id, attempts
+            except Exception as exc:
+                attempts.append({"engine": engine_id, "ok": False, "error": str(exc)})
+                print(f"[opennews_collection_intro] 5090数字人失败，准备尝试下一个引擎：{engine_id}｜{exc}")
+
+    video_result = _run_omnihuman_job_with_retry(
+        task_id=job_id,
+        job_id=f"{job_id}:collection_intro:{VOLC_ENGINE_ID}",
+        label="OpenNews 合集数字人开场：火山 OmniHuman",
+        tracker=None,
+        runner=lambda: _generate_digital_human_video_by_engine(
+            engine_id=VOLC_ENGINE_ID,
+            image_url=image_url,
+            image_path=image_path,
+            audio_url=audio_url,
+            audio_path=audio_path,
+            output_path=output_path,
+            prompt=prompt,
+            task_id=job_id,
+            segment_index=0,
+        ),
+    )
+    attempts.append({"engine": VOLC_ENGINE_ID, "ok": True, "path": str(video_result)})
+    return str(video_result), VOLC_ENGINE_ID, attempts
+
+
 def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dict:
     if not OPENNEWS_COLLECTION_INTRO_ENABLED:
         return {"ok": False, "skipped": True, "reason": "intro_disabled"}
@@ -3955,13 +4025,22 @@ def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dic
 
     from generate_audio import generate_audio
 
-    generate_audio(
-        script_text,
-        str(audio_path),
-        "mandarin_female",
+    intro_voice_preset = _get_voice_preset("mandarin_female", "cn")
+    _, intro_tts_provider = _generate_audio_for_workflow(
+        script_text=script_text,
+        audio_path=str(audio_path),
+        voice=intro_voice_preset.get("voice_id") or "Chinese (Mandarin)_Warm_Bestie",
         speed=1.05,
         volume=1.25,
-        language="zh",
+        language=intro_voice_preset.get("language") or "zh",
+        workflow_config={
+            "opennews": True,
+            "opennews_material_only": True,
+            "digital_human_engine": "opennews_material_only",
+            "source": {"kind": "opennews"},
+        },
+        generate_audio_fn=generate_audio,
+        log=lambda message: print(f"[opennews_collection_intro] {message}"),
     )
     image_url = upload_file_and_get_url(str(OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH), key_prefix="opennews/collection_intro/image")
     audio_url = upload_file_and_get_url(str(audio_path), key_prefix="opennews/collection_intro/audio")
@@ -3971,22 +4050,14 @@ def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dic
         "表情自然可信，口型清晰，轻微点头，动作克制，新闻栏目质感。"
         "不要改变背景中的 OpenNews 每日热点标识，不要添加额外文字。"
     )
-    video_result = _run_omnihuman_job_with_retry(
-        task_id=job_id,
-        job_id=f"{job_id}:collection_intro",
-        label="OpenNews 合集数字人开场",
-        tracker=None,
-        runner=lambda: _generate_digital_human_video_by_engine(
-            engine_id=VOLC_ENGINE_ID,
-            image_url=image_url,
-            image_path=str(OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH),
-            audio_url=audio_url,
-            audio_path=str(audio_path),
-            output_path=str(video_path),
-            prompt=prompt,
-            task_id=job_id,
-            segment_index=0,
-        ),
+    video_result, intro_engine, engine_attempts = _generate_opennews_collection_intro_digital_human(
+        job_id=job_id,
+        image_url=image_url,
+        image_path=str(OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH),
+        audio_url=audio_url,
+        audio_path=str(audio_path),
+        output_path=str(video_path),
+        prompt=prompt,
     )
     final_intro_path = _burn_opennews_intro_subtitles(Path(str(video_result)), script_text, subtitled_video_path)
     return {
@@ -3997,8 +4068,9 @@ def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dic
         "intro_raw_video_path": str(video_result),
         "intro_subtitle_path": str(subtitled_video_path.with_suffix(".srt")),
         "anchor_path": str(OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH),
-        "engine": VOLC_ENGINE_ID,
-        "tts_provider": COST_RULES["tts_generate"]["provider"],
+        "engine": intro_engine,
+        "engine_attempts": engine_attempts,
+        "tts_provider": intro_tts_provider,
     }
 
 
@@ -4098,12 +4170,6 @@ def _auto_build_opennews_collections_if_ready(reason: str = "") -> None:
                 include_used=False,
                 min_created_at=auto_started_at,
             )
-            if OPENNEWS_QWEN_TTS_ENABLED:
-                pool = [
-                    item for item in pool
-                    if str(item.get("tts_provider") or "").strip().lower() == "qwen3-tts"
-                    or "qwen3-tts" in {str(provider).strip().lower() for provider in (item.get("tts_providers") or [])}
-                ]
             if len(pool) < batch_size:
                 return
             selected = sorted(pool, key=lambda item: float(item.get("created_at") or 0))[:batch_size]
@@ -4172,14 +4238,6 @@ def _build_and_publish_opennews_collection(history_ids: list[str], *, reason: st
     )
     pool_by_id = {str(item.get("history_id") or ""): item for item in pool}
     selected = [pool_by_id[history_id] for history_id in clean_ids if history_id in pool_by_id]
-    if OPENNEWS_QWEN_TTS_ENABLED:
-        non_local_tts = [
-            item for item in selected
-            if str(item.get("tts_provider") or "").strip().lower() != "qwen3-tts"
-            and "qwen3-tts" not in {str(provider).strip().lower() for provider in (item.get("tts_providers") or [])}
-        ]
-        if non_local_tts:
-            raise RuntimeError(f"自动合集只允许使用 5090 本地配音短片，以下短片不符合：{', '.join(str(item.get('title') or '') for item in non_local_tts[:3])}")
     if len(selected) < len(clean_ids):
         missing = [history_id for history_id in clean_ids if history_id not in pool_by_id]
         raise RuntimeError(f"自动合集素材不可用或已入合集：{', '.join(missing[:3])}")
@@ -9361,20 +9419,23 @@ async def regenerate_history_segment_audio(history_id: str, segment_index: int, 
     audio_path = audio_dir / f"segment_{segment_index - 1:02d}_{seg_type}.mp3"
 
     try:
-        generate_audio(
-            script_text,
-            str(audio_path),
-            tts_voice,
+        audio_path_str, tts_provider = _generate_audio_for_workflow(
+            script_text=script_text,
+            audio_path=str(audio_path),
+            voice=tts_voice,
             speed=tts_speed,
             volume=tts_volume,
             language=tts_language,
+            workflow_config=workflow_config,
+            generate_audio_fn=generate_audio,
         )
     except Exception as exc:
         return JSONResponse({"error": f"重新生成配音失败：{exc}"}, status_code=500)
 
-    segment["audio_path"] = str(audio_path)
+    segment["audio_path"] = audio_path_str
+    segment["tts_provider"] = tts_provider
     try:
-        segment["audio_url"] = upload_file_and_get_url(str(audio_path), key_prefix="full/audio")
+        segment["audio_url"] = upload_file_and_get_url(audio_path_str, key_prefix="full/audio")
     except Exception:
         segment["audio_url"] = segment.get("audio_url", "")
 
@@ -9389,10 +9450,10 @@ async def regenerate_history_segment_audio(history_id: str, segment_index: int, 
         result=result,
         user=user,
         event_type="tts_generate",
-        amount=_estimate_tts_cost(script_text, str(audio_path)),
-        provider=COST_RULES["tts_generate"]["provider"],
+        amount=_estimate_tts_cost(script_text, audio_path_str),
+        provider=tts_provider,
         topic=result.get("topic", ""),
-        meta={"segment_index": segment_index, "audio_path": str(audio_path), "scope": "regenerate_audio"},
+        meta={"segment_index": segment_index, "audio_path": audio_path_str, "scope": "regenerate_audio"},
     )
     with open(output_dir / "result.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)

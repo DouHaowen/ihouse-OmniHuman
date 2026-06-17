@@ -14,15 +14,19 @@ from material_library import copy_material_to_output, search_material_library
 
 load_dotenv(override=False)
 
+PRODUCTION_MATERIAL_LIBRARY_ENABLED = (
+    os.getenv("PRODUCTION_MATERIAL_LIBRARY_ENABLED", "0").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 PEXELS_API_URL = "https://api.pexels.com/v1/search"
 PEXELS_VIDEO_URL = "https://api.pexels.com/videos/search"
 OPENNEWS_MAX_MATERIALS = 10
 OPENNEWS_MAX_SOURCE_VIDEOS = 1
 OPENNEWS_MAX_SOURCE_IMAGES = 10
-OPENNEWS_AI_IMAGE_ENABLED = os.getenv("OPENNEWS_AI_IMAGE_ENABLED", "0").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_AI_IMAGE_ENABLED = os.getenv("OPENNEWS_AI_IMAGE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_AI_IMAGE_REPLACE_SOURCE = os.getenv("OPENNEWS_AI_IMAGE_REPLACE_SOURCE", "1").strip().lower() not in {"0", "false", "no", "off"}
-OPENNEWS_AI_IMAGE_ONLY = os.getenv("OPENNEWS_AI_IMAGE_ONLY", "0").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_AI_IMAGE_ONLY = os.getenv("OPENNEWS_AI_IMAGE_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL = (
     os.getenv("OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL", "1").strip().lower()
     not in {"0", "false", "no", "off"}
@@ -1395,7 +1399,7 @@ def fetch_materials_for_segment(
 
     remaining_slots = max(0, max_total_materials - len(material_items))
     library_items = []
-    if remaining_slots and not (is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY):
+    if remaining_slots and PRODUCTION_MATERIAL_LIBRARY_ENABLED and not (is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY):
         library_items = search_material_library(
             seg,
             target_market=target_market or str(seg.get("target_market") or ""),
@@ -1403,6 +1407,8 @@ def fetch_materials_for_segment(
             limit_videos=max(0, min(remaining_slots, max_source_videos - source_video_count)),
             limit_images=max(0, min(remaining_slots, max_source_images - source_image_count)),
         )
+    elif remaining_slots and not PRODUCTION_MATERIAL_LIBRARY_ENABLED:
+        print("  ℹ️ 生产素材库匹配已关闭：跳过自建素材库，继续使用原有素材来源")
     library_video_count = source_video_count
     library_image_count = source_image_count
     for item in library_items:
@@ -1439,7 +1445,10 @@ def fetch_materials_for_segment(
             else:
                 print("  ℹ️ OpenNews 已禁用新闻源/本地素材库/免费素材库兜底，仅使用5090 AI生成图片")
         else:
-            print("  ℹ️ OpenNews 已禁用免费素材库兜底，仅使用新闻源、公开网页爬取和本地素材库")
+            if PRODUCTION_MATERIAL_LIBRARY_ENABLED:
+                print("  ℹ️ OpenNews 已禁用免费素材库兜底，仅使用新闻源、公开网页爬取和本地素材库")
+            else:
+                print("  ℹ️ OpenNews 已禁用本地素材库/免费素材库兜底，仅使用新闻源和公开网页爬取")
 
     fallback_queries = _opennews_theme_queries(seg) if is_opennews_material_only else []
     if keyword and keyword not in fallback_queries:
