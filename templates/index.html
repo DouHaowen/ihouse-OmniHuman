@@ -1537,14 +1537,14 @@
               <div class="panel-header" style="margin-bottom:0;">
                 <div>
                   <div class="section-kicker">Auto Radar</div>
-                  <h3 class="section-title" style="font-size:22px;">热点自动抓取与批量生产</h3>
-                  <p class="section-desc">开启后系统会按设定时间自动抓取 AI、房产、移民、科技、金融、军事、政治类英文热点，并按批次展示。勾选新闻后可直接批量生成文案、配音、素材和横竖屏视频。</p>
+                  <h3 class="section-title" style="font-size:22px;">热点自动抓取与合集生产</h3>
+                  <p class="section-desc">开启后系统会每2小时自动抓取 20 条 AI、房产、移民、科技、金融、军事、政治类英文热点，并按 AI 4 条、机器人 1 条、其他热点 5 条的比例制作横屏合集发布 YouTube。剩余新闻仍可手动勾选批量生产。</p>
                 </div>
               </div>
               <div class="field-grid" style="grid-template-columns: 150px 150px 150px 150px minmax(0,1fr);">
                 <label class="check-card" style="min-height:auto; padding:14px;">
                   <span>
-                    <strong>自动抓取</strong>
+                    <strong>自动抓取与自动合集</strong>
                     <small>管理员可开启</small>
                   </span>
                   <input id="openNewsBatchEnabled" type="checkbox">
@@ -1556,6 +1556,7 @@
                     <option value="15">每15分钟</option>
                     <option value="30">每30分钟</option>
                     <option value="60">每1小时</option>
+                    <option value="120">每2小时</option>
                     <option value="180">每3小时</option>
                   </select>
                 </div>
@@ -1614,7 +1615,7 @@
                 <div>
                   <div class="section-kicker">Batches</div>
                   <h3 class="section-title" style="font-size:22px;">热点抓取批次</h3>
-                  <p class="section-desc">不同批次会自动去重。勾选你想制作的视频新闻，然后选择语言、配音和主预览画幅，一键批量生产。</p>
+                  <p class="section-desc">不同批次会自动去重。系统会自动挑选合集素材；你也可以勾选剩余新闻，选择语言、配音和主预览画幅后一键批量生产。</p>
                 </div>
               </div>
               <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr));">
@@ -4229,7 +4230,7 @@
                     <div class="history-title">${escapeHtml(displayTitle)}</div>
                     ${originalTitle ? `<div class="history-topic">英文原题：${escapeHtml(originalTitle)}</div>` : ''}
                     <div class="history-topic">${escapeHtml(item.source_name || item.trend_domain || '')} · ${escapeHtml(item.category_name || '')}</div>
-                    ${isAutoProducing ? `<div class="history-topic">已进入热度前三自动生产任务：${escapeHtml(item.auto_produce_job_id || '')}</div>` : ''}
+                    ${isAutoProducing ? `<div class="history-topic">已进入自动合集生产任务：${escapeHtml(item.auto_produce_job_id || '')}</div>` : ''}
                   </div>
                 </div>
                 <span class="badge">${isAutoProducing ? '自动制作中' : `热度 ${escapeHtml(item.trend_score || '-')}`}</span>
@@ -4303,7 +4304,7 @@
         els.openNewsBatchEnabled.checked = !!config.enabled;
         els.openNewsBatchEnabled.disabled = !isAdmin;
       }
-      if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(config.interval_minutes || 30);
+      if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(config.interval_minutes || 120);
       if (els.openNewsBatchLimitSelect) els.openNewsBatchLimitSelect.value = String(config.limit || 20);
       if (els.openNewsBatchSaveBtn) els.openNewsBatchSaveBtn.disabled = !isAdmin;
       const nextRun = config.next_run_at ? `下次抓取：${formatOpenNewsBatchTime(config.next_run_at)}` : '自动抓取未启用';
@@ -4330,7 +4331,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             enabled: !!els.openNewsBatchEnabled?.checked,
-            interval_minutes: Number(els.openNewsBatchIntervalSelect?.value || 30),
+            interval_minutes: Number(els.openNewsBatchIntervalSelect?.value || 120),
             category: els.openNewsCategorySelect?.value || 'all',
             time_range: els.openNewsTrendRangeSelect?.value || '6h',
             limit: Number(els.openNewsBatchLimitSelect?.value || 20),

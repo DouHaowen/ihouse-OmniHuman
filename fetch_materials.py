@@ -20,9 +20,9 @@ PEXELS_VIDEO_URL = "https://api.pexels.com/videos/search"
 OPENNEWS_MAX_MATERIALS = 10
 OPENNEWS_MAX_SOURCE_VIDEOS = 1
 OPENNEWS_MAX_SOURCE_IMAGES = 10
-OPENNEWS_AI_IMAGE_ENABLED = os.getenv("OPENNEWS_AI_IMAGE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_AI_IMAGE_ENABLED = os.getenv("OPENNEWS_AI_IMAGE_ENABLED", "0").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_AI_IMAGE_REPLACE_SOURCE = os.getenv("OPENNEWS_AI_IMAGE_REPLACE_SOURCE", "1").strip().lower() not in {"0", "false", "no", "off"}
-OPENNEWS_AI_IMAGE_ONLY = os.getenv("OPENNEWS_AI_IMAGE_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_AI_IMAGE_ONLY = os.getenv("OPENNEWS_AI_IMAGE_ONLY", "0").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL = (
     os.getenv("OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL", "1").strip().lower()
     not in {"0", "false", "no", "off"}
@@ -36,6 +36,11 @@ OPENNEWS_IMAGE_TIMEOUT_SECONDS = max(45, int(os.getenv("OPENNEWS_IMAGE_TIMEOUT_S
 OPENNEWS_IMAGE_MODEL = os.getenv("OPENNEWS_IMAGE_MODEL", "RealVisXL_V4.0_BakedVAE.safetensors").strip()
 OPENNEWS_IMAGE_STEPS = max(8, min(50, int(os.getenv("OPENNEWS_IMAGE_STEPS", "40") or "40")))
 OPENNEWS_IMAGE_CFG = float(os.getenv("OPENNEWS_IMAGE_CFG", "6.8") or "6.8")
+OPENNEWS_SOURCE_IMAGE_SKIN_SAFETY_ENABLED = (
+    os.getenv("OPENNEWS_SOURCE_IMAGE_SKIN_SAFETY_ENABLED", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_SOURCE_IMAGE_MAX_SKIN_RATIO = max(0.05, min(0.8, float(os.getenv("OPENNEWS_SOURCE_IMAGE_MAX_SKIN_RATIO", "0.28") or "0.28")))
 OPENNEWS_IMAGE_NEGATIVE_PROMPT = os.getenv(
     "OPENNEWS_IMAGE_NEGATIVE_PROMPT",
     (
@@ -745,6 +750,9 @@ def _download_source_material(url: str, output_dir: str, segment_index: int, mat
             if guessed_kind != "video" and file_size < 25 * 1024:
                 os.remove(output_path)
                 raise RuntimeError("图片素材文件过小，已跳过")
+            if guessed_kind != "video" and _downloaded_image_has_unsafe_skin_ratio(output_path):
+                os.remove(output_path)
+                raise RuntimeError("图片疑似包含大面积裸露/皮肤区域，已安全跳过")
             if download_url != url:
                 print(f"  ↗️ 已将新闻缩略图升级为高清素材：{os.path.basename(urlparse(download_url).path)}")
             return output_path
@@ -872,7 +880,11 @@ def _looks_like_unsafe_source_material_url(value: str) -> bool:
     parsed = urlparse(text)
     host = parsed.netloc.lower()
     haystack = f"{host} {parsed.path.lower()} {parsed.query.lower()}"
-    return any(token in haystack for token in SOURCE_MATERIAL_ADULT_TOKENS)
+    for token in SOURCE_MATERIAL_ADULT_TOKENS:
+        escaped = re.escape(token)
+        if re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", haystack):
+            return True
+    return False
 
 
 def _looks_like_unsafe_source_material(item: dict) -> bool:
@@ -883,6 +895,44 @@ def _looks_like_unsafe_source_material(item: dict) -> bool:
         item.get("related_query"),
     ]
     return any(_looks_like_unsafe_source_material_url(str(value or "")) for value in values)
+
+
+def _downloaded_image_has_unsafe_skin_ratio(path: str) -> bool:
+    if not OPENNEWS_SOURCE_IMAGE_SKIN_SAFETY_ENABLED:
+        return False
+    try:
+        from PIL import Image
+
+        image = Image.open(path).convert("RGB")
+        image.thumbnail((180, 180))
+        pixels = list(image.getdata())
+        if not pixels:
+            return False
+        skin_pixels = 0
+        bright_pixels = 0
+        for r, g, b in pixels:
+            max_channel = max(r, g, b)
+            min_channel = min(r, g, b)
+            if max_channel > 60:
+                bright_pixels += 1
+            rgb_skin = (
+                r > 95
+                and g > 40
+                and b > 20
+                and r > g
+                and r > b
+                and (max_channel - min_channel) > 15
+                and abs(r - g) > 12
+            )
+            # Catch pale skin tones that are common in unsafe editorial images.
+            pale_skin = r > 170 and 105 < g < 215 and 75 < b < 190 and r >= g >= b and (r - b) > 35
+            if rgb_skin or pale_skin:
+                skin_pixels += 1
+        denominator = max(1, bright_pixels or len(pixels))
+        skin_ratio = skin_pixels / denominator
+        return skin_ratio >= OPENNEWS_SOURCE_IMAGE_MAX_SKIN_RATIO
+    except Exception:
+        return False
 
 
 def _rank_source_material(item: dict) -> int:

@@ -140,12 +140,21 @@ def list_collection_pool(root: Path, output_root: Path, *, limit: int = 80, incl
         if not horizontal and not vertical:
             continue
         source = ((result.get("workflow_config") or {}).get("source") or {}).get("article") or {}
+        tts_providers = []
+        for segment in result.get("segments") or []:
+            if isinstance(segment, dict):
+                provider = str(segment.get("tts_provider") or segment.get("audio_provider") or "").strip()
+                if provider:
+                    tts_providers.append(provider)
+        primary_tts_provider = str(result.get("tts_provider") or "").strip() or (tts_providers[0] if tts_providers else "")
         items.append(
             {
                 "history_id": history_id,
                 "title": _opennews_title(result),
                 "topic": result.get("topic") or "",
                 "created_at": created_at,
+                "tts_provider": primary_tts_provider,
+                "tts_providers": list(dict.fromkeys(tts_providers)),
                 "source_name": source.get("source_name") or "",
                 "source_url": source.get("url") or "",
                 "published_at": source.get("published_at") or "",
@@ -247,6 +256,25 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
     collection_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = []
+    raw_intro_video_path = str(job.get("intro_video_path") or "").strip()
+    intro_video_path = Path(raw_intro_video_path) if raw_intro_video_path else None
+    if intro_video_path and intro_video_path.is_file():
+        intro_normalized = work_dir / "clip_00_intro.mp4"
+        update_collection_job(root, job_id, message="正在统一数字人开场片头...")
+        _run([
+            "ffmpeg", "-y",
+            "-i", str(intro_video_path),
+            "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30",
+            "-af", "aresample=48000,loudnorm=I=-15:TP=-1.5:LRA=11",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(intro_normalized),
+        ])
+        clips.append(intro_normalized)
     for index, item in enumerate(job.get("items") or [], start=1):
         video_path = Path(item.get(f"{aspect_ratio}_path") or item.get("horizontal_path") or item.get("vertical_path") or "")
         if not video_path.exists():
@@ -292,6 +320,8 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
         "aspect_ratio": aspect_ratio,
         "created_at": time.time(),
         "video_path": str(final_path),
+        "intro_video_path": str(intro_video_path) if intro_video_path and intro_video_path.is_file() else "",
+        "intro_script": str(job.get("intro_script") or ""),
         "items": collection_items,
         "description": "\n".join(f"{idx + 1}. {title}" for idx, title in enumerate(titles)),
     }

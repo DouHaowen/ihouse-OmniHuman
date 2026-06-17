@@ -16,7 +16,7 @@ from opennews_trends import search_english_trends
 
 DEFAULT_BATCH_CONFIG = {
     "enabled": False,
-    "interval_minutes": 30,
+    "interval_minutes": 120,
     "category": "all",
     "time_range": "6h",
     "limit": 20,
@@ -26,7 +26,7 @@ DEFAULT_BATCH_CONFIG = {
     "last_run_error": "",
 }
 
-VALID_INTERVALS = {5, 15, 30, 60, 180, 360}
+VALID_INTERVALS = {5, 15, 30, 60, 120, 180, 360}
 VALID_TIME_RANGES = {"1h", "6h", "24h"}
 VALID_CATEGORIES = {
     "all",
@@ -350,7 +350,7 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
             _write_json(_seen_path(root), seen)
             _write_json(_batch_path(root, batch_id), payload)
             config["last_run_at"] = payload["finished_at"]
-            config["next_run_at"] = payload["finished_at"] + int(config.get("interval_minutes") or 30) * 60 if config.get("enabled") else 0
+            config["next_run_at"] = payload["finished_at"] + int(config.get("interval_minutes") or DEFAULT_BATCH_CONFIG["interval_minutes"]) * 60 if config.get("enabled") else 0
             config["last_run_message"] = payload["message"]
             config["last_run_error"] = ""
             _write_json(_config_path(root), _normalize_config(config))
@@ -362,7 +362,7 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
         payload["message"] = f"抓取失败：{exc}"
         with _FILE_LOCK:
             config["last_run_at"] = payload["finished_at"]
-            config["next_run_at"] = payload["finished_at"] + int(config.get("interval_minutes") or 30) * 60 if config.get("enabled") else 0
+            config["next_run_at"] = payload["finished_at"] + int(config.get("interval_minutes") or DEFAULT_BATCH_CONFIG["interval_minutes"]) * 60 if config.get("enabled") else 0
             config["last_run_error"] = str(exc)
             config["last_run_message"] = payload["message"]
             _write_json(_config_path(root), _normalize_config(config))

@@ -13,6 +13,7 @@ load_dotenv(override=False)
 YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 YOUTUBE_UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
+YOUTUBE_THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube"
 
 
@@ -158,6 +159,7 @@ def upload_video_to_youtube(
     category_id: str = "25",
     made_for_kids: bool = False,
     publish_at: str = "",
+    thumbnail_path: Path | None = None,
 ) -> dict[str, Any]:
     if not video_path.exists() or not video_path.is_file():
         raise YouTubePublishError("要上传的 mp4 文件不存在")
@@ -211,10 +213,34 @@ def upload_video_to_youtube(
     video_id = str(result.get("id") or "").strip()
     if not video_id:
         raise YouTubePublishError("YouTube 上传完成但响应缺少 video id")
+    thumbnail_result: dict[str, Any] = {}
+    if thumbnail_path:
+        thumbnail_path = Path(thumbnail_path)
+        if thumbnail_path.exists() and thumbnail_path.is_file():
+            content_type = "image/png" if thumbnail_path.suffix.lower() == ".png" else "image/jpeg"
+            with thumbnail_path.open("rb") as image_file:
+                thumb_response = requests.post(
+                    YOUTUBE_THUMBNAIL_URL,
+                    params={"videoId": video_id},
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": content_type,
+                    },
+                    data=image_file,
+                    timeout=120,
+                )
+            if thumb_response.status_code >= 400:
+                thumbnail_result = {
+                    "ok": False,
+                    "error": f"YouTube 封面上传失败：{thumb_response.status_code} {thumb_response.text[:500]}",
+                }
+            else:
+                thumbnail_result = {"ok": True, "raw": thumb_response.json()}
     return {
         "video_id": video_id,
         "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
         "privacy_status": privacy_status,
         "title": body["snippet"]["title"],
+        "thumbnail": thumbnail_result,
         "raw": result,
     }
