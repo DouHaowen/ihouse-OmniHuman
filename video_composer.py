@@ -1010,6 +1010,12 @@ def _compose_history_video_unlocked(
         WIDTH, HEIGHT = 1920, 1080
     else:
         WIDTH, HEIGHT = 1080, 1920
+    workflow_config = result.get("workflow_config") or {}
+    strict_material_required = bool(
+        workflow_config.get("opennews")
+        or workflow_config.get("opennews_material_only")
+        or str(workflow_config.get("digital_human_engine") or "") == "opennews_material_only"
+    )
 
     work_dir = Path(tempfile.mkdtemp(prefix="ihouse_compose_"))
     build_dir = output_root / "final_edit"
@@ -1067,8 +1073,13 @@ def _compose_history_video_unlocked(
             if is_dh:
                 _prepare_video_segment(str(dh_video), duration, segment_video)
             else:
+                material_assets = _normalize_material_assets(seg.get("material_items") or seg.get("material_paths", []) or [])
+                if strict_material_required and not material_assets:
+                    raise RuntimeError(
+                        f"OpenNews 第 {idx} 段没有可用素材，已中止生成，避免白底占位画面。"
+                    )
                 _build_material_segment(
-                    seg.get("material_items") or seg.get("material_paths", []) or [],
+                    material_assets,
                     duration,
                     segment_video,
                     transition_id=transition_id,

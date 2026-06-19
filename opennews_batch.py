@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -44,6 +45,24 @@ _RUN_LOCK = threading.Lock()
 _SCHEDULER_STARTED = False
 _AFTER_FETCH_CALLBACK = None
 RETENTION_SECONDS = max(3600, int(os.getenv("OPENNEWS_BATCH_RETENTION_SECONDS", str(2 * 24 * 60 * 60)) or str(2 * 24 * 60 * 60)))
+EVENT_DUPLICATE_TOKEN_OVERLAP = max(
+    0.50,
+    min(0.95, float(os.getenv("OPENNEWS_BATCH_EVENT_DUPLICATE_TOKEN_OVERLAP", "0.72") or "0.72")),
+)
+EVENT_DUPLICATE_MIN_TOKENS = max(
+    4,
+    min(12, int(os.getenv("OPENNEWS_BATCH_EVENT_DUPLICATE_MIN_TOKENS", "5") or "5")),
+)
+
+TITLE_DEDUPE_STOPWORDS = {
+    "about", "after", "again", "against", "amid", "and", "are", "as", "at", "back",
+    "be", "been", "before", "being", "by", "can", "could", "day", "days", "for",
+    "from", "has", "have", "how", "in", "into", "is", "it", "its", "latest",
+    "live", "may", "more", "new", "news", "not", "of", "on", "over", "said",
+    "says", "say", "than", "that", "the", "their", "this", "to", "top", "update",
+    "updates", "video", "watch", "what", "when", "where", "why", "will", "with",
+    "would", "报道", "最新", "视频", "新闻", "更新",
+}
 
 
 def _config_path(root: Path) -> Path:
@@ -251,6 +270,103 @@ def _candidate_key(candidate: dict) -> str:
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:18]
 
 
+def _normalize_dedupe_word(token: str) -> str:
+    token = str(token or "").lower().strip("._-")
+    if len(token) > 5 and token.endswith("ies"):
+        token = token[:-3] + "y"
+    elif len(token) > 5 and token.endswith("ing"):
+        token = token[:-3]
+    elif len(token) > 4 and token.endswith("ed"):
+        token = token[:-2]
+    elif len(token) > 4 and token.endswith("es"):
+        token = token[:-2]
+    elif len(token) > 3 and token.endswith("s"):
+        token = token[:-1]
+    return token
+
+
+def _candidate_dedupe_text(candidate: dict) -> str:
+    fields = [
+        candidate.get("title"),
+        candidate.get("title_zh"),
+        candidate.get("translated_title"),
+        candidate.get("summary"),
+        candidate.get("summary_zh"),
+        candidate.get("translated_summary"),
+    ]
+    text = " ".join(str(field or "") for field in fields)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"[\u2018\u2019\u201c\u201d]", "'", text)
+    return text.lower()
+
+
+def _candidate_title_key(candidate: dict) -> str:
+    title = str(candidate.get("title") or candidate.get("title_zh") or candidate.get("translated_title") or "").lower()
+    title = re.sub(r"<[^>]+>", " ", title)
+    title = re.sub(r"https?://\S+", " ", title)
+    title = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", title)
+    words = []
+    for raw in title.split():
+        word = _normalize_dedupe_word(raw)
+        if len(word) < 2 or word in TITLE_DEDUPE_STOPWORDS:
+            continue
+        words.append(word)
+    compact = " ".join(words[:24]).strip()
+    return hashlib.sha1(compact.encode("utf-8")).hexdigest()[:18] if compact else ""
+
+
+def _candidate_event_tokens(candidate: dict) -> list[str]:
+    text = _candidate_dedupe_text(candidate)
+    aliases = {
+        "u.s.": "us",
+        "u.s": "us",
+        "united states": "us",
+        "wall street": "wallstreet",
+        "federal reserve": "fed",
+        "artificial intelligence": "ai",
+        "donald trump": "trump",
+    }
+    for source, replacement in aliases.items():
+        text = text.replace(source, f" {replacement} ")
+    raw_tokens = re.findall(r"[a-z0-9][a-z0-9.+-]{1,}|\b[\u4e00-\u9fff]{2,}\b", text)
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_tokens:
+        token = _normalize_dedupe_word(raw)
+        if len(token) < 2 or token in TITLE_DEDUPE_STOPWORDS:
+            continue
+        if token.isdigit() and len(token) < 4:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+        if len(tokens) >= 28:
+            break
+    return tokens
+
+
+def _candidate_event_key(candidate: dict) -> str:
+    tokens = _candidate_event_tokens(candidate)
+    if not tokens:
+        return ""
+    basis = " ".join(tokens[:18])
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:18]
+
+
+def _is_duplicate_event(candidate_tokens: list[str], existing_tokens: list[str]) -> bool:
+    if len(candidate_tokens) < EVENT_DUPLICATE_MIN_TOKENS or len(existing_tokens) < EVENT_DUPLICATE_MIN_TOKENS:
+        return False
+    candidate_set = set(candidate_tokens)
+    existing_set = set(existing_tokens)
+    overlap = len(candidate_set & existing_set)
+    if overlap >= 7:
+        return True
+    denominator = max(1, min(len(candidate_set), len(existing_set)))
+    return (overlap / denominator) >= EVENT_DUPLICATE_TOKEN_OVERLAP
+
+
 def _batch_path(root: Path, batch_id: str) -> Path:
     return _batches_dir(root) / f"{batch_id}.json"
 
@@ -323,19 +439,71 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
             seen = _read_json(_seen_path(root), {})
             if not isinstance(seen, dict):
                 seen = {}
+            seen_title_keys = {
+                str(value.get("title_key") or "")
+                for value in seen.values()
+                if isinstance(value, dict) and value.get("title_key")
+            }
+            seen_event_keys = {
+                str(value.get("event_key") or "")
+                for value in seen.values()
+                if isinstance(value, dict) and value.get("event_key")
+            }
+            seen_event_tokens = [
+                list(value.get("event_tokens") or [])
+                for value in seen.values()
+                if isinstance(value, dict) and isinstance(value.get("event_tokens"), list)
+            ]
             new_items = []
             duplicate_count = 0
+            duplicate_event_count = 0
             for candidate in candidates:
                 key = _candidate_key(candidate)
+                title_key = _candidate_title_key(candidate)
+                event_key = _candidate_event_key(candidate)
+                event_tokens = _candidate_event_tokens(candidate)
+                duplicate_reason = ""
                 if key in seen:
+                    duplicate_reason = "same_source_title"
+                elif title_key and title_key in seen_title_keys:
+                    duplicate_reason = "same_title"
+                elif event_key and event_key in seen_event_keys:
+                    duplicate_reason = "same_event_key"
+                elif any(_is_duplicate_event(event_tokens, existing_tokens) for existing_tokens in seen_event_tokens):
+                    duplicate_reason = "similar_event_tokens"
+                if duplicate_reason:
                     duplicate_count += 1
-                    seen[key]["last_seen_at"] = started_at
-                    seen[key]["seen_count"] = int(seen[key].get("seen_count") or 1) + 1
+                    if duplicate_reason != "same_source_title":
+                        duplicate_event_count += 1
+                    existing_key = key if key in seen else ""
+                    if not existing_key:
+                        for seen_key, seen_value in seen.items():
+                            if not isinstance(seen_value, dict):
+                                continue
+                            if title_key and seen_value.get("title_key") == title_key:
+                                existing_key = str(seen_key)
+                                break
+                            if event_key and seen_value.get("event_key") == event_key:
+                                existing_key = str(seen_key)
+                                break
+                            if _is_duplicate_event(event_tokens, list(seen_value.get("event_tokens") or [])):
+                                existing_key = str(seen_key)
+                                break
+                    if existing_key and isinstance(seen.get(existing_key), dict):
+                        seen[existing_key]["last_seen_at"] = started_at
+                        seen[existing_key]["seen_count"] = int(seen[existing_key].get("seen_count") or 1) + 1
+                        seen[existing_key]["last_duplicate_reason"] = duplicate_reason
                     continue
                 item = _candidate_payload(candidate, batch_id=batch_id, category=category, fetched_at=started_at)
+                item["dedupe_key"] = key
+                item["title_key"] = title_key
+                item["event_key"] = event_key
                 new_items.append(item)
                 seen[key] = {
                     "key": key,
+                    "title_key": title_key,
+                    "event_key": event_key,
+                    "event_tokens": event_tokens,
                     "title": item.get("title") or item.get("title_zh") or "",
                     "url": item.get("url") or "",
                     "first_seen_at": started_at,
@@ -343,10 +511,20 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
                     "seen_count": 1,
                     "batch_id": batch_id,
                 }
+                if title_key:
+                    seen_title_keys.add(title_key)
+                if event_key:
+                    seen_event_keys.add(event_key)
+                if event_tokens:
+                    seen_event_tokens.append(event_tokens)
             payload["items"] = new_items[:limit]
             payload["duplicate_count"] = duplicate_count
+            payload["duplicate_event_count"] = duplicate_event_count
             payload["finished_at"] = time.time()
-            payload["message"] = f"抓取完成：新增 {len(payload['items'])} 条，过滤重复 {duplicate_count} 条。"
+            payload["message"] = (
+                f"抓取完成：新增 {len(payload['items'])} 条，过滤重复 {duplicate_count} 条"
+                f"（跨来源/相似事件 {duplicate_event_count} 条）。"
+            )
             _write_json(_seen_path(root), seen)
             _write_json(_batch_path(root, batch_id), payload)
             config["last_run_at"] = payload["finished_at"]

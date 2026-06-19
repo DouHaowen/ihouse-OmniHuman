@@ -1,0 +1,2408 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>iHouse AI 视频工作台</title>
+  <script src="/public/assets/jclaw-lab-sdk.browser.js"></script>
+  <style>
+    :root {
+      --bg: #f4f0e8;
+      --surface: rgba(255, 255, 255, 0.88);
+      --surface-strong: #ffffff;
+      --ink: #172033;
+      --muted: #697386;
+      --line: rgba(23, 32, 51, 0.1);
+      --brand: #075f63;
+      --brand-2: #b91c1c;
+      --soft: #e8f3f1;
+      --soft-red: #fff1f2;
+      --shadow: 0 18px 48px rgba(17, 24, 39, 0.1);
+      --radius: 24px;
+      --gold: #c58a2c;
+      --night: #111827;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { background: var(--bg); }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% -6%, rgba(7, 95, 99, 0.22), transparent 28rem),
+        radial-gradient(circle at 100% 0%, rgba(197, 138, 44, 0.18), transparent 24rem),
+        radial-gradient(circle at 70% 28%, rgba(185, 28, 28, 0.09), transparent 18rem),
+        linear-gradient(150deg, #fbf7ee 0%, #eef5f2 54%, #f7efe8 100%);
+      font-family: "Avenir Next", "Hiragino Sans", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    }
+
+    button, input, select, textarea { font: inherit; }
+
+    .app {
+      width: min(1180px, 100%);
+      margin: 0 auto;
+      padding: 14px 14px calc(96px + var(--safe-bottom));
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: grid;
+      gap: 12px;
+      padding: 12px 0 14px;
+      backdrop-filter: blur(18px);
+    }
+
+    .brand-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      border-radius: 28px;
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(255, 252, 245, 0.78));
+      box-shadow: var(--shadow);
+    }
+
+    .brand-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .logo-mark {
+      display: grid;
+      flex: 0 0 auto;
+      width: 46px;
+      height: 46px;
+      place-items: center;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #063f43, #0c767a);
+      color: #fff;
+      font-weight: 950;
+      letter-spacing: -0.08em;
+      box-shadow: 0 12px 28px rgba(7, 95, 99, 0.24);
+    }
+
+    .brand-title {
+      min-width: 0;
+    }
+
+    .eyebrow {
+      color: var(--brand);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 2px 0 0;
+      font-size: clamp(22px, 6vw, 34px);
+      line-height: 1.05;
+      letter-spacing: -0.06em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .auth-pill {
+      flex: 0 0 auto;
+      max-width: 46%;
+      padding: 9px 12px;
+      border-radius: 999px;
+      background: var(--soft);
+      color: var(--brand);
+      font-size: 12px;
+      font-weight: 850;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      padding: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.64);
+      box-shadow: 0 10px 34px rgba(17, 24, 39, 0.07);
+    }
+
+    .tab {
+      border: 0;
+      border-radius: 999px;
+      padding: 11px 8px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 900;
+    }
+
+    .tab.active {
+      background: linear-gradient(135deg, #111827, #253042);
+      color: #fff;
+      box-shadow: 0 10px 22px rgba(17, 24, 39, 0.16);
+    }
+
+    .layout {
+      display: grid;
+      gap: 14px;
+    }
+
+    .view { display: none; }
+    .view.active { display: grid; gap: 14px; }
+
+    .card {
+      border: 1px solid rgba(255, 255, 255, 0.76);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .card-body { padding: 16px; }
+
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 16px 16px 0;
+    }
+
+    .section-title {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.25;
+      letter-spacing: -0.04em;
+    }
+
+    .subcopy {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+    }
+
+    .inline-tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 12px 16px 0;
+    }
+
+    .filter-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 9px;
+      padding: 14px 16px 0;
+    }
+
+    .search-input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 13px 14px;
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+    }
+
+    .filter-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .btn {
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 11px 15px;
+      background: var(--surface-strong);
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 900;
+      transition: transform 0.16s ease, opacity 0.16s ease, box-shadow 0.16s ease;
+    }
+
+    .btn:active { transform: translateY(1px); }
+    .btn:disabled { cursor: not-allowed; opacity: 0.52; box-shadow: none; }
+
+    .btn.primary {
+      border-color: transparent;
+      background: linear-gradient(135deg, #075f63, #0b777b);
+      color: #fff;
+      box-shadow: 0 12px 26px rgba(7, 95, 99, 0.22);
+    }
+
+    .btn.red {
+      border-color: transparent;
+      background: linear-gradient(135deg, #991b1b, #d21f2b);
+      color: #fff;
+      box-shadow: 0 12px 26px rgba(185, 28, 28, 0.2);
+    }
+
+    .btn.soft {
+      border-color: transparent;
+      background: var(--soft);
+      color: var(--brand);
+    }
+
+    .hero-action {
+      position: relative;
+      display: grid;
+      gap: 12px;
+      padding: 18px;
+      border-radius: 28px;
+      background: linear-gradient(135deg, #083f44, #0a6d70 58%, #b91c1c);
+      color: #fff;
+      box-shadow: 0 22px 60px rgba(7, 95, 99, 0.22);
+      overflow: hidden;
+      isolation: isolate;
+    }
+
+    .hero-action::after {
+      content: "";
+      position: absolute;
+      right: -42px;
+      top: -38px;
+      width: 170px;
+      height: 170px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      box-shadow: -44px 76px 0 rgba(255, 255, 255, 0.07);
+      z-index: -1;
+    }
+
+    .hero-digital {
+      background: linear-gradient(135deg, #062f35, #0a6f72 62%, #c58a2c);
+    }
+
+    .hero-property {
+      background: linear-gradient(135deg, #172033, #44515f 58%, #8c5b2d);
+    }
+
+    .hero-news {
+      background: linear-gradient(135deg, #171923, #8b1d25 60%, #d64545);
+    }
+
+    .hero-action h2 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.15;
+      letter-spacing: -0.05em;
+    }
+
+    .hero-label {
+      display: inline-flex;
+      width: fit-content;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.14);
+      color: rgba(255, 255, 255, 0.86);
+      font-size: 11px;
+      font-weight: 950;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .hero-action p {
+      margin: 0;
+      color: rgba(255, 255, 255, 0.76);
+      line-height: 1.7;
+      font-size: 14px;
+    }
+
+    .quick-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .stat {
+      padding: 12px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.14);
+      backdrop-filter: blur(12px);
+    }
+
+    .stat strong {
+      display: block;
+      font-size: 20px;
+    }
+
+    .stat span {
+      color: rgba(255, 255, 255, 0.72);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .batch {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.62);
+      overflow: hidden;
+    }
+
+    .batch + .batch { margin-top: 12px; }
+
+    .batch summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 15px;
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .batch summary::-webkit-details-marker { display: none; }
+
+    .batch-title {
+      min-width: 0;
+      font-weight: 950;
+      letter-spacing: -0.03em;
+    }
+
+    .meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .count-pill, .status {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 6px 9px;
+      background: #f2f4f7;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .status.done, .status.completed { background: var(--soft); color: var(--brand); }
+    .status.failed, .status.error { background: var(--soft-red); color: #be123c; }
+    .status.running, .status.partial, .status.publishing_youtube { background: #fff7ed; color: #9a3412; }
+
+    .news-item {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      padding: 14px 15px;
+      border-top: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.46);
+    }
+
+    .pick {
+      display: grid;
+      width: 28px;
+      height: 28px;
+      margin-top: 2px;
+      place-items: center;
+      border: 2px solid rgba(7, 95, 99, 0.24);
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .pick input {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--brand);
+    }
+
+    .news-title {
+      font-size: 15px;
+      font-weight: 950;
+      line-height: 1.42;
+      letter-spacing: -0.02em;
+    }
+
+    .summary {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.62;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .chip {
+      border-radius: 999px;
+      padding: 5px 8px;
+      background: #f4f6f7;
+      color: #596579;
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .form-grid {
+      display: grid;
+      gap: 13px;
+    }
+
+    .field {
+      display: grid;
+      gap: 7px;
+    }
+
+    .field label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 13px 14px;
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+    }
+
+    textarea {
+      min-height: 92px;
+      resize: vertical;
+      line-height: 1.55;
+    }
+
+    .switch-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fff;
+      color: var(--ink);
+      font-weight: 850;
+    }
+
+    .switch-row span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .switch-row input {
+      width: 20px;
+      height: 20px;
+      accent-color: var(--brand);
+    }
+
+    .job, .video {
+      padding: 14px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .job:last-child, .video:last-child { border-bottom: 0; }
+
+    .job-head, .video-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .job-title, .video-title {
+      font-weight: 950;
+      line-height: 1.42;
+    }
+
+    .progress-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .progress-item {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #d0d5dd;
+    }
+
+    .dot.done { background: var(--brand); }
+    .dot.failed { background: #be123c; }
+    .dot.running { background: #f97316; }
+
+    .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .link-btn {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 11px;
+      background: #fff;
+      color: var(--brand);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 900;
+      text-decoration: none;
+    }
+
+    .empty, .notice {
+      padding: 16px;
+      border: 1px dashed var(--line);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.6);
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.65;
+    }
+
+    .notice.error {
+      border-color: rgba(190, 18, 60, 0.28);
+      background: #fff1f2;
+      color: #be123c;
+    }
+
+    .bottom-bar {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 30;
+      padding: 12px 14px calc(12px + var(--safe-bottom));
+      background: linear-gradient(180deg, rgba(246, 244, 239, 0), rgba(246, 244, 239, 0.92) 22%, rgba(246, 244, 239, 0.98));
+      backdrop-filter: blur(18px);
+    }
+
+    .bottom-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      width: min(1180px, 100%);
+      margin: 0 auto;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: 0 18px 52px rgba(17, 24, 39, 0.16);
+    }
+
+    .selected-mini {
+      padding-left: 8px;
+      font-weight: 950;
+      white-space: nowrap;
+    }
+
+    .selected-mini span {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+    }
+
+    .tool-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    .production-panel {
+      display: grid;
+      gap: 14px;
+      padding: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.78);
+      border-radius: 28px;
+      background: rgba(255, 255, 255, 0.82);
+      box-shadow: 0 16px 42px rgba(17, 24, 39, 0.08);
+    }
+
+    .production-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .production-head h3 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.04em;
+    }
+
+    .form-split {
+      display: grid;
+      gap: 12px;
+    }
+
+    .form-split.two {
+      grid-template-columns: 1fr;
+    }
+
+    .tool-card {
+      position: relative;
+      display: grid;
+      gap: 12px;
+      padding: 16px;
+      border: 1px solid rgba(15, 118, 110, 0.16);
+      border-radius: 24px;
+      background:
+        radial-gradient(circle at top right, rgba(220, 38, 38, 0.11), transparent 36%),
+        linear-gradient(135deg, #fff 0%, #f4fbf9 100%);
+      box-shadow: 0 16px 42px rgba(15, 23, 42, 0.07);
+      overflow: hidden;
+    }
+
+    .tool-card::after {
+      content: "";
+      position: absolute;
+      right: -24px;
+      bottom: -34px;
+      width: 116px;
+      height: 116px;
+      border-radius: 999px;
+      border: 24px solid rgba(15, 118, 110, 0.08);
+    }
+
+    .tool-card h3 {
+      position: relative;
+      z-index: 1;
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.04em;
+    }
+
+    .tool-card p {
+      position: relative;
+      z-index: 1;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    .tool-card .actions { position: relative; z-index: 1; }
+
+    .feature-card {
+      position: relative;
+      display: grid;
+      gap: 10px;
+      padding: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.78);
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.78);
+      box-shadow: 0 14px 38px rgba(17, 24, 39, 0.07);
+      overflow: hidden;
+    }
+
+    .feature-card strong {
+      display: block;
+      font-size: 17px;
+      letter-spacing: -0.04em;
+    }
+
+    .feature-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .step-index {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 13px;
+      background: var(--soft);
+      color: var(--brand);
+      font-size: 13px;
+      font-weight: 950;
+    }
+
+    .quick-entry {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border: 1px solid rgba(7, 95, 99, 0.12);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.74);
+      box-shadow: 0 12px 32px rgba(17, 24, 39, 0.06);
+    }
+
+    .quick-entry strong {
+      display: block;
+      font-size: 15px;
+      letter-spacing: -0.03em;
+    }
+
+    .quick-entry span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .avatar-picker {
+      display: grid;
+      gap: 10px;
+    }
+
+    .avatar-strip {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .avatar-choice {
+      position: relative;
+      display: grid;
+      gap: 8px;
+      padding: 8px;
+      border: 2px solid transparent;
+      border-radius: 20px;
+      background: #fff;
+      cursor: pointer;
+      box-shadow: 0 10px 28px rgba(17, 24, 39, 0.06);
+      text-align: left;
+    }
+
+    .avatar-choice.selected {
+      border-color: var(--brand);
+      background: #f3fbf9;
+    }
+
+    .avatar-choice img {
+      width: 100%;
+      aspect-ratio: 4 / 5;
+      border-radius: 16px;
+      object-fit: cover;
+      background: #eef2f4;
+    }
+
+    .avatar-choice strong {
+      display: block;
+      overflow: hidden;
+      font-size: 13px;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .avatar-choice span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+    }
+
+    .avatar-check {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: grid;
+      width: 26px;
+      height: 26px;
+      place-items: center;
+      border-radius: 999px;
+      background: rgba(17, 24, 39, 0.74);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 950;
+    }
+
+    .compact-form {
+      display: grid;
+      gap: 12px;
+    }
+
+    .compact-form .field {
+      padding: 0;
+      border: 0;
+      background: transparent;
+    }
+
+    .compact-form input[type="text"],
+    .compact-form input[type="number"],
+    .compact-form select,
+    .compact-form textarea {
+      width: 100%;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 800;
+      outline: none;
+    }
+
+    .compact-form textarea {
+      min-height: 132px;
+      resize: vertical;
+      line-height: 1.55;
+    }
+
+    .compact-form input[type="file"] {
+      width: 100%;
+      padding: 13px;
+      border: 1px dashed rgba(15, 118, 110, 0.34);
+      border-radius: 18px;
+      background: #fff;
+      color: var(--muted);
+    }
+
+    .task-block {
+      display: grid;
+      gap: 10px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: #fff;
+    }
+
+    .task-block + .task-block { margin-top: 10px; }
+
+    .task-title {
+      font-weight: 950;
+      line-height: 1.45;
+    }
+
+    .desktop-side { display: none; }
+
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      background: rgba(15, 23, 42, 0.42);
+      backdrop-filter: blur(10px);
+    }
+
+    .drawer-backdrop.open { display: block; }
+
+    .drawer {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 60;
+      display: grid;
+      gap: 12px;
+      max-height: min(82vh, 760px);
+      padding: 14px 14px calc(16px + var(--safe-bottom));
+      border-radius: 28px 28px 0 0;
+      background: #fbfaf7;
+      box-shadow: 0 -22px 70px rgba(15, 23, 42, 0.22);
+      transform: translateY(110%);
+      transition: transform 0.22s ease;
+    }
+
+    .drawer.open { transform: translateY(0); }
+
+    .drawer-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 2px 2px 0;
+    }
+
+    .drawer-title {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.2;
+      letter-spacing: -0.04em;
+    }
+
+    .drawer-content {
+      min-height: 0;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .detail-row {
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fff;
+    }
+
+    .detail-row + .detail-row { margin-top: 10px; }
+
+    .detail-title {
+      font-weight: 950;
+      line-height: 1.45;
+    }
+
+    .video-preview {
+      width: 100%;
+      max-height: 62vh;
+      border-radius: 22px;
+      background: #111827;
+      box-shadow: var(--shadow);
+    }
+
+    .preview-meta {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    @media (min-width: 900px) {
+      .app { padding: 20px 18px 112px; }
+      .topbar { top: 0; }
+      .layout { display: block; }
+      .mobile-main { min-width: 0; }
+      .desktop-side { display: none !important; }
+      .brand-card { padding: 18px 20px; }
+      .news-title { font-size: 16px; }
+      .tool-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .feature-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .quick-entry { grid-column: span 3; }
+      .form-split.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .avatar-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .drawer {
+        left: 50%;
+        right: auto;
+        width: min(720px, calc(100vw - 36px));
+        transform: translate(-50%, 110%);
+        border-radius: 28px;
+        bottom: 18px;
+      }
+      .drawer.open { transform: translate(-50%, 0); }
+    }
+
+    @media (max-width: 899px) {
+      .desktop-only { display: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <section class="brand-card">
+        <div class="brand-left">
+          <div class="logo-mark">IH</div>
+          <div class="brand-title">
+            <div class="eyebrow">iHouse AI Lab</div>
+            <h1>AI 视频工作台</h1>
+          </div>
+        </div>
+        <div class="auth-pill" id="authPill">连接中...</div>
+      </section>
+      <nav class="tabs">
+        <button class="tab active" data-tab="digital">数字人</button>
+        <button class="tab" data-tab="property">房源实拍</button>
+        <button class="tab" data-tab="news">新闻视频</button>
+      </nav>
+    </header>
+
+    <section class="layout">
+      <div class="mobile-main">
+        <section class="view active" data-view="digital">
+          <div class="hero-action hero-digital">
+            <div>
+              <div class="hero-label">Digital Human</div>
+              <h2>数字人视频</h2>
+              <p>输入选题后自动生成脚本、配音、数字人和素材段，适合业务口播和短视频内容。</p>
+            </div>
+            <div class="quick-stats">
+              <div class="stat"><strong id="digitalTaskSummary">0</strong><span>进行中/历史</span></div>
+              <div class="stat"><strong>3</strong><span>数字人段</span></div>
+              <div class="stat"><strong>Auto</strong><span>素材段</span></div>
+            </div>
+            <div class="actions">
+              <button class="btn primary" type="submit" form="digitalInlineForm">生成数字人视频</button>
+            </div>
+          </div>
+
+          <div class="production-panel">
+            <div class="production-head">
+              <div>
+                <div class="eyebrow">Create</div>
+                <h3>新建数字人视频</h3>
+              </div>
+              <button class="btn" data-open-tool="tasks">任务</button>
+            </div>
+            <form class="compact-form" id="digitalInlineForm">
+              <div class="field">
+                <label for="digitalInlineTopic">视频选题</label>
+                <textarea id="digitalInlineTopic" name="topic" placeholder="例如：大阪人跟其他地区比起来真的很特别？住在这里你需要知道的事"></textarea>
+              </div>
+              <label class="switch-row">
+                <div>启用实时联网检索<br><span>适合政策、新闻、近期市场变化。</span></div>
+                <input type="checkbox" id="digitalInlineWebSearch" name="use_web_search">
+              </label>
+              <div class="form-split two">
+                <div class="field">
+                  <label for="digitalInlineMarket">目标市场</label>
+                  <select id="digitalInlineMarket" name="target_market"></select>
+                </div>
+                <div class="field">
+                  <label for="digitalInlineVoice">配音音色</label>
+                  <select id="digitalInlineVoice" name="voice_preset_id"></select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="digitalInlineAvatar">主播图片</label>
+                <select id="digitalInlineAvatar" name="avatar_id" hidden></select>
+                <div class="avatar-picker">
+                  <div class="avatar-strip" id="digitalAvatarGrid">
+                    <div class="empty">正在加载主播图片...</div>
+                  </div>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="btn primary" type="submit">生成数字人视频</button>
+                <button class="btn" type="button" data-open-tool="tasks">查看任务</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="feature-grid">
+            <article class="quick-entry">
+              <div>
+                <strong>查看任务与成片</strong>
+                <span>查看数字人、房源实拍和新闻视频的生成进度与下载地址。</span>
+              </div>
+              <button class="btn" data-open-tool="tasks">查看</button>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="property">
+          <div class="hero-action hero-property">
+            <div>
+              <div class="hero-label">Property Video</div>
+              <h2>房源实拍成片</h2>
+              <p>上传销售实拍视频和解说文案，系统自动生成配音、字幕并拼接成完整房源视频。</p>
+            </div>
+            <div class="quick-stats">
+              <div class="stat"><strong>MP4</strong><span>多片段</span></div>
+              <div class="stat"><strong>Voice</strong><span>自动配音</span></div>
+              <div class="stat"><strong>Sub</strong><span>自动字幕</span></div>
+            </div>
+            <div class="actions">
+              <button class="btn red" type="submit" form="propertyInlineForm">生成房源成片</button>
+              <button class="btn" data-open-tool="tasks">查看任务概览</button>
+            </div>
+          </div>
+
+          <div class="production-panel">
+            <div class="production-head">
+              <div>
+                <div class="eyebrow">Create</div>
+                <h3>新建房源实拍成片</h3>
+              </div>
+              <button class="btn" data-open-tool="tasks">任务</button>
+            </div>
+            <form class="compact-form" id="propertyInlineForm">
+              <div class="field">
+                <label for="propertyInlineFiles">房源视频片段</label>
+                <input id="propertyInlineFiles" name="videos" type="file" accept="video/*" multiple>
+              </div>
+              <div class="field">
+                <label for="propertyInlineScript">销售解说文案</label>
+                <textarea id="propertyInlineScript" name="script_text" placeholder="把销售想讲的内容写在这里，系统会配音、字幕并拼接成片。"></textarea>
+              </div>
+              <div class="form-split two">
+                <div class="field">
+                  <label for="propertyInlineMarket">目标市场</label>
+                  <select id="propertyInlineMarket" name="target_market"></select>
+                </div>
+                <div class="field">
+                  <label for="propertyInlineVoice">解说音色</label>
+                  <select id="propertyInlineVoice" name="voice_preset_id"></select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="propertyInlineSpeed">语速</label>
+                <input id="propertyInlineSpeed" name="speed" type="number" value="1.10" min="0.80" max="1.30" step="0.05">
+              </div>
+              <div class="actions">
+                <button class="btn red" type="submit">生成房源成片</button>
+                <button class="btn" type="button" data-open-tool="tasks">查看任务</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="feature-grid">
+            <article class="feature-card">
+              <div>
+                <div class="step-index">1</div>
+              </div>
+              <strong>视频顺序拼接</strong>
+              <p>支持一个长视频，也支持多个房间片段，系统会按上传顺序拼接。</p>
+            </article>
+            <article class="feature-card">
+              <div>
+                <div class="step-index">2</div>
+              </div>
+              <strong>销售文案配音</strong>
+              <p>销售写好想介绍的内容，系统负责配音、字幕和时间匹配。</p>
+            </article>
+            <article class="feature-card">
+              <div>
+                <div class="step-index">3</div>
+              </div>
+              <strong>生成最终成片</strong>
+              <p>生成后的成片会进入任务中心，可以预览和下载。</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-view="news">
+          <div class="hero-action hero-news">
+            <div>
+              <div class="hero-label">OpenNews</div>
+              <h2>新闻视频自动化</h2>
+              <p>后台按规则抓取热点、制作 Shorts 和合集视频，并自动发布到 YouTube。</p>
+            </div>
+            <div class="quick-stats">
+              <div class="stat"><strong>2h</strong><span>自动批次</span></div>
+              <div class="stat"><strong>Shorts</strong><span>热度最高</span></div>
+              <div class="stat"><strong>合集</strong><span>横屏发布</span></div>
+            </div>
+            <div class="actions">
+              <button class="btn primary" id="openNewsStatusBtn">查看任务与成片</button>
+              <button class="btn" id="refreshNewsStatusBtn">刷新状态</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title">OpenNews 自动化状态</h2>
+                <p class="subcopy">新闻会按后台规则自动抓取、制作和发布。这里默认只保留状态入口。</p>
+              </div>
+              <span class="count-pill" id="batchCount">0</span>
+            </div>
+            <div class="card-body">
+              <div class="notice">
+                OpenNews 已改为自动化生产为主。一般不需要手动操作，需要排查时再展开高级候选区。
+              </div>
+              <details class="batch" style="margin-top:14px">
+                <summary>
+                  <span>
+                    <div class="batch-title">高级：手动查看候选新闻</div>
+                    <div class="meta">一般不需要使用，仅用于临时检查或手动选题。</div>
+                  </span>
+                  <span class="count-pill">展开</span>
+                </summary>
+                <div class="inline-tools" style="padding:14px 14px 0">
+                  <button class="btn red" id="runNowBtn">手动抓取热点</button>
+                  <button class="btn soft" id="selectLatestBtn">全选最新批次</button>
+                  <button class="btn" id="clearSelectedBtn">清空选择</button>
+                </div>
+                <div class="filter-grid" style="padding:14px 14px 0">
+                  <input class="search-input" id="newsSearch" placeholder="搜索新闻标题、摘要、来源..." autocomplete="off">
+                  <div class="filter-row">
+                    <select id="categoryFilter">
+                      <option value="all">全部分类</option>
+                      <option value="ai">AI</option>
+                      <option value="科技">科技</option>
+                      <option value="金融">金融</option>
+                      <option value="政治">政治</option>
+                      <option value="军事">军事</option>
+                      <option value="房产">房产</option>
+                      <option value="移民">移民</option>
+                    </select>
+                    <select id="statusFilter">
+                      <option value="all">全部状态</option>
+                      <option value="new">未制作</option>
+                      <option value="processing">制作中</option>
+                      <option value="done">已完成</option>
+                      <option value="failed">失败</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="card-body" id="batchList">
+                  <div class="empty">正在加载新闻批次...</div>
+                </div>
+              </details>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <footer class="bottom-bar">
+    <div class="bottom-inner">
+      <div class="selected-mini" id="selectedMini">已选 0 条<span id="settingMini">中文 · 横屏+竖屏 · 自动发布</span></div>
+      <button class="btn primary" id="produceBtn">开始制作</button>
+    </div>
+  </footer>
+
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <section class="drawer" id="detailDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <div class="eyebrow">Task Detail</div>
+        <h2 class="drawer-title" id="detailTitle">任务详情</h2>
+      </div>
+      <button class="btn" data-close-drawer>关闭</button>
+    </div>
+    <div class="drawer-content" id="detailContent"></div>
+  </section>
+
+  <section class="drawer" id="previewDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <div class="eyebrow">Preview</div>
+        <h2 class="drawer-title" id="previewTitle">成片预览</h2>
+      </div>
+      <button class="btn" data-close-drawer>关闭</button>
+    </div>
+    <div class="drawer-content" id="previewContent"></div>
+  </section>
+
+  <section class="drawer" id="toolDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <div class="eyebrow" id="toolEyebrow">Tool</div>
+        <h2 class="drawer-title" id="toolTitle">生产工具</h2>
+      </div>
+      <button class="btn" data-close-drawer>关闭</button>
+    </div>
+    <div class="drawer-content" id="toolContent"></div>
+  </section>
+
+  <section class="drawer" id="taskDrawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <div class="eyebrow">Task Center</div>
+        <h2 class="drawer-title">任务与成片</h2>
+      </div>
+      <button class="btn" data-close-drawer>关闭</button>
+    </div>
+    <div class="drawer-content">
+      <div class="quick-stats">
+        <div class="stat"><strong id="labTaskSummary">0</strong><span>数字人/房源</span></div>
+        <div class="stat"><strong id="openNewsJobSummary">0</strong><span>新闻任务</span></div>
+        <div class="stat"><strong id="videoSummary">0</strong><span>最近成片</span></div>
+      </div>
+      <div class="notice" id="taskSummaryText" style="margin-top:12px">暂无正在处理的任务。</div>
+      <details class="batch" style="margin-top:14px">
+        <summary>
+          <span>
+            <div class="batch-title">数字人 / 房源任务明细</div>
+            <div class="meta">只在需要排查或下载时展开。</div>
+          </span>
+          <span class="count-pill">展开</span>
+        </summary>
+        <div class="card-body" id="labTaskList">
+          <div class="empty">暂无数字人或房源任务。</div>
+        </div>
+      </details>
+      <details class="batch" style="margin-top:12px">
+        <summary>
+          <span>
+            <div class="batch-title">OpenNews 后台任务</div>
+            <div class="meta">自动化新闻生成与发布进度。</div>
+          </span>
+          <span class="count-pill">展开</span>
+        </summary>
+        <div class="card-body" id="jobList">
+          <div class="empty">暂无任务。</div>
+        </div>
+      </details>
+      <details class="batch" style="margin-top:12px">
+        <summary>
+          <span>
+            <div class="batch-title">最近成片</div>
+            <div class="meta">下载视频或打开 YouTube 时展开。</div>
+          </span>
+          <span class="count-pill">展开</span>
+        </summary>
+        <div class="card-body" id="videoList">
+          <div class="empty">暂无成片。</div>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <template id="settingsTemplate">
+    <div class="form-grid">
+      <div class="field">
+        <label for="targetMarket">生成语言/市场</label>
+        <select id="targetMarket">
+          <option value="cn">简体中文 / 中国市场</option>
+          <option value="tw">繁体中文 / 台湾市场</option>
+          <option value="jp">日文 / 日本市场</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="aspectRatio">主预览画幅</label>
+        <select id="aspectRatio">
+          <option value="vertical">竖屏 9:16</option>
+          <option value="horizontal">横屏 16:9</option>
+        </select>
+      </div>
+      <div class="switch-list">
+        <label class="switch-row">
+          <div>自动发布 YouTube<br><span>生成完成后按后端配置发布</span></div>
+          <input type="checkbox" id="youtubeAuto" checked>
+        </label>
+        <label class="switch-row">
+          <div>生成横屏<br><span>适合 YouTube 正片</span></div>
+          <input type="checkbox" id="makeHorizontal" checked>
+        </label>
+        <label class="switch-row">
+          <div>生成竖屏 Shorts<br><span>适合短视频流</span></div>
+          <input type="checkbox" id="makeVertical" checked>
+        </label>
+      </div>
+      <div class="field">
+        <label for="notes">制作要求</label>
+        <textarea id="notes" placeholder="例如：突出影响和背景，做成短新闻口播。"></textarea>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    const state = {
+      token: "",
+      user: null,
+      batches: [],
+      jobs: [],
+      videos: [],
+      labTasks: [],
+      options: null,
+      selected: new Set(),
+      filters: { q: "", category: "all", status: "all" },
+      labMe: null,
+      activeTab: "digital",
+      polling: null,
+      previewObjectUrl: "",
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }[ch]));
+    }
+
+    function formatTime(ts) {
+      const value = Number(ts || 0);
+      if (!value) return "";
+      return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+    }
+
+    function toast(message, isError = false) {
+      if (window.jclaw?.ui?.toast && window.jclaw.isHosted()) {
+        window.jclaw.ui.toast(message).catch(() => {});
+      } else {
+        console.log(isError ? "[error]" : "[toast]", message);
+      }
+    }
+
+    async function confirmAction(message) {
+      if (window.jclaw?.ui?.confirm && window.jclaw.isHosted()) {
+        try {
+          const result = await window.jclaw.ui.confirm(message);
+          if (typeof result === "boolean") return result;
+          if (result && typeof result === "object") return result.ok !== false && result.confirmed !== false;
+        } catch (_) {
+          return window.confirm(message);
+        }
+      }
+      return window.confirm(message);
+    }
+
+    function cloneSettings() {
+      const tpl = $("settingsTemplate");
+      if ($("settingsPanel")) {
+        $("settingsPanel").innerHTML = "";
+        $("settingsPanel").appendChild(tpl.content.cloneNode(true));
+      }
+      if ($("desktopSettingsPanel")) {
+        $("desktopSettingsPanel").innerHTML = "";
+        $("desktopSettingsPanel").appendChild(tpl.content.cloneNode(true));
+      }
+      syncSettingsListeners();
+    }
+
+    function readSetting(id) {
+      const visible = Array.from(document.querySelectorAll(`#${id}`)).find((el) => el.offsetParent !== null) || document.querySelector(`#${id}`);
+      if (!visible) return "";
+      if (visible.type === "checkbox") return visible.checked;
+      return visible.value;
+    }
+
+    function syncSettingsListeners() {
+      ["targetMarket", "aspectRatio", "notes"].forEach((id) => {
+        document.querySelectorAll(`#${id}`).forEach((el) => {
+          el.addEventListener("input", () => {
+            document.querySelectorAll(`#${id}`).forEach((peer) => {
+              if (peer !== el) peer.value = el.value;
+            });
+            updateSettingSummary();
+          });
+        });
+      });
+      ["youtubeAuto", "makeHorizontal", "makeVertical"].forEach((id) => {
+        document.querySelectorAll(`#${id}`).forEach((el) => {
+          el.addEventListener("change", () => {
+            document.querySelectorAll(`#${id}`).forEach((peer) => {
+              if (peer !== el) peer.checked = el.checked;
+            });
+            updateSettingSummary();
+          });
+        });
+      });
+      updateSettingSummary();
+    }
+
+    async function setupJClaw() {
+      const jclaw = window.jclaw;
+      if (!jclaw) {
+        toast("SDK 未加载", true);
+        return;
+      }
+      if (!jclaw.isHosted()) {
+        jclaw.mock({
+          auth: {
+            getUser: () => ({ id: "browser", username: "browser", displayName: "浏览器预览" }),
+            getToken: () => ({ token: "", tokenType: "Bearer", expiresIn: 0 }),
+          },
+          navigation: { setTitle: () => true },
+          ui: { toast: ({ text }) => console.log("[toast]", text), loading: () => true },
+          lifecycle: { ready: () => true },
+        });
+      }
+      try {
+        await jclaw.ready();
+        await jclaw.navigation.setTitle("iHouse AI 视频").catch(() => {});
+        state.user = await jclaw.auth.getUser().catch(() => null);
+        const tokenResult = await jclaw.auth.getToken().catch(() => null);
+        state.token = tokenResult?.token || "";
+        setAccountPill(state.token ? (state.user?.displayName || state.user?.username || "用户") : "预览模式");
+      } catch (err) {
+        setAccountPill("未登录", true);
+        toast(`连接失败：${err.message || err}`, true);
+      }
+    }
+
+    function setAccountPill(label, isError = false) {
+      const el = $("authPill");
+      if (!el) return;
+      el.textContent = label || "未登录";
+      el.style.background = isError ? "var(--soft-red)" : "var(--soft)";
+      el.style.color = isError ? "#be123c" : "var(--brand)";
+    }
+
+    function renderDebugCard() {
+      const aiUser = state.labMe?.username || state.user?.username || state.user?.displayName || (state.token ? "已连接" : "预览模式");
+      setAccountPill(aiUser);
+    }
+
+    async function refreshLabMe() {
+      renderDebugCard();
+      try {
+        const data = await apiFetch("/api/lab/opennews/me");
+        state.labMe = data.user || null;
+        renderDebugCard();
+      } catch (err) {
+        setAccountPill(state.token ? "未映射" : "预览模式", Boolean(state.token));
+      }
+    }
+
+    async function apiFetch(path, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (state.token) headers.Authorization = `Bearer ${state.token}`;
+      if (options.body && !(options.body instanceof FormData)) headers["Content-Type"] = "application/json";
+      const res = await fetch(path, { ...options, headers, credentials: "include" });
+      const contentType = res.headers.get("content-type") || "";
+      const data = contentType.includes("application/json") ? await res.json() : await res.text();
+      if (!res.ok) {
+        throw new Error(data?.error || data?.message || String(data || `HTTP ${res.status}`));
+      }
+      return data;
+    }
+
+    async function loadWorkbenchOptions() {
+      if (state.options) return state.options;
+      const data = await apiFetch("/api/lab/workbench/options");
+      state.options = data || {};
+      return state.options;
+    }
+
+    function optionTags(items, selectedValue = "", labelFn = null) {
+      return (items || []).map((item) => {
+        const value = item.id || item.key || item.code || item.value || "";
+        const label = labelFn ? labelFn(item) : (item.label || item.name || item.display_name || value);
+        return `<option value="${escapeHtml(value)}" ${String(value) === String(selectedValue || "") ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      }).join("");
+    }
+
+    function selectedMarketId() {
+      return state.options?.current_user?.target_market || readSetting("targetMarket") || "cn";
+    }
+
+    function voiceOptionsHtml() {
+      const market = selectedMarketId();
+      const voices = (state.options?.voice_presets || []).filter((voice) => {
+        const markets = voice.markets || voice.target_markets || [];
+        return voice.enabled !== false && (!markets.length || markets.includes(market));
+      });
+      return optionTags(voices, "", (voice) => `${voice.label || voice.name || voice.id} · ${voice.gender_label || voice.gender || ""}`.trim());
+    }
+
+    function labVisibleAvatars() {
+      return (state.options?.avatars || []).filter((avatar) => {
+        const id = String(avatar.id || avatar.filename || "").toLowerCase();
+        const name = String(avatar.name || avatar.label || "").toLowerCase();
+        return !id.includes("opennews_anchor_daily") && !name.includes("opennews_anchor_daily");
+      });
+    }
+
+    function avatarOptionsHtml() {
+      return optionTags(labVisibleAvatars(), "", (avatar) => `${avatar.label || avatar.name || avatar.id} · ${avatar.gender_label || avatar.gender || ""}`.trim());
+    }
+
+    function targetMarketOptionsHtml() {
+      return optionTags(state.options?.target_markets || [], selectedMarketId(), (market) => market.label || market.name || market.id);
+    }
+
+    function setSelectOptions(id, html) {
+      const el = $(id);
+      if (el) el.innerHTML = html;
+    }
+
+    function avatarLabel(avatar) {
+      return avatar.name || avatar.label || avatar.id || "主播";
+    }
+
+    function avatarMeta(avatar) {
+      const gender = avatar.gender === "female" ? "女主播" : avatar.gender === "male" ? "男主播" : "主播";
+      const markets = (avatar.allowed_target_markets || []).join(" / ");
+      return markets ? `${gender} · ${markets}` : gender;
+    }
+
+    function renderInlineAvatarGrid() {
+      const grid = $("digitalAvatarGrid");
+      const select = $("digitalInlineAvatar");
+      if (!grid || !select) return;
+      const avatars = labVisibleAvatars();
+      if (!avatars.length) {
+        grid.innerHTML = '<div class="empty">暂无可用主播图片。</div>';
+        return;
+      }
+      const selectedId = select.value || avatars[0].id || "";
+      if (!select.value && selectedId) select.value = selectedId;
+      grid.innerHTML = avatars.map((avatar) => {
+        const id = avatar.id || "";
+        const selected = id === selectedId;
+        return `
+          <button class="avatar-choice ${selected ? "selected" : ""}" type="button" data-avatar-choice="${escapeHtml(id)}">
+            <img src="${escapeHtml(avatar.image_url || "")}" alt="${escapeHtml(avatarLabel(avatar))}">
+            <span class="avatar-check">${selected ? "✓" : ""}</span>
+            <strong>${escapeHtml(avatarLabel(avatar))}</strong>
+            <span>${escapeHtml(avatarMeta(avatar))}</span>
+          </button>
+        `;
+      }).join("");
+    }
+
+    async function hydrateInlineProductionForms() {
+      try {
+        await loadWorkbenchOptions();
+        setSelectOptions("digitalInlineMarket", targetMarketOptionsHtml());
+        setSelectOptions("digitalInlineVoice", voiceOptionsHtml());
+        setSelectOptions("digitalInlineAvatar", `<option value="">自动匹配</option>${avatarOptionsHtml()}`);
+        renderInlineAvatarGrid();
+        setSelectOptions("propertyInlineMarket", targetMarketOptionsHtml());
+        setSelectOptions("propertyInlineVoice", voiceOptionsHtml());
+      } catch (err) {
+        toast(`配置加载失败：${err.message || err}`, true);
+      }
+    }
+
+    function updateTaskSummary() {
+      const labCount = state.labTasks.length;
+      const jobCount = state.jobs.length;
+      const videoCount = state.videos.length;
+      if ($("labTaskSummary")) $("labTaskSummary").textContent = labCount;
+      if ($("digitalTaskSummary")) $("digitalTaskSummary").textContent = labCount;
+      if ($("openNewsJobSummary")) $("openNewsJobSummary").textContent = jobCount;
+      if ($("videoSummary")) $("videoSummary").textContent = videoCount;
+      const runningLab = state.labTasks.filter((task) => !["done", "completed", "failed", "error"].includes(String(task.status || "").toLowerCase())).length;
+      const failedLab = state.labTasks.filter((task) => ["failed", "error"].includes(String(task.status || "").toLowerCase())).length;
+      const runningNews = state.jobs.filter((job) => !["done", "completed", "failed", "error"].includes(String(job.status || "").toLowerCase())).length;
+      const failedNews = state.jobs.filter((job) => ["failed", "error"].includes(String(job.status || "").toLowerCase())).length;
+      const parts = [];
+      if (runningLab) parts.push(`${runningLab} 个数字人/房源任务处理中`);
+      if (runningNews) parts.push(`${runningNews} 个新闻任务处理中`);
+      if (failedLab || failedNews) parts.push(`${failedLab + failedNews} 个任务需要检查`);
+      if (!parts.length && videoCount) parts.push(`最近已有 ${videoCount} 条成片可查看`);
+      $("taskSummaryText").textContent = parts.join("，") || "暂无正在处理的任务。";
+      $("taskSummaryText").className = (failedLab || failedNews) ? "notice error" : "notice";
+    }
+
+    function renderLabTaskLinks(task) {
+      const result = task.result || {};
+      const links = [];
+      const variants = result.lab_final_video_variants || {};
+      Object.entries(variants).forEach(([key, item]) => {
+        if (!item?.url) return;
+        const label = key === "horizontal" ? "横屏" : key === "vertical" ? "竖屏" : key;
+        links.push(`<button class="link-btn" data-preview-url="${escapeHtml(item.url)}" data-preview-title="${escapeHtml(task.topic || label)}">预览${escapeHtml(label)}</button>`);
+        links.push(`<button class="link-btn" data-download-url="${escapeHtml(item.url)}" data-name="${escapeHtml(item.name || `${key}.mp4`)}">下载${escapeHtml(label)}</button>`);
+      });
+      if (!links.length && result.lab_final_video?.url) {
+        links.push(`<button class="link-btn" data-preview-url="${escapeHtml(result.lab_final_video.url)}" data-preview-title="${escapeHtml(task.topic || "成片")}">预览成片</button>`);
+        links.push(`<button class="link-btn" data-download-url="${escapeHtml(result.lab_final_video.url)}" data-name="${escapeHtml(result.lab_final_video.name || "final_video.mp4")}">下载成片</button>`);
+      }
+      return links.join("");
+    }
+
+    function renderLabTasks() {
+      const html = state.labTasks.length ? state.labTasks.map((task) => {
+        const status = String(task.status || "").toLowerCase();
+        const modeLabel = task.mode === "property_video" ? "房源实拍" : "数字人";
+        return `
+          <article class="task-block">
+            <div class="job-head">
+              <div>
+                <div class="eyebrow">${escapeHtml(modeLabel)}</div>
+                <div class="task-title">${escapeHtml(task.topic || modeLabel)}</div>
+                <div class="meta">${escapeHtml(task.latest_message || "")}</div>
+              </div>
+              <span class="status ${escapeHtml(status)}">${escapeHtml(task.status || "running")}</span>
+            </div>
+            <div class="chips">
+              <span class="chip">任务 ${escapeHtml(task.task_id || "-")}</span>
+              <span class="chip">${escapeHtml(task.step || 0)} / ${escapeHtml(task.total_steps || 0)}</span>
+              <span class="chip">${formatTime(task.created_at)}</span>
+            </div>
+            <div class="links">${renderLabTaskLinks(task)}</div>
+          </article>
+        `;
+      }).join("") : '<div class="empty">暂无数字人或房源任务。</div>';
+      $("labTaskList").innerHTML = html;
+      updateTaskSummary();
+    }
+
+    async function refreshLabTasks() {
+      try {
+        const data = await apiFetch("/api/lab/tasks/active");
+        state.labTasks = data.items || [];
+        renderLabTasks();
+      } catch (err) {
+        $("labTaskList").innerHTML = `<div class="notice error">${escapeHtml(err.message || err)}</div>`;
+      }
+    }
+
+    function setTab(tab) {
+      state.activeTab = tab;
+      document.querySelectorAll(".tab").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
+      document.querySelectorAll(".view").forEach((view) => view.classList.toggle("active", view.dataset.view === tab));
+      if (tab === "news") refreshBatches();
+    }
+
+    async function openTaskCenter() {
+      await Promise.all([refreshLabTasks(), refreshJobs(), refreshVideos()]);
+      openDrawer("taskDrawer");
+    }
+
+    function updateStats() {
+      const newsCount = state.batches.reduce((sum, batch) => sum + ((batch.items || []).length), 0);
+      if ($("statBatch")) $("statBatch").textContent = state.batches.length;
+      if ($("statNews")) $("statNews").textContent = newsCount;
+      if ($("statPick")) $("statPick").textContent = state.selected.size;
+      if ($("batchCount")) $("batchCount").textContent = `${state.batches.length} 批`;
+      if ($("selectedMini")) $("selectedMini").firstChild.nodeValue = `已选 ${state.selected.size} 条`;
+      const bottomBar = document.querySelector(".bottom-bar");
+      if (bottomBar) bottomBar.style.display = state.selected.size ? "block" : "none";
+      updateSettingSummary();
+    }
+
+    function updateSettingSummary() {
+      const marketLabel = {
+        cn: "简中",
+        tw: "繁中",
+        jp: "日文",
+      }[readSetting("targetMarket") || "cn"] || "简中";
+      const aspects = [];
+      if (readSetting("makeHorizontal")) aspects.push("横屏");
+      if (readSetting("makeVertical")) aspects.push("竖屏");
+      const publish = readSetting("youtubeAuto") ? "自动发布" : "不发布";
+      const summary = `${marketLabel} · ${aspects.join("+") || "仅主画幅"} · ${publish}`;
+      $("settingMini").textContent = summary;
+    }
+
+    function selectLatestBatch() {
+      const latest = state.batches[0];
+      const items = latest?.items || [];
+      if (!items.length) {
+        toast("最新批次暂无可选新闻", true);
+        return;
+      }
+      items.forEach((item) => {
+        if (item.id) state.selected.add(item.id);
+      });
+      renderBatches();
+      toast(`已选择最新批次 ${items.length} 条`);
+    }
+
+    function clearSelected() {
+      state.selected.clear();
+      renderBatches();
+      toast("已清空选择");
+    }
+
+    function itemStatusBucket(item) {
+      const status = String(item.status || "").toLowerCase();
+      if (!status) return "new";
+      if (["completed", "done", "published"].includes(status)) return "done";
+      if (["failed", "error"].includes(status)) return "failed";
+      return "processing";
+    }
+
+    function itemMatchesFilters(item) {
+      const q = state.filters.q.trim().toLowerCase();
+      const category = state.filters.category;
+      const status = state.filters.status;
+      const haystack = [
+        item.title,
+        item.summary,
+        item.source_name,
+        item.category,
+        item.published_at,
+      ].join(" ").toLowerCase();
+      if (q && !haystack.includes(q)) return false;
+      if (category !== "all" && !haystack.includes(category.toLowerCase())) return false;
+      if (status !== "all" && itemStatusBucket(item) !== status) return false;
+      return true;
+    }
+
+    function filteredBatchItems(batch) {
+      return (batch.items || []).filter(itemMatchesFilters);
+    }
+
+    function updateFilterState() {
+      state.filters.q = $("newsSearch").value || "";
+      state.filters.category = $("categoryFilter").value || "all";
+      state.filters.status = $("statusFilter").value || "all";
+      renderBatches();
+    }
+
+    function renderBatches() {
+      updateStats();
+      if (!state.batches.length) {
+        $("batchList").innerHTML = '<div class="empty">暂无候选批次。可以点击“抓取最新热点”。</div>';
+        return;
+      }
+      $("batchList").innerHTML = state.batches.map((batch, index) => {
+        const rawItems = batch.items || [];
+        const items = filteredBatchItems(batch);
+        const itemHtml = items.map((item) => `
+          <label class="news-item">
+            <span class="pick"><input type="checkbox" data-item-id="${escapeHtml(item.id)}" ${state.selected.has(item.id) ? "checked" : ""}></span>
+            <span>
+              <div class="news-title">${escapeHtml(item.title)}</div>
+              <div class="summary">${escapeHtml(item.summary || "暂无中文摘要")}</div>
+              <div class="chips">
+                <span class="chip">${escapeHtml(item.source_name || "未知来源")}</span>
+                <span class="chip">${escapeHtml(item.category || "未分类")}</span>
+                <span class="chip">${escapeHtml(item.published_at || "无时间")}</span>
+                <span class="chip">热度 ${escapeHtml(item.trend_score || "-")}</span>
+                ${item.status ? `<span class="chip">${escapeHtml(item.status)}</span>` : ""}
+                ${item.source_url ? `<a class="chip" href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">原文</a>` : ""}
+              </div>
+            </span>
+          </label>
+        `).join("");
+        return `
+          <details class="batch" ${index === 0 ? "open" : ""}>
+            <summary>
+              <span>
+                <div class="batch-title">批次 ${escapeHtml(batch.batch_id || "latest")}</div>
+                <div class="meta">${formatTime(batch.started_at)} · ${escapeHtml(batch.triggered_by || "auto")} · 显示 ${items.length}/${rawItems.length} 条</div>
+              </span>
+              <span class="count-pill">${items.length}</span>
+            </summary>
+            ${itemHtml || '<div class="empty" style="margin:14px;">这个批次暂无可制作新闻。</div>'}
+          </details>
+        `;
+      }).join("");
+      document.querySelectorAll("[data-item-id]").forEach((input) => {
+        input.addEventListener("change", () => {
+          if (input.checked) state.selected.add(input.dataset.itemId);
+          else state.selected.delete(input.dataset.itemId);
+          updateStats();
+        });
+      });
+    }
+
+    function renderJobItem(item) {
+      const links = [];
+      if (item.horizontal_url) links.push(`<button class="link-btn" data-download-url="${escapeHtml(item.horizontal_url)}" data-name="${escapeHtml(item.title || "horizontal")}_horizontal.mp4">下载横屏</button>`);
+      if (item.vertical_url) links.push(`<button class="link-btn" data-download-url="${escapeHtml(item.vertical_url)}" data-name="${escapeHtml(item.title || "vertical")}_vertical.mp4">下载竖屏</button>`);
+      (item.youtube_urls || []).forEach((url, index) => links.push(`<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`));
+      const dotClass = item.status === "completed" ? "done" : item.status === "failed" ? "failed" : "running";
+      return `
+        <div class="progress-item">
+          <span class="dot ${dotClass}"></span>
+          <span><strong>${escapeHtml(item.title || "新闻")}</strong><br>${escapeHtml(item.status || "")}${item.youtube_error ? ` · ${escapeHtml(item.youtube_error)}` : ""}</span>
+        </div>
+        <div class="links">${links.join("")}</div>
+      `;
+    }
+
+    function renderJobs() {
+      const html = state.jobs.length ? state.jobs.map((job) => {
+        const statusClass = String(job.status || "").toLowerCase();
+        return `
+          <article class="job" data-job-id="${escapeHtml(job.job_id || "")}">
+            <div class="job-head">
+              <div>
+                <div class="job-title">${escapeHtml(job.job_id || "生产任务")}</div>
+                <div class="meta">${escapeHtml(job.message || "")}</div>
+              </div>
+              <span class="status ${escapeHtml(statusClass)}">${escapeHtml(job.status || "unknown")}</span>
+            </div>
+            <div class="progress-list">${(job.items || []).map(renderJobItem).join("")}</div>
+            <div class="links"><button class="link-btn" data-job-detail="${escapeHtml(job.job_id || "")}">查看详情</button></div>
+          </article>
+        `;
+      }).join("") : '<div class="empty">暂无任务。</div>';
+      $("jobList").innerHTML = html;
+      const runningNews = state.jobs.filter((job) => !["done", "completed", "failed", "error"].includes(String(job.status || "").toLowerCase())).length;
+      const failedNews = state.jobs.filter((job) => ["failed", "error"].includes(String(job.status || "").toLowerCase())).length;
+      if ($("desktopJobList")) {
+        $("desktopJobList").innerHTML = `
+          <div class="quick-stats">
+            <div class="stat"><strong>${escapeHtml(state.jobs.length)}</strong><span>新闻任务</span></div>
+            <div class="stat"><strong>${escapeHtml(runningNews)}</strong><span>处理中</span></div>
+            <div class="stat"><strong>${escapeHtml(failedNews)}</strong><span>需检查</span></div>
+          </div>
+          <div class="notice" style="margin-top:12px">详细历史记录已收起，请到“任务成片”页展开查看。</div>
+          <div class="actions" style="margin-top:12px">
+            <button class="btn primary" data-tab-jump="tasks">查看任务成片</button>
+          </div>
+        `;
+      }
+      updateTaskSummary();
+    }
+
+    function renderVideos() {
+      if (!state.videos.length) {
+        $("videoList").innerHTML = '<div class="empty">暂无成片。</div>';
+        updateTaskSummary();
+        return;
+      }
+      $("videoList").innerHTML = state.videos.map((video) => {
+        const youtubeLinks = (video.youtube_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`);
+        return `
+          <article class="video">
+            <div class="video-head">
+              <div>
+                <div class="video-title">${escapeHtml(video.title || "OpenNews 成片")}</div>
+                <div class="meta">${escapeHtml(video.source_name || "")} · ${escapeHtml(video.published_at || "")} · 完成 ${formatTime(video.completed_at)}</div>
+              </div>
+            </div>
+            <div class="links">
+              ${video.horizontal_url ? `<button class="link-btn" data-preview-url="${escapeHtml(video.horizontal_url)}" data-preview-title="${escapeHtml(video.title || "OpenNews 成片")}">预览横屏</button>` : ""}
+              ${video.vertical_url ? `<button class="link-btn" data-preview-url="${escapeHtml(video.vertical_url)}" data-preview-title="${escapeHtml(video.title || "OpenNews 成片")}">预览竖屏</button>` : ""}
+              ${video.horizontal_url ? `<button class="link-btn" data-download-url="${escapeHtml(video.horizontal_url)}" data-name="${escapeHtml(video.title || "opennews")}_horizontal.mp4">下载横屏</button>` : ""}
+              ${video.vertical_url ? `<button class="link-btn" data-download-url="${escapeHtml(video.vertical_url)}" data-name="${escapeHtml(video.title || "opennews")}_vertical.mp4">下载竖屏</button>` : ""}
+              ${youtubeLinks.join("")}
+            </div>
+          </article>
+        `;
+      }).join("");
+      updateTaskSummary();
+    }
+
+    async function refreshBatches() {
+      if ($("refreshBtn")) $("refreshBtn").disabled = true;
+      try {
+        const data = await apiFetch("/api/lab/opennews/batches?limit=10");
+        state.batches = data.batches || [];
+        renderBatches();
+      } catch (err) {
+        $("batchList").innerHTML = `<div class="notice error">${escapeHtml(err.message || err)}</div>`;
+      } finally {
+        if ($("refreshBtn")) $("refreshBtn").disabled = false;
+      }
+    }
+
+    async function runNow() {
+      $("runNowBtn").disabled = true;
+      try {
+        await apiFetch("/api/lab/opennews/batches/run-now", {
+          method: "POST",
+          body: JSON.stringify({ category: "all", time_range: "6h", limit: 20 }),
+        });
+        toast("已开始抓取热点");
+        setTimeout(refreshBatches, 2500);
+      } catch (err) {
+        toast(err.message || String(err), true);
+      } finally {
+        $("runNowBtn").disabled = false;
+      }
+    }
+
+    async function produceSelected() {
+      if (!state.selected.size) {
+        toast("请先勾选新闻", true);
+        setTab("news");
+        return;
+      }
+      const youtubeAspects = [];
+      if (readSetting("makeHorizontal")) youtubeAspects.push("horizontal");
+      if (readSetting("makeVertical")) youtubeAspects.push("vertical");
+      const ok = await confirmAction(`确认开始制作 ${state.selected.size} 条新闻？\\n${$("settingMini").textContent}`);
+      if (!ok) return;
+      $("produceBtn").disabled = true;
+      try {
+        const data = await apiFetch("/api/lab/opennews/produce-selected", {
+          method: "POST",
+          body: JSON.stringify({
+            item_ids: Array.from(state.selected),
+            target_market: readSetting("targetMarket") || "cn",
+            aspect_ratio: readSetting("aspectRatio") || "vertical",
+            notes: readSetting("notes") || "",
+            youtube_auto_publish: readSetting("youtubeAuto"),
+            youtube_aspects: youtubeAspects.length ? youtubeAspects : ["horizontal", "vertical"],
+          }),
+        });
+        toast(data.message || "任务已提交");
+        state.selected.clear();
+        renderBatches();
+        await openTaskCenter();
+        await refreshJobs();
+        startPollingJobs();
+      } catch (err) {
+        toast(err.message || String(err), true);
+      } finally {
+        $("produceBtn").disabled = false;
+      }
+    }
+
+    async function openDigitalTool() {
+      $("toolEyebrow").textContent = "Digital Human";
+      $("toolTitle").textContent = "数字人视频";
+      $("toolContent").innerHTML = '<div class="empty">正在加载配置...</div>';
+      openDrawer("toolDrawer");
+      try {
+        await loadWorkbenchOptions();
+        $("toolContent").innerHTML = `
+          <form class="compact-form" id="digitalForm">
+            <div class="field">
+              <label for="digitalTopic">视频选题</label>
+              <textarea id="digitalTopic" name="topic" placeholder="例如：大阪人跟其他地区比起来真的很特别？住在这里你需要知道的事"></textarea>
+            </div>
+            <div class="field">
+              <label for="digitalMarket">目标市场</label>
+              <select id="digitalMarket" name="target_market">${targetMarketOptionsHtml()}</select>
+            </div>
+            <div class="field">
+              <label for="digitalVoice">配音音色</label>
+              <select id="digitalVoice" name="voice_preset_id">${voiceOptionsHtml()}</select>
+            </div>
+            <div class="field">
+              <label for="digitalAvatar">主播图片</label>
+              <select id="digitalAvatar" name="avatar_id"><option value="">自动匹配</option>${avatarOptionsHtml()}</select>
+            </div>
+            <label class="switch-row">
+              <div>启用实时联网检索<br><span>适合政策、新闻、近期市场变化。</span></div>
+              <input type="checkbox" id="digitalWebSearch" name="use_web_search">
+            </label>
+            <div class="actions">
+              <button class="btn primary" type="submit">提交数字人任务</button>
+            </div>
+          </form>
+        `;
+        $("digitalForm").addEventListener("submit", submitDigitalHumanJob);
+      } catch (err) {
+        $("toolContent").innerHTML = `<div class="notice error">${escapeHtml(err.message || err)}</div>`;
+      }
+    }
+
+    async function openPropertyTool() {
+      $("toolEyebrow").textContent = "Property Video";
+      $("toolTitle").textContent = "房源实拍成片";
+      $("toolContent").innerHTML = '<div class="empty">正在加载配置...</div>';
+      openDrawer("toolDrawer");
+      try {
+        await loadWorkbenchOptions();
+        $("toolContent").innerHTML = `
+          <form class="compact-form" id="propertyForm">
+            <div class="field">
+              <label for="propertyFiles">房源视频片段</label>
+              <input id="propertyFiles" name="videos" type="file" accept="video/*" multiple>
+            </div>
+            <div class="field">
+              <label for="propertyScript">销售解说文案</label>
+              <textarea id="propertyScript" name="script_text" placeholder="把销售想讲的内容写在这里，系统会配音、字幕并拼接成片。"></textarea>
+            </div>
+            <div class="field">
+              <label for="propertyMarket">目标市场</label>
+              <select id="propertyMarket" name="target_market">${targetMarketOptionsHtml()}</select>
+            </div>
+            <div class="field">
+              <label for="propertyVoice">解说音色</label>
+              <select id="propertyVoice" name="voice_preset_id">${voiceOptionsHtml()}</select>
+            </div>
+            <div class="field">
+              <label for="propertySpeed">语速</label>
+              <input id="propertySpeed" name="speed" type="number" value="1.10" min="0.80" max="1.30" step="0.05">
+            </div>
+            <div class="actions">
+              <button class="btn primary" type="submit">提交房源成片任务</button>
+            </div>
+          </form>
+        `;
+        $("propertyForm").addEventListener("submit", submitPropertyVideoJob);
+      } catch (err) {
+        $("toolContent").innerHTML = `<div class="notice error">${escapeHtml(err.message || err)}</div>`;
+      }
+    }
+
+    async function submitDigitalHumanJob(event) {
+      event.preventDefault();
+      const formEl = event.currentTarget;
+      const inline = formEl?.id === "digitalInlineForm";
+      const topicEl = inline ? $("digitalInlineTopic") : $("digitalTopic");
+      const marketEl = inline ? $("digitalInlineMarket") : $("digitalMarket");
+      const voiceEl = inline ? $("digitalInlineVoice") : $("digitalVoice");
+      const avatarEl = inline ? $("digitalInlineAvatar") : $("digitalAvatar");
+      const webSearchEl = inline ? $("digitalInlineWebSearch") : $("digitalWebSearch");
+      const topic = (topicEl?.value || "").trim();
+      if (!topic) {
+        toast("请先输入数字人视频选题", true);
+        return;
+      }
+      const form = new FormData();
+      form.append("topic", topic);
+      form.append("target_market", marketEl?.value || selectedMarketId());
+      form.append("voice_preset_id", voiceEl?.value || "");
+      form.append("avatar_id", avatarEl?.value || "");
+      form.append("use_web_search", webSearchEl?.checked ? "true" : "false");
+      form.append("speed", "1.10");
+      try {
+        await apiFetch("/api/lab/digital-human/jobs", { method: "POST", body: form });
+        toast("数字人任务已提交");
+        if (!inline) closeDrawers();
+        if (inline) formEl.reset();
+        await hydrateInlineProductionForms();
+        await openTaskCenter();
+        await refreshLabTasks();
+        startPollingJobs();
+      } catch (err) {
+        toast(err.message || String(err), true);
+      }
+    }
+
+    async function submitPropertyVideoJob(event) {
+      event.preventDefault();
+      const formEl = event.currentTarget;
+      const inline = formEl?.id === "propertyInlineForm";
+      const filesEl = inline ? $("propertyInlineFiles") : $("propertyFiles");
+      const scriptEl = inline ? $("propertyInlineScript") : $("propertyScript");
+      const marketEl = inline ? $("propertyInlineMarket") : $("propertyMarket");
+      const voiceEl = inline ? $("propertyInlineVoice") : $("propertyVoice");
+      const speedEl = inline ? $("propertyInlineSpeed") : $("propertySpeed");
+      const files = Array.from(filesEl?.files || []);
+      const script = (scriptEl?.value || "").trim();
+      if (!files.length) {
+        toast("请先上传房源视频", true);
+        return;
+      }
+      if (!script) {
+        toast("请先填写销售解说文案", true);
+        return;
+      }
+      const form = new FormData();
+      files.forEach((file) => form.append("videos", file));
+      form.append("script_text", script);
+      form.append("target_market", marketEl?.value || selectedMarketId());
+      form.append("voice_preset_id", voiceEl?.value || "");
+      form.append("speed", speedEl?.value || "1.10");
+      try {
+        await apiFetch("/api/lab/property-video/jobs", { method: "POST", body: form });
+        toast("房源实拍任务已提交");
+        if (!inline) closeDrawers();
+        if (inline) formEl.reset();
+        await hydrateInlineProductionForms();
+        await openTaskCenter();
+        await refreshLabTasks();
+        startPollingJobs();
+      } catch (err) {
+        toast(err.message || String(err), true);
+      }
+    }
+
+    async function refreshJobs() {
+      try {
+        const data = await apiFetch("/api/lab/opennews/jobs?limit=10");
+        state.jobs = data.jobs || [];
+        renderJobs();
+      } catch (err) {
+        const html = `<div class="notice error">${escapeHtml(err.message || err)}</div>`;
+        $("jobList").innerHTML = html;
+        if ($("desktopJobList")) $("desktopJobList").innerHTML = '<div class="notice error">任务状态加载失败，请稍后刷新。</div>';
+      }
+    }
+
+    async function refreshVideos() {
+      try {
+        const data = await apiFetch("/api/lab/opennews/ready-videos?limit=20");
+        state.videos = data.videos || [];
+        renderVideos();
+      } catch (err) {
+        $("videoList").innerHTML = `<div class="notice error">${escapeHtml(err.message || err)}</div>`;
+      }
+    }
+
+    function startPollingJobs() {
+      if (state.polling) return;
+      state.polling = setInterval(async () => {
+        await refreshLabTasks();
+        await refreshJobs();
+        await refreshVideos();
+      }, 7000);
+    }
+
+    async function downloadWithAuth(url, name) {
+      const headers = {};
+      if (state.token) headers.Authorization = `Bearer ${state.token}`;
+      const res = await fetch(url, { headers, credentials: "include" });
+      if (!res.ok) throw new Error(`下载失败：HTTP ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = name || "opennews.mp4";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    }
+
+    function closeDrawers() {
+      $("drawerBackdrop").classList.remove("open");
+      ["detailDrawer", "previewDrawer", "toolDrawer", "taskDrawer"].forEach((id) => {
+        $(id).classList.remove("open");
+        $(id).setAttribute("aria-hidden", "true");
+      });
+      if (state.previewObjectUrl) {
+        URL.revokeObjectURL(state.previewObjectUrl);
+        state.previewObjectUrl = "";
+      }
+      $("previewContent").innerHTML = "";
+    }
+
+    function openDrawer(id) {
+      $("drawerBackdrop").classList.add("open");
+      $(id).classList.add("open");
+      $(id).setAttribute("aria-hidden", "false");
+    }
+
+    function openJobDetail(jobId) {
+      const job = state.jobs.find((item) => String(item.job_id || "") === String(jobId || ""));
+      if (!job) {
+        toast("任务不存在或已刷新", true);
+        return;
+      }
+      $("detailTitle").textContent = job.job_id || "任务详情";
+      const items = job.items || [];
+      $("detailContent").innerHTML = `
+        <div class="detail-row">
+          <div class="detail-title">整体状态：${escapeHtml(job.status || "unknown")}</div>
+          <div class="preview-meta">${escapeHtml(job.message || "")}</div>
+          <div class="chips">
+            <span class="chip">完成 ${escapeHtml(job.completed_count || 0)}</span>
+            <span class="chip">失败 ${escapeHtml(job.failed_count || 0)}</span>
+            <span class="chip">处理中 ${escapeHtml(job.running_count || 0)}</span>
+          </div>
+        </div>
+        ${items.map((item) => `
+          <div class="detail-row">
+            <div class="detail-title">${escapeHtml(item.title || "新闻")}</div>
+            <div class="preview-meta">
+              状态：${escapeHtml(item.status || "-")}
+              ${item.message ? `<br>说明：${escapeHtml(item.message)}` : ""}
+              ${item.error ? `<br>错误：${escapeHtml(item.error)}` : ""}
+              ${item.youtube_error ? `<br>YouTube：${escapeHtml(item.youtube_error)}` : ""}
+            </div>
+            <div class="links">
+              ${item.horizontal_url ? `<button class="link-btn" data-preview-url="${escapeHtml(item.horizontal_url)}" data-preview-title="${escapeHtml(item.title || "OpenNews 成片")}">预览横屏</button>` : ""}
+              ${item.vertical_url ? `<button class="link-btn" data-preview-url="${escapeHtml(item.vertical_url)}" data-preview-title="${escapeHtml(item.title || "OpenNews 成片")}">预览竖屏</button>` : ""}
+              ${item.horizontal_url ? `<button class="link-btn" data-download-url="${escapeHtml(item.horizontal_url)}" data-name="${escapeHtml(item.title || "horizontal")}_horizontal.mp4">下载横屏</button>` : ""}
+              ${item.vertical_url ? `<button class="link-btn" data-download-url="${escapeHtml(item.vertical_url)}" data-name="${escapeHtml(item.title || "vertical")}_vertical.mp4">下载竖屏</button>` : ""}
+              ${(item.youtube_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`).join("")}
+            </div>
+          </div>
+        `).join("") || '<div class="empty">这个任务暂无条目。</div>'}
+      `;
+      openDrawer("detailDrawer");
+    }
+
+    async function openVideoPreview(url, title) {
+      $("previewTitle").textContent = title || "成片预览";
+      $("previewContent").innerHTML = '<div class="empty">正在加载视频...</div>';
+      openDrawer("previewDrawer");
+      try {
+        const headers = {};
+        if (state.token) headers.Authorization = `Bearer ${state.token}`;
+        const res = await fetch(url, { headers, credentials: "include" });
+        if (!res.ok) throw new Error(`预览加载失败：HTTP ${res.status}`);
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        state.previewObjectUrl = objectUrl;
+        $("previewContent").innerHTML = `
+          <video class="video-preview" src="${objectUrl}" controls autoplay playsinline></video>
+          <div class="preview-meta">如果视频无法自动播放，请点击播放按钮。关闭预览后会释放临时文件。</div>
+        `;
+      } catch (err) {
+        $("previewContent").innerHTML = `<div class="notice error">${escapeHtml(err.message || err)}</div>`;
+      }
+    }
+
+    document.addEventListener("click", async (event) => {
+      const closeBtn = event.target.closest("[data-close-drawer]");
+      if (closeBtn || event.target.id === "drawerBackdrop") {
+        closeDrawers();
+        return;
+      }
+      const detailBtn = event.target.closest("[data-job-detail]");
+      if (detailBtn) {
+        event.preventDefault();
+        openJobDetail(detailBtn.dataset.jobDetail);
+        return;
+      }
+      const toolBtn = event.target.closest("[data-open-tool]");
+      if (toolBtn) {
+        event.preventDefault();
+        if (toolBtn.dataset.openTool === "digital") await openDigitalTool();
+        if (toolBtn.dataset.openTool === "property") await openPropertyTool();
+        if (toolBtn.dataset.openTool === "tasks") await openTaskCenter();
+        return;
+      }
+      const tabJump = event.target.closest("[data-tab-jump]");
+      if (tabJump) {
+        event.preventDefault();
+        if (tabJump.dataset.tabJump === "tasks") await openTaskCenter();
+        else setTab(tabJump.dataset.tabJump);
+        return;
+      }
+      const avatarChoice = event.target.closest("[data-avatar-choice]");
+      if (avatarChoice) {
+        event.preventDefault();
+        const select = $("digitalInlineAvatar");
+        if (select) {
+          select.value = avatarChoice.dataset.avatarChoice || "";
+          renderInlineAvatarGrid();
+        }
+        return;
+      }
+      const previewBtn = event.target.closest("[data-preview-url]");
+      if (previewBtn) {
+        event.preventDefault();
+        await openVideoPreview(previewBtn.dataset.previewUrl, previewBtn.dataset.previewTitle);
+        return;
+      }
+      const target = event.target.closest("[data-download-url]");
+      if (!target) return;
+      event.preventDefault();
+      try {
+        await downloadWithAuth(target.dataset.downloadUrl, target.dataset.name);
+      } catch (err) {
+        toast(err.message || String(err), true);
+      }
+    });
+
+    document.querySelectorAll(".tab").forEach((btn) => btn.addEventListener("click", () => setTab(btn.dataset.tab)));
+    if ($("refreshBtn")) $("refreshBtn").addEventListener("click", refreshBatches);
+    if ($("runNowBtn")) $("runNowBtn").addEventListener("click", runNow);
+    if ($("openNewsTasksBtn")) $("openNewsTasksBtn").addEventListener("click", openTaskCenter);
+    if ($("openNewsStatusBtn")) $("openNewsStatusBtn").addEventListener("click", openTaskCenter);
+    if ($("refreshNewsStatusBtn")) $("refreshNewsStatusBtn").addEventListener("click", async () => {
+      await Promise.all([refreshBatches(), refreshJobs(), refreshVideos()]);
+      toast("新闻自动化状态已刷新");
+    });
+    if ($("selectLatestBtn")) $("selectLatestBtn").addEventListener("click", selectLatestBatch);
+    if ($("clearSelectedBtn")) $("clearSelectedBtn").addEventListener("click", clearSelected);
+    if ($("newsSearch")) $("newsSearch").addEventListener("input", updateFilterState);
+    if ($("categoryFilter")) $("categoryFilter").addEventListener("change", updateFilterState);
+    if ($("statusFilter")) $("statusFilter").addEventListener("change", updateFilterState);
+    if ($("refreshVideosBtn")) $("refreshVideosBtn").addEventListener("click", async () => { await refreshLabTasks(); await refreshJobs(); await refreshVideos(); });
+    if ($("produceBtn")) $("produceBtn").addEventListener("click", produceSelected);
+    if ($("digitalInlineForm")) $("digitalInlineForm").addEventListener("submit", submitDigitalHumanJob);
+    if ($("propertyInlineForm")) $("propertyInlineForm").addEventListener("submit", submitPropertyVideoJob);
+
+    (async function main() {
+      cloneSettings();
+      await setupJClaw();
+      await refreshLabMe();
+      await hydrateInlineProductionForms();
+      await Promise.all([refreshBatches(), refreshLabTasks(), refreshJobs(), refreshVideos()]);
+      startPollingJobs();
+    })();
+  </script>
+</body>
+</html>

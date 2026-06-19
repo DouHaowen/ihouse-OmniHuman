@@ -1541,11 +1541,11 @@
                   <p class="section-desc">开启后系统会每2小时自动抓取 20 条 AI、房产、移民、科技、金融、军事、政治类英文热点；每批自动把热度最高的一条制作成竖屏 Shorts 发布 YouTube，同时按 AI 4 条、机器人 1 条、其他热点 5 条的比例制作横屏合集发布 YouTube。剩余新闻仍可手动勾选批量生产。</p>
                 </div>
               </div>
-              <div class="field-grid" style="grid-template-columns: 150px 150px 150px 150px minmax(0,1fr);">
+              <div class="field-grid" style="grid-template-columns: 150px 150px 150px 150px 150px minmax(0,1fr);">
                 <label class="check-card" style="min-height:auto; padding:14px;">
                   <span>
-                    <strong>自动抓取与自动合集</strong>
-                    <small>管理员可开启</small>
+                    <strong>自动化状态</strong>
+                    <small>勾选表示已开启</small>
                   </span>
                   <input id="openNewsBatchEnabled" type="checkbox">
                 </label>
@@ -1572,6 +1572,14 @@
                 <div class="field">
                   <label>&nbsp;</label>
                   <button class="btn btn-secondary" id="openNewsBatchSaveBtn" type="button" style="width:100%;">保存设置</button>
+                </div>
+                <div class="field">
+                  <label>&nbsp;</label>
+                  <button class="btn btn-primary" id="openNewsBatchStartBtn" type="button" style="width:100%;">启动自动化</button>
+                </div>
+                <div class="field">
+                  <label>&nbsp;</label>
+                  <button class="btn btn-ghost" id="openNewsBatchStopBtn" type="button" style="width:100%;">关闭自动化</button>
                 </div>
                 <div class="field">
                   <label>&nbsp;</label>
@@ -1983,6 +1991,13 @@
           </div>
           <div class="panel" style="padding:16px; background:rgba(255,255,255,0.56);">
             <div class="field">
+              <label for="materialHarvestTopicPreset">高频新闻专题</label>
+              <select id="materialHarvestTopicPreset" class="select-input">
+                <option value="">不使用专题预设</option>
+              </select>
+              <div class="helper">先选专题会自动填充更细的采集词和审核说明，适合提前建设可控、安全的 OpenNews 新闻素材库。</div>
+            </div>
+            <div class="field">
               <label for="materialHarvestCategory">新闻素材分类</label>
               <select id="materialHarvestCategory" class="select-input">
                 <option value="">手动主题</option>
@@ -2193,6 +2208,8 @@
       openNewsBatchIntervalSelect: document.getElementById('openNewsBatchIntervalSelect'),
       openNewsBatchLimitSelect: document.getElementById('openNewsBatchLimitSelect'),
       openNewsBatchSaveBtn: document.getElementById('openNewsBatchSaveBtn'),
+      openNewsBatchStartBtn: document.getElementById('openNewsBatchStartBtn'),
+      openNewsBatchStopBtn: document.getElementById('openNewsBatchStopBtn'),
       openNewsBatchRunBtn: document.getElementById('openNewsBatchRunBtn'),
       openNewsBatchStatus: document.getElementById('openNewsBatchStatus'),
       openNewsBatchMarketSelect: document.getElementById('openNewsBatchMarketSelect'),
@@ -2274,6 +2291,7 @@
       materialLibraryClearSelectionBtn: document.getElementById('materialLibraryClearSelectionBtn'),
       materialLibrarySelectionHint: document.getElementById('materialLibrarySelectionHint'),
       materialHarvestPanel: document.getElementById('materialHarvestPanel'),
+      materialHarvestTopicPreset: document.getElementById('materialHarvestTopicPreset'),
       materialHarvestCategory: document.getElementById('materialHarvestCategory'),
       materialHarvestTopic: document.getElementById('materialHarvestTopic'),
       materialHarvestSourceText: document.getElementById('materialHarvestSourceText'),
@@ -2796,10 +2814,17 @@
 
     function renderMaterialHarvestPresetOptions() {
       const presets = Array.isArray(state.materialHarvestPresets) ? state.materialHarvestPresets : [];
-      if (!els.materialHarvestCategory) return;
-      const current = els.materialHarvestCategory.value || '';
-      els.materialHarvestCategory.innerHTML = `<option value="">手动主题</option>` + presets.map(item => `<option value="${escapeHtml(item.category)}">${escapeHtml(item.category)}</option>`).join('');
-      els.materialHarvestCategory.value = current;
+      if (els.materialHarvestCategory) {
+        const current = els.materialHarvestCategory.value || '';
+        els.materialHarvestCategory.innerHTML = `<option value="">手动主题</option>` + presets.map(item => `<option value="${escapeHtml(item.category)}">${escapeHtml(item.category)}</option>`).join('');
+        els.materialHarvestCategory.value = current;
+      }
+      if (els.materialHarvestTopicPreset) {
+        const topicPresets = Array.isArray(state.materialHarvestTopicPresets) ? state.materialHarvestTopicPresets : [];
+        const currentTopicPreset = els.materialHarvestTopicPreset.value || '';
+        els.materialHarvestTopicPreset.innerHTML = `<option value="">不使用专题预设</option>` + topicPresets.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name || item.id)}</option>`).join('');
+        els.materialHarvestTopicPreset.value = topicPresets.some(item => item.id === currentTopicPreset) ? currentTopicPreset : '';
+      }
     }
 
     function applyMaterialHarvestPreset() {
@@ -2811,6 +2836,25 @@
       }
       if (els.materialHarvestNotes && !els.materialHarvestNotes.value.trim()) {
         els.materialHarvestNotes.value = preset.notes || '';
+      }
+    }
+
+    function applyMaterialHarvestTopicPreset() {
+      const selected = els.materialHarvestTopicPreset?.value || '';
+      const preset = (state.materialHarvestTopicPresets || []).find(item => item.id === selected);
+      if (!preset) return;
+      if (els.materialHarvestCategory) {
+        els.materialHarvestCategory.value = preset.category || '';
+      }
+      if (els.materialHarvestTopic) {
+        els.materialHarvestTopic.value = preset.topic || preset.name || '';
+      }
+      if (els.materialHarvestNotes) {
+        const tags = Array.isArray(preset.tags) && preset.tags.length ? `\n建议标签：${preset.tags.join('、')}` : '';
+        els.materialHarvestNotes.value = `${preset.notes || ''}${tags}`.trim();
+      }
+      if (els.materialHarvestSourceText && !els.materialHarvestSourceText.value.trim()) {
+        els.materialHarvestSourceText.placeholder = '可选。专题预设会自动搜索来源；如果你有更可靠的官网/新闻链接，也可以贴在这里提高准确率。';
       }
     }
 
@@ -3195,6 +3239,7 @@
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || '候选池加载失败');
         state.materialHarvestPresets = Array.isArray(data.presets) ? data.presets : [];
+        state.materialHarvestTopicPresets = Array.isArray(data.topic_presets) ? data.topic_presets : [];
         renderMaterialHarvestPresetOptions();
         renderMaterialHarvestJobs(data.jobs || []);
         renderMaterialHarvestCandidates(data.candidates || []);
@@ -4307,6 +4352,14 @@
       if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(config.interval_minutes || 120);
       if (els.openNewsBatchLimitSelect) els.openNewsBatchLimitSelect.value = String(config.limit || 20);
       if (els.openNewsBatchSaveBtn) els.openNewsBatchSaveBtn.disabled = !isAdmin;
+      if (els.openNewsBatchStartBtn) {
+        els.openNewsBatchStartBtn.disabled = !isAdmin || !!config.enabled;
+        els.openNewsBatchStartBtn.textContent = config.enabled ? '自动化已启动' : '启动自动化';
+      }
+      if (els.openNewsBatchStopBtn) {
+        els.openNewsBatchStopBtn.disabled = !isAdmin || !config.enabled;
+        els.openNewsBatchStopBtn.textContent = config.enabled ? '关闭自动化' : '自动化已关闭';
+      }
       const nextRun = config.next_run_at ? `下次抓取：${formatOpenNewsBatchTime(config.next_run_at)}` : '自动抓取未启用';
       setOpenNewsBatchStatus(`${config.last_run_message || '自动抓取尚未启动。'}｜${nextRun}`);
     }
@@ -4323,8 +4376,13 @@
       }
     }
 
-    async function saveOpenNewsBatchConfig() {
+    async function saveOpenNewsBatchConfig(forceEnabled = null) {
+      if (forceEnabled !== null && els.openNewsBatchEnabled) {
+        els.openNewsBatchEnabled.checked = !!forceEnabled;
+      }
       setOpenNewsBatchStatus('正在保存自动抓取设置...');
+      const actionButtons = [els.openNewsBatchSaveBtn, els.openNewsBatchStartBtn, els.openNewsBatchStopBtn].filter(Boolean);
+      actionButtons.forEach(btn => { btn.disabled = true; });
       try {
         const res = await fetch('/api/opennews/batches/config', {
           method: 'POST',
@@ -4340,9 +4398,28 @@
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || '保存失败');
         applyOpenNewsBatchConfig(data.config || {}, true);
+        return true;
       } catch (error) {
         setOpenNewsBatchStatus(friendlyRequestError(error, '自动抓取设置保存失败'), true);
+        return false;
+      } finally {
+        const config = state.openNewsBatchConfig || {};
+        const isAdmin = !!state.currentUser && state.currentUser.role === 'admin';
+        if (els.openNewsBatchSaveBtn) els.openNewsBatchSaveBtn.disabled = !isAdmin;
+        if (els.openNewsBatchStartBtn) els.openNewsBatchStartBtn.disabled = !isAdmin || !!config.enabled;
+        if (els.openNewsBatchStopBtn) els.openNewsBatchStopBtn.disabled = !isAdmin || !config.enabled;
       }
+    }
+
+    async function startOpenNewsBatchAutomation() {
+      const saved = await saveOpenNewsBatchConfig(true);
+      if (!saved) return;
+      setOpenNewsBatchStatus('自动化已启动，正在立即抓取第一批热点新闻...');
+      await runOpenNewsBatchNow();
+    }
+
+    async function stopOpenNewsBatchAutomation() {
+      await saveOpenNewsBatchConfig(false);
     }
 
     async function loadOpenNewsBatches() {
@@ -6787,6 +6864,8 @@
     els.openNewsBackBtn?.addEventListener('click', () => switchWorkspaceMode('ai'));
     els.openNewsQuickHotBtn?.addEventListener('click', quickFetchOpenNewsHotspots);
     els.openNewsBatchSaveBtn?.addEventListener('click', saveOpenNewsBatchConfig);
+    els.openNewsBatchStartBtn?.addEventListener('click', startOpenNewsBatchAutomation);
+    els.openNewsBatchStopBtn?.addEventListener('click', stopOpenNewsBatchAutomation);
     els.openNewsBatchRunBtn?.addEventListener('click', runOpenNewsBatchNow);
     els.openNewsBatchRefreshBtn?.addEventListener('click', loadOpenNewsBatches);
     els.openNewsBatchProduceBtn?.addEventListener('click', produceOpenNewsBatchVideos);
@@ -6854,6 +6933,7 @@
     els.materialHarvestStartBtn?.addEventListener('click', startMaterialHarvestJob);
     els.materialHarvestRefreshBtn?.addEventListener('click', loadMaterialHarvest);
     els.materialHarvestClearBtn?.addEventListener('click', clearHarvestCandidates);
+    els.materialHarvestTopicPreset?.addEventListener('change', applyMaterialHarvestTopicPreset);
     els.materialHarvestCategory?.addEventListener('change', applyMaterialHarvestPreset);
     if (els.composeVideoBtn) els.composeVideoBtn.addEventListener('click', composeFinalVideo);
     els.loginForm.addEventListener('submit', handleLogin);

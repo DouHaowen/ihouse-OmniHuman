@@ -62,6 +62,37 @@ def _get_openai_relay_model() -> str:
     return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.5").strip() or "gpt-5.5"
 
 
+def _get_opennews_relay_model() -> str:
+    # OpenNews uses Claude through the OpenAI-compatible relay, not the native Anthropic client.
+    return (
+        os.getenv("OPENNEWS_RELAY_MODEL")
+        or os.getenv("OPENAI_RELAY_OPENNEWS_MODEL")
+        or "claude-sonnet-4-6"
+    ).strip() or "claude-sonnet-4-6"
+
+
+def _get_opennews_relay_model_attempts() -> list[str]:
+    primary = _get_opennews_relay_model()
+    raw_fallbacks = (
+        os.getenv("OPENNEWS_RELAY_FALLBACK_MODELS")
+        or os.getenv("OPENAI_RELAY_OPENNEWS_FALLBACK_MODELS")
+        or ""
+    )
+    models: list[str] = []
+    for model in [primary, *[part.strip() for part in raw_fallbacks.split(",")]]:
+        if model and model not in models:
+            models.append(model)
+    return models or ["claude-sonnet-4-6"]
+
+
+def _get_opennews_relay_retry_attempts() -> int:
+    raw_value = os.getenv("OPENNEWS_RELAY_RETRY_ATTEMPTS") or os.getenv("OPENAI_RELAY_OPENNEWS_RETRY_ATTEMPTS") or "3"
+    try:
+        return max(1, min(6, int(float(raw_value))))
+    except (TypeError, ValueError):
+        return 3
+
+
 def _get_openai_relay_reasoning_effort() -> str:
     return (os.getenv("OPENAI_RELAY_REASONING_EFFORT") or "xhigh").strip() or "xhigh"
 
@@ -86,6 +117,80 @@ def _get_opennews_relay_timeout_seconds() -> int:
         return max(60, min(420, int(float(raw_value))))
     except (TypeError, ValueError):
         return 240
+
+
+def _get_opennews_model_provider() -> str:
+    return (
+        os.getenv("OPENNEWS_TEXT_MODEL_PROVIDER")
+        or os.getenv("OPENNEWS_MODEL_PROVIDER")
+        or "glm"
+    ).strip().lower() or "glm"
+
+
+def _get_opennews_glm_api_key() -> str:
+    return (
+        os.getenv("OPENNEWS_GLM_API_KEY")
+        or os.getenv("ZHIPUAI_API_KEY")
+        or os.getenv("GLM_API_KEY")
+        or ""
+    ).strip()
+
+
+def _get_opennews_glm_model() -> str:
+    return (
+        os.getenv("OPENNEWS_GLM_MODEL")
+        or os.getenv("GLM_OPENNEWS_MODEL")
+        or "glm-5.2"
+    ).strip() or "glm-5.2"
+
+
+def _get_opennews_glm_timeout_seconds() -> int:
+    raw_value = (
+        os.getenv("OPENNEWS_GLM_TIMEOUT_SECONDS")
+        or os.getenv("GLM_OPENNEWS_TIMEOUT_SECONDS")
+        or "240"
+    )
+    try:
+        return max(60, min(420, int(float(raw_value))))
+    except (TypeError, ValueError):
+        return 240
+
+
+def _get_opennews_glm_retry_attempts() -> int:
+    raw_value = (
+        os.getenv("OPENNEWS_GLM_RETRY_ATTEMPTS")
+        or os.getenv("GLM_OPENNEWS_RETRY_ATTEMPTS")
+        or "3"
+    )
+    try:
+        return max(1, min(6, int(float(raw_value))))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _extract_chat_completion_text(payload: dict) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return ""
+    chunks: list[str] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str):
+                chunks.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        text = item.get("text") or item.get("content")
+                        if isinstance(text, str):
+                            chunks.append(text)
+        text = choice.get("text")
+        if isinstance(text, str):
+            chunks.append(text)
+    return "\n".join(part.strip() for part in chunks if part and part.strip()).strip()
 
 
 def _extract_openai_relay_text(payload: dict) -> str:
@@ -121,7 +226,21 @@ def _extract_json_object_text(raw: str) -> str:
     return ""
 
 
-def _repair_opennews_relay_json(raw: str) -> dict:
+def _opennews_relay_request_payload(model: str, prompt: str, *, max_output_tokens: int, effort: str = "minimal") -> dict:
+    payload = {
+        "model": model,
+        "input": prompt,
+        "instructions": "你只输出可解析 JSON。",
+        "max_output_tokens": max_output_tokens,
+        "text": {"format": {"type": "json_object"}},
+        "store": False,
+    }
+    if effort:
+        payload["reasoning"] = {"effort": effort}
+    return payload
+
+
+def _repair_opennews_relay_json(raw: str, *, model_name: str | None = None) -> dict:
     api_key = _get_openai_relay_api_key()
     if not api_key:
         raise RuntimeError("未配置 OPENAI_RELAY_API_KEY，无法修复新闻稿 JSON")
@@ -134,30 +253,159 @@ video_title, summary, script, material_keywords, material_visual_plan, fact_chec
 原始输出：
 {(raw or "")[:12000]}
 """.strip()
-    response = requests.post(
-        _get_openai_relay_responses_url(),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": _get_openai_relay_model(),
-            "input": repair_prompt,
-            "instructions": "你只输出可解析 JSON。",
-            "max_output_tokens": 4096,
-            "reasoning": {"effort": "minimal"},
-            "text": {"format": {"type": "json_object"}},
-            "store": False,
-        },
-        timeout=_get_opennews_relay_timeout_seconds(),
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"API 中转新闻稿 JSON 修复失败：{response.status_code} {response.text[:500]}")
-    repaired_raw = _extract_openai_relay_text(response.json())
-    candidate = _extract_json_object_text(repaired_raw)
-    if not candidate:
-        raise RuntimeError("API 中转新闻稿生成失败：JSON 修复后仍未返回可解析 JSON")
-    repaired = json.loads(candidate)
-    if not isinstance(repaired, dict):
-        raise RuntimeError("API 中转新闻稿生成失败：JSON 修复后返回的不是对象")
-    return repaired
+    models = [model_name] if model_name else _get_opennews_relay_model_attempts()
+    last_error = ""
+    for model in [item for item in models if item]:
+        for retry_index in range(_get_opennews_relay_retry_attempts()):
+            try:
+                response = requests.post(
+                    _get_openai_relay_responses_url(),
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=_opennews_relay_request_payload(model, repair_prompt, max_output_tokens=4096, effort="minimal"),
+                    timeout=_get_opennews_relay_timeout_seconds(),
+                )
+                if response.status_code >= 400:
+                    last_error = f"{response.status_code} {response.text[:500]}"
+                    if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_relay_retry_attempts():
+                        time.sleep(1.5 * (retry_index + 1))
+                        continue
+                    break
+                repaired_raw = _extract_openai_relay_text(response.json())
+                candidate = _extract_json_object_text(repaired_raw)
+                if not candidate:
+                    last_error = "JSON 修复后仍未返回可解析 JSON"
+                    continue
+                repaired = json.loads(candidate)
+                if not isinstance(repaired, dict):
+                    last_error = "JSON 修复后返回的不是对象"
+                    continue
+                return repaired
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = repr(exc)
+                if retry_index + 1 < _get_opennews_relay_retry_attempts():
+                    time.sleep(1.5 * (retry_index + 1))
+                    continue
+                break
+    raise RuntimeError(f"API 中转新闻稿 JSON 修复失败：{last_error}")
+
+
+def _repair_opennews_glm_json(raw: str) -> dict:
+    api_key = _get_opennews_glm_api_key()
+    if not api_key:
+        raise RuntimeError("未配置 OPENNEWS_GLM_API_KEY 或 ZHIPUAI_API_KEY，无法修复新闻稿 JSON")
+    repair_prompt = f"""
+下面是一个 OpenNews 新闻稿模型输出，但它不是合法 JSON。请把它修复成严格 JSON。
+
+必须只返回 JSON，不要解释。字段必须包含：
+video_title, summary, script, material_keywords, material_visual_plan, fact_check_notes, source_credit, news_time_label
+
+原始输出：
+{(raw or "")[:12000]}
+""".strip()
+    last_error = ""
+    for retry_index in range(_get_opennews_glm_retry_attempts()):
+        try:
+            response = requests.post(
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": _get_opennews_glm_model(),
+                    "messages": [
+                        {"role": "system", "content": "你是 JSON 修复助手。只输出可解析 JSON，不输出解释。"},
+                        {"role": "user", "content": repair_prompt},
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0.2,
+                },
+                timeout=_get_opennews_glm_timeout_seconds(),
+            )
+            if response.status_code >= 400:
+                last_error = f"{response.status_code} {response.text[:500]}"
+                if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_glm_retry_attempts():
+                    time.sleep(1.5 * (retry_index + 1))
+                    continue
+                break
+            repaired_raw = _extract_chat_completion_text(response.json())
+            candidate = _extract_json_object_text(repaired_raw)
+            if not candidate:
+                last_error = "JSON 修复后仍未返回可解析 JSON"
+                continue
+            repaired = json.loads(candidate)
+            if not isinstance(repaired, dict):
+                last_error = "JSON 修复后返回的不是对象"
+                continue
+            return repaired
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = repr(exc)
+            if retry_index + 1 < _get_opennews_glm_retry_attempts():
+                time.sleep(1.5 * (retry_index + 1))
+                continue
+            break
+    raise RuntimeError(f"GLM-5.2 新闻稿 JSON 修复失败：{last_error}")
+
+
+def _request_opennews_glm_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
+    api_key = _get_opennews_glm_api_key()
+    if not api_key:
+        raise RuntimeError("未配置 OPENNEWS_GLM_API_KEY 或 ZHIPUAI_API_KEY，无法使用 GLM-5.2 生成新闻稿")
+    last_error: Exception | None = None
+    for retry_index in range(_get_opennews_glm_retry_attempts()):
+        raw = ""
+        try:
+            response = requests.post(
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": _get_opennews_glm_model(),
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "你是专业中文新闻视频编辑。只输出可解析 JSON，不输出解释、markdown 或代码块。",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": max_output_tokens,
+                    "temperature": 0.55,
+                },
+                timeout=_get_opennews_glm_timeout_seconds(),
+            )
+            if response.status_code >= 400:
+                last_error = RuntimeError(f"GLM-5.2 新闻稿生成失败：{response.status_code} {response.text[:500]}")
+                if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_glm_retry_attempts():
+                    time.sleep(1.5 * (retry_index + 1))
+                    continue
+                break
+            raw = _extract_chat_completion_text(response.json())
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+                last_error = RuntimeError("GLM-5.2 返回的 JSON 不是对象")
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                candidate = _extract_json_object_text(raw)
+                if candidate:
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            return parsed
+                        last_error = RuntimeError("GLM-5.2 返回的 JSON 对象提取结果不是对象")
+                    except json.JSONDecodeError as parse_exc:
+                        last_error = parse_exc
+                try:
+                    return _repair_opennews_glm_json(raw)
+                except Exception as repair_exc:
+                    return {
+                        "_raw_text": raw,
+                        "_json_parse_warning": str(repair_exc),
+                    }
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            if retry_index + 1 < _get_opennews_glm_retry_attempts():
+                time.sleep(1.5 * (retry_index + 1))
+                continue
+            break
+    raise RuntimeError(f"GLM-5.2 新闻稿生成失败：{last_error}")
 
 
 def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
@@ -168,60 +416,54 @@ def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) 
     if efforts[0] != "minimal":
         efforts.append("minimal")
     last_error: Exception | None = None
-    for attempt, effort in enumerate(efforts, start=1):
-        try:
-            response = requests.post(
-                _get_openai_relay_responses_url(),
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": _get_openai_relay_model(),
-                    "input": prompt,
-                    "instructions": "你只输出可解析 JSON。",
-                    "max_output_tokens": max_output_tokens,
-                    "reasoning": {"effort": effort},
-                    "text": {"format": {"type": "json_object"}},
-                    "store": False,
-                },
-                timeout=_get_opennews_relay_timeout_seconds(),
-            )
-            if response.status_code >= 400:
-                raise RuntimeError(f"API 中转新闻稿生成失败：{response.status_code} {response.text[:500]}")
-            raw = _extract_openai_relay_text(response.json())
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    return parsed
-                last_error = RuntimeError("模型返回的 JSON 不是对象")
-            except json.JSONDecodeError:
-                candidate = _extract_json_object_text(raw)
-                if candidate:
+    for model in _get_opennews_relay_model_attempts():
+        for effort in efforts:
+            for retry_index in range(_get_opennews_relay_retry_attempts()):
+                raw = ""
+                try:
+                    response = requests.post(
+                        _get_openai_relay_responses_url(),
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                        json=_opennews_relay_request_payload(model, prompt, max_output_tokens=max_output_tokens, effort=effort),
+                        timeout=_get_opennews_relay_timeout_seconds(),
+                    )
+                    if response.status_code >= 400:
+                        last_error = RuntimeError(f"API 中转新闻稿生成失败：{response.status_code} {response.text[:500]}")
+                        if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_relay_retry_attempts():
+                            time.sleep(1.5 * (retry_index + 1))
+                            continue
+                        break
+                    raw = _extract_openai_relay_text(response.json())
                     try:
-                        parsed = json.loads(candidate)
+                        parsed = json.loads(raw)
                         if isinstance(parsed, dict):
                             return parsed
-                        last_error = RuntimeError("模型返回的 JSON 对象提取结果不是对象")
-                    except json.JSONDecodeError as exc:
-                        last_error = exc
-                else:
-                    last_error = RuntimeError("模型未返回 JSON 对象")
-            if attempt < len(efforts):
-                time.sleep(1.5)
-                continue
-            try:
-                return _repair_opennews_relay_json(raw)
-            except Exception as repair_exc:
-                return {
-                    "_raw_text": raw,
-                    "_json_parse_warning": str(repair_exc),
-                }
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            last_error = exc
-            if attempt < len(efforts):
-                time.sleep(1.5)
-                continue
-            raise RuntimeError(
-                "API 中转模型生成 OpenNews 新闻稿超时，请稍后重试；系统已改用更轻推理强度重试但仍未返回。"
-            ) from exc
+                        last_error = RuntimeError("模型返回的 JSON 不是对象")
+                    except json.JSONDecodeError:
+                        candidate = _extract_json_object_text(raw)
+                        if candidate:
+                            try:
+                                parsed = json.loads(candidate)
+                                if isinstance(parsed, dict):
+                                    return parsed
+                                last_error = RuntimeError("模型返回的 JSON 对象提取结果不是对象")
+                            except json.JSONDecodeError as exc:
+                                last_error = exc
+                        else:
+                            last_error = RuntimeError("模型未返回 JSON 对象")
+                    try:
+                        return _repair_opennews_relay_json(raw, model_name=model)
+                    except Exception as repair_exc:
+                        return {
+                            "_raw_text": raw,
+                            "_json_parse_warning": str(repair_exc),
+                        }
+                except (requests.Timeout, requests.ConnectionError) as exc:
+                    last_error = exc
+                    if retry_index + 1 < _get_opennews_relay_retry_attempts():
+                        time.sleep(1.5 * (retry_index + 1))
+                        continue
+                    break
     raise RuntimeError(f"API 中转新闻稿生成失败：{last_error}")
 
 
@@ -273,7 +515,12 @@ def _request_opennews_claude_json(prompt: str, *, max_output_tokens: int = 4096)
 
 
 def _request_opennews_model_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
-    return _request_opennews_relay_json(prompt, max_output_tokens=max_output_tokens)
+    provider = _get_opennews_model_provider()
+    if provider in {"relay", "api_relay", "openai_relay", "claude_relay"}:
+        return _request_opennews_relay_json(prompt, max_output_tokens=max_output_tokens)
+    if provider in {"claude", "anthropic"}:
+        return _request_opennews_claude_json(prompt, max_output_tokens=max_output_tokens)
+    return _request_opennews_glm_json(prompt, max_output_tokens=max_output_tokens)
 
 
 def _ensure_string_list(value: object, *, limit: int = 8) -> list[str]:
@@ -1022,6 +1269,124 @@ GENERAL_WEB_BLOCKED_HOST_TOKENS = (
 )
 
 
+OPENNEWS_RISKY_MEDIA_HOST_TOKENS = (
+    "porn",
+    "xxx",
+    "adult",
+    "sex",
+    "jav",
+    "hentai",
+    "onlyfans",
+    "fansly",
+    "xhamster",
+    "xnxx",
+    "redtube",
+    "pornhub",
+    "spankbang",
+)
+
+
+OPENNEWS_TRUSTED_MEDIA_HOST_TOKENS = (
+    ".gov",
+    ".mil",
+    "defense.gov",
+    "dvidshub.net",
+    "dod.defense.gov",
+    "whitehouse.gov",
+    "state.gov",
+    "treasury.gov",
+    "federalreserve.gov",
+    "sec.gov",
+    "mod.go.jp",
+    "mofa.go.jp",
+    "gov.uk",
+    "europa.eu",
+    "un.org",
+    "nato.int",
+    "apnews.com",
+    "reuters.com",
+    "afp.com",
+    "prnewswire.com",
+    "businesswire.com",
+    "globenewswire.com",
+    "nvidia.com",
+    "openai.com",
+    "anthropic.com",
+    "microsoft.com",
+    "apple.com",
+    "google.com",
+    "meta.com",
+    "tesla.com",
+    "spacex.com",
+    "boeing.com",
+    "airbus.com",
+)
+
+
+OPENNEWS_GENERIC_MEDIA_QUERY_TOKENS = {
+    "news",
+    "news photo",
+    "news image",
+    "news video",
+    "press photo",
+    "official photo",
+    "official video",
+    "footage",
+    "b roll",
+    "b-roll",
+    "archive footage",
+    "news footage",
+    "public domain",
+    "latest photos",
+    "press briefing",
+    "government meeting",
+    "diplomacy",
+    "parliament",
+    "cabinet meeting",
+    "foreign ministry",
+    "financial market",
+    "economy",
+    "stock market",
+    "business district",
+    "city street",
+    "public service",
+    "community",
+}
+
+
+OPENNEWS_GENERIC_ENTITY_WORDS = {
+    "news",
+    "video",
+    "image",
+    "photo",
+    "photos",
+    "official",
+    "latest",
+    "report",
+    "reports",
+    "market",
+    "markets",
+    "government",
+    "company",
+    "companies",
+    "business",
+    "technology",
+    "finance",
+    "politics",
+    "military",
+    "society",
+    "today",
+    "yesterday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+}
+
+
 def source_payloads() -> list[dict]:
     return [source.__dict__ for source in OPENNEWS_SOURCES]
 
@@ -1043,6 +1408,180 @@ def _compact_query(value: str, max_chars: int = 90) -> str:
     value = re.sub(r"[，。！？、；：,.!?;:（）()【】\[\]「」\"']", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value[:max_chars]
+
+
+def _normalized_text_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fffぁ-んァ-ヶ一-龯]+", " ", str(value or "").lower()).strip()
+
+
+def _host_matches_token(host: str, token: str) -> bool:
+    host = (host or "").lower()
+    token = (token or "").lower().strip()
+    if not host or not token:
+        return False
+    if token.startswith("."):
+        return host.endswith(token)
+    return token in host
+
+
+def _opennews_media_host_flags(url: str) -> tuple[str, bool, bool]:
+    host = urlparse(url or "").netloc.lower()
+    trusted = any(_host_matches_token(host, token) for token in OPENNEWS_TRUSTED_MEDIA_HOST_TOKENS)
+    risky = any(_host_matches_token(host, token) for token in OPENNEWS_RISKY_MEDIA_HOST_TOKENS)
+    return host, trusted, risky
+
+
+def _opennews_is_generic_media_query(query: str) -> bool:
+    normalized = _normalized_text_key(query)
+    if not normalized:
+        return True
+    if normalized in OPENNEWS_GENERIC_MEDIA_QUERY_TOKENS:
+        return True
+    tokens = [token for token in normalized.split() if token]
+    if len(tokens) <= 2 and all(token in OPENNEWS_GENERIC_ENTITY_WORDS for token in tokens):
+        return True
+    return False
+
+
+def _opennews_extract_entity_terms(*parts: str, max_terms: int = 18) -> list[str]:
+    """Extract stable entities from title/summary/keywords so fallback images stay news-specific."""
+    raw_text = " ".join(_strip_tags(str(part or "")) for part in parts if part)
+    candidates: list[str] = []
+    candidates.extend(re.findall(r"\b[A-Z][A-Za-z0-9&.\-]+(?:\s+[A-Z][A-Za-z0-9&.\-]+){0,4}\b", raw_text))
+    candidates.extend(re.findall(r"\b[A-Z]{2,}(?:[-/][A-Z0-9]{2,})?\b", raw_text))
+    candidates.extend(re.findall(r"[\u4e00-\u9fff]{2,12}", raw_text))
+    for piece in re.split(r"[,，、;；/\n\r]+", raw_text):
+        compact = _compact_query(piece, max_chars=48)
+        if compact and not _opennews_is_generic_media_query(compact):
+            candidates.append(compact)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate = _compact_query(candidate, max_chars=48)
+        normalized = _normalized_text_key(candidate)
+        if not normalized or normalized in seen:
+            continue
+        words = normalized.split()
+        if all(word in OPENNEWS_GENERIC_ENTITY_WORDS for word in words):
+            continue
+        if len(normalized) < 2:
+            continue
+        seen.add(normalized)
+        deduped.append(candidate)
+        if len(deduped) >= max_terms:
+            break
+    return deduped
+
+
+def _opennews_filter_precise_queries(queries: Iterable[str], entity_terms: Iterable[str], *, limit: int = 4) -> list[str]:
+    entity_keys = [_normalized_text_key(term) for term in entity_terms if _normalized_text_key(term)]
+    precise: list[str] = []
+    seen: set[str] = set()
+    for query in queries or []:
+        compact = _compact_query(str(query or ""), max_chars=90)
+        key = _normalized_text_key(compact)
+        if not compact or key in seen or _opennews_is_generic_media_query(compact):
+            continue
+        if entity_keys and not any(entity and entity in key for entity in entity_keys):
+            generic_hits = sum(1 for token in OPENNEWS_GENERIC_MEDIA_QUERY_TOKENS if token and token in key)
+            if generic_hits >= 2:
+                continue
+            # Keep longer title-like queries, but drop short category-only fallbacks.
+            if len(key.split()) < 4 and len(key) < 16:
+                continue
+        seen.add(key)
+        precise.append(compact)
+        if len(precise) >= limit:
+            break
+    if precise:
+        return precise
+    for term in entity_terms or []:
+        compact = _compact_query(str(term or ""), max_chars=70)
+        key = _normalized_text_key(compact)
+        if compact and key not in seen and not _opennews_is_generic_media_query(compact):
+            seen.add(key)
+            precise.append(compact)
+            if len(precise) >= limit:
+                break
+    return precise
+
+
+def _opennews_candidate_relevance_score(
+    item: dict,
+    *,
+    entity_terms: Iterable[str],
+    theme_text: str = "",
+    keyword_text: str = "",
+) -> tuple[int, list[str]]:
+    haystack = " ".join(
+        str(item.get(field) or "")
+        for field in ("url", "title", "source_url", "related_query", "theme_title")
+    )
+    haystack_key = _normalized_text_key(haystack)
+    theme_key = _normalized_text_key(f"{theme_text} {keyword_text}")
+    _, trusted_host, risky_host = _opennews_media_host_flags(str(item.get("url") or ""))
+    if risky_host:
+        return -999, []
+
+    matched_terms: list[str] = []
+    score = 0
+    source = str(item.get("source") or "").strip().lower()
+    if str(item.get("kind") or "").lower() == "video":
+        score += 20
+    if trusted_host:
+        score += 25
+    if source in {"general_web", "general_web_search_media"}:
+        score -= 35
+    elif source:
+        score += 15
+
+    for term in entity_terms or []:
+        term_key = _normalized_text_key(term)
+        if not term_key or term_key in OPENNEWS_GENERIC_MEDIA_QUERY_TOKENS:
+            continue
+        if term_key in haystack_key:
+            matched_terms.append(str(term))
+            score += 75 if len(term_key) >= 6 else 45
+        elif term_key in theme_key and trusted_host:
+            score += 18
+    related_query = str(item.get("related_query") or "")
+    if related_query and _opennews_is_generic_media_query(related_query):
+        score -= 35
+    return score, matched_terms
+
+
+def _opennews_filter_relevant_media(
+    media: list[dict],
+    *,
+    entity_terms: Iterable[str],
+    theme_text: str = "",
+    keyword_text: str = "",
+    min_score: int = 30,
+    limit: int = 80,
+) -> list[dict]:
+    filtered: list[tuple[int, dict]] = []
+    for item in media or []:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        score, matched_terms = _opennews_candidate_relevance_score(
+            item,
+            entity_terms=entity_terms,
+            theme_text=theme_text,
+            keyword_text=keyword_text,
+        )
+        source = str(item.get("source") or "").strip().lower()
+        _, trusted_host, _ = _opennews_media_host_flags(str(item.get("url") or ""))
+        if source in {"general_web", "general_web_search_media"} and not matched_terms:
+            continue
+        if score < min_score and not (trusted_host and matched_terms):
+            continue
+        enriched = dict(item)
+        enriched["opennews_relevance_score"] = score
+        enriched["opennews_relevance_terms"] = matched_terms[:5]
+        filtered.append((score, enriched))
+    filtered.sort(key=lambda pair: pair[0], reverse=True)
+    return _merge_media_items([item for _, item in filtered], limit=limit)
 
 
 def _expanded_media_queries(*parts: str, category: str = "all", limit: int = 8) -> list[str]:
@@ -1636,6 +2175,8 @@ def _is_allowed_general_web_url(url: str) -> bool:
     host = parsed.netloc.lower()
     if any(token in host for token in GENERAL_WEB_BLOCKED_HOST_TOKENS):
         return False
+    if any(_host_matches_token(host, token) for token in OPENNEWS_RISKY_MEDIA_HOST_TOKENS):
+        return False
     if any(token in url.lower() for token in ("login", "signup", "account", "subscribe")):
         return False
     return True
@@ -1719,9 +2260,9 @@ def discover_general_search_media(queries: Iterable[str], *, limit: int = 180) -
     query_variants: list[str] = []
     for query in queries:
         query = _compact_query(str(query or ""), max_chars=80)
-        if not query:
+        if not query or _opennews_is_generic_media_query(query):
             continue
-        for suffix in ("news photo", "official photo", "press photo", "news image", "news video", "footage", "b-roll"):
+        for suffix in ("official photo", "press release image", "news photo"):
             variant = f"{query} {suffix}".strip()
             if variant.lower() not in {item.lower() for item in query_variants}:
                 query_variants.append(variant)
@@ -1750,20 +2291,13 @@ def discover_general_web_media(queries: Iterable[str], *, article_url: str = "",
     query_variants: list[str] = []
     for query in queries:
         query = _compact_query(str(query or ""), max_chars=80)
-        if not query:
+        if not query or _opennews_is_generic_media_query(query):
             continue
         for suffix in (
-            "news photo video official",
-            "image",
-            "footage",
-            "press photo",
-            "b-roll",
-            "latest photos",
-            "official video",
+            "official news photo",
             "official photo",
-            "archive footage",
-            "news footage",
-            "public domain",
+            "press release image",
+            "news photo",
         ):
             variant = f"{query} {suffix}".strip()
             if variant.lower() not in {item.lower() for item in query_variants}:
@@ -2425,9 +2959,19 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
         limit=80,
     )
     article_media = _merge_media_items(article_media, related_article_media, related_media, limit=180)
+    model_provider = _get_opennews_model_provider()
+    if model_provider in {"relay", "api_relay", "openai_relay", "claude_relay"}:
+        model_name = _get_opennews_relay_model()
+        model_provider_label = "API中转模型 / Claude"
+    elif model_provider in {"claude", "anthropic"}:
+        model_name = os.getenv("ANTHROPIC_OPENNEWS_MODEL", "claude-sonnet-4-6")
+        model_provider_label = "Claude"
+    else:
+        model_name = _get_opennews_glm_model()
+        model_provider_label = "智谱 GLM"
     draft["_meta"] = {
-        "model": _get_openai_relay_model(),
-        "model_provider": "API中转模型",
+        "model": model_name,
+        "model_provider": model_provider_label,
         "source_url": url,
         "source_name": article.get("source_name"),
         "license": article.get("license"),
@@ -2492,9 +3036,14 @@ def _rank_media_for_segment(media: list[dict], *, segment_text: str, keyword_tex
                     score += 65
         source = str(item.get("source") or "")
         if source == "general_web_search_media":
-            score += 20
+            score -= 30
         if source == "general_web":
-            score += 12
+            score -= 20
+        _, trusted_host, risky_host = _opennews_media_host_flags(str(item.get("url") or ""))
+        if trusted_host:
+            score += 25
+        if risky_host:
+            score -= 300
         score -= index
         ranked.append((score, dict(item)))
     ranked.sort(key=lambda item: item[0], reverse=True)
@@ -2651,16 +3200,30 @@ def _enrich_theme_plan_media(
     *,
     article_url: str = "",
     source_id: str = "",
+    entity_terms: list[str] | None = None,
+    keyword_text: str = "",
     limit_per_theme: int = 10,
 ) -> list[dict]:
     """For each script theme, crawl only configured news/official sources."""
     collected: list[dict] = []
+    entity_terms = entity_terms or []
     for theme_index, theme in enumerate(theme_plan or []):
         queries = [str(query).strip() for query in (theme.get("queries") or []) if str(query).strip()]
         if not queries:
             queries = _expanded_media_queries(str(theme.get("script") or ""), category=category, limit=3)
+        queries = _opennews_filter_precise_queries(
+            queries,
+            entity_terms,
+            limit=3,
+        )
         if not queries:
             continue
+        theme_text = " ".join([
+            str(theme.get("title") or ""),
+            str(theme.get("script") or ""),
+            str(theme.get("visual_need") or ""),
+            " ".join(queries),
+        ])
         theme_media = _merge_media_items(
             discover_broad_opennews_media(
                 source_id=source_id,
@@ -2671,6 +3234,14 @@ def _enrich_theme_plan_media(
             ),
             discover_general_search_media(queries[:2], limit=limit_per_theme),
             discover_general_web_media(queries[:2], article_url=article_url, limit=limit_per_theme),
+            limit=limit_per_theme,
+        )
+        theme_media = _opennews_filter_relevant_media(
+            theme_media,
+            entity_terms=entity_terms,
+            theme_text=theme_text,
+            keyword_text=keyword_text,
+            min_score=25,
             limit=limit_per_theme,
         )
         for item in theme_media:
@@ -2727,16 +3298,42 @@ def build_opennews_script_data(*, draft: dict, article: dict | None = None, targ
     news_time_label = str(draft.get("news_time_label") or article.get("published_at") or draft.get("_meta", {}).get("published_at") or "来源页面未标注明确发布时间").strip()
     category_name = str(article.get("category_name") or draft.get("_meta", {}).get("category_name") or "新闻").strip()
     category_id = str(article.get("category") or draft.get("_meta", {}).get("category") or "all")
+    entity_terms = _opennews_extract_entity_terms(
+        keyword_text,
+        str(draft.get("video_title") or ""),
+        str(article.get("title") or ""),
+        str(draft.get("summary") or ""),
+        str(article.get("summary") or ""),
+        " ".join(str(item) for item in expanded_queries[:4]),
+        max_terms=18,
+    )
+    article_media = _opennews_filter_relevant_media(
+        article_media,
+        entity_terms=entity_terms,
+        theme_text=f"{draft.get('video_title') or ''} {article.get('title') or ''}",
+        keyword_text=keyword_text,
+        min_score=10,
+        limit=30,
+    )
     theme_plan = _theme_plan_from_visual_plan(draft, category_id) or _build_opennews_theme_plan(script, keyword_text, category_id, max_themes=6)
     theme_extra_media = _enrich_theme_plan_media(
         theme_plan,
         category_id,
         article_url=str(article.get("url") or draft.get("_meta", {}).get("source_url") or ""),
         source_id=str(article.get("source_id") or ""),
+        entity_terms=entity_terms,
+        keyword_text=keyword_text,
         limit_per_theme=10,
     )
     ranked_media = _rank_media_by_theme_plan(
-        _merge_media_items(article_media, theme_extra_media, limit=90),
+        _opennews_filter_relevant_media(
+            _merge_media_items(article_media, theme_extra_media, limit=90),
+            entity_terms=entity_terms,
+            theme_text=script,
+            keyword_text=keyword_text,
+            min_score=20,
+            limit=90,
+        ),
         theme_plan,
         keyword_text,
         per_theme_limit=2,

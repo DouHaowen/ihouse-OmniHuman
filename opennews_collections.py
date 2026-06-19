@@ -97,6 +97,70 @@ def _variant_video_path(output_dir: Path, result: dict, aspect_ratio: str) -> Pa
     return None
 
 
+def _video_duration_seconds(video_path: Path) -> float:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return max(0.0, float((result.stdout or "0").strip() or 0))
+    except Exception:
+        return 0.0
+
+
+def _segment_has_material_asset(segment: dict, output_dir: Path) -> bool:
+    for item in segment.get("material_items") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = output_dir / raw_path
+        if path.exists() and path.stat().st_size > 0:
+            return True
+    for raw_path in segment.get("material_paths") or []:
+        path = Path(str(raw_path or ""))
+        if not path:
+            continue
+        if not path.is_absolute():
+            path = output_dir / str(raw_path)
+        if path.exists() and path.stat().st_size > 0:
+            return True
+    return False
+
+
+def _result_has_complete_material_assets(result: dict, output_dir: Path) -> bool:
+    material_count = 0
+    for segment in result.get("segments") or []:
+        if not isinstance(segment, dict) or segment.get("type") != "material":
+            continue
+        material_count += 1
+        if not _segment_has_material_asset(segment, output_dir):
+            return False
+    return material_count > 0
+
+
+def _collection_video_item_is_usable(item: dict, aspect_ratio: str) -> tuple[bool, str, Path | None]:
+    video_path = Path(item.get(f"{aspect_ratio}_path") or item.get("horizontal_path") or item.get("vertical_path") or "")
+    if not video_path.exists() or not video_path.is_file():
+        return False, "成片文件不存在", None
+    if video_path.stat().st_size < 256 * 1024:
+        return False, "成片文件过小，疑似未完整生成", video_path
+    duration = _video_duration_seconds(video_path)
+    if duration < 3:
+        return False, f"成片时长过短：{duration:.1f}s", video_path
+    return True, "", video_path
+
+
 def _load_collection_state(root: Path) -> dict:
     _ensure_root(root)
     return _read_json(root / "state.json", {"used_history_ids": {}})
@@ -139,6 +203,8 @@ def list_collection_pool(root: Path, output_root: Path, *, limit: int = 80, incl
         vertical = _variant_video_path(output_dir, result, "vertical")
         if not horizontal and not vertical:
             continue
+        if not _result_has_complete_material_assets(result, output_dir):
+            continue
         source = ((result.get("workflow_config") or {}).get("source") or {}).get("article") or {}
         tts_providers = []
         for segment in result.get("segments") or []:
@@ -179,9 +245,9 @@ def create_collection_job(root: Path, output_root: Path, *, history_ids: list[st
             selected.append(item)
         else:
             missing.append(str(history_id or "").strip())
-    if missing:
-        raise ValueError(f"以下视频不可用于合集或已入过合集：{', '.join(missing[:5])}")
     if not selected:
+        if missing:
+            raise ValueError(f"选择的视频都不可用于合集或已入过合集：{', '.join(missing[:5])}")
         raise ValueError("请先选择要加入合集的视频")
     if len(selected) > 10:
         raise ValueError("第一阶段一次最多选择 10 条新闻")
@@ -197,6 +263,7 @@ def create_collection_job(root: Path, output_root: Path, *, history_ids: list[st
         "aspect_ratio": aspect_ratio,
         "title": title or f"OpenNews 新闻合集 {time.strftime('%Y-%m-%d')}",
         "items": selected,
+        "skipped_items": [{"history_id": item, "reason": "不可用于合集或已入过合集"} for item in missing if item],
         "result": {},
         "error": "",
     }
@@ -275,27 +342,48 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
             str(intro_normalized),
         ])
         clips.append(intro_normalized)
+    skipped_items = list(job.get("skipped_items") or [])
+    included_items: list[dict] = []
     for index, item in enumerate(job.get("items") or [], start=1):
-        video_path = Path(item.get(f"{aspect_ratio}_path") or item.get("horizontal_path") or item.get("vertical_path") or "")
-        if not video_path.exists():
-            raise RuntimeError(f"合集素材不存在：{item.get('title')}")
+        usable, reason, video_path = _collection_video_item_is_usable(item, aspect_ratio)
+        if not usable or not video_path:
+            skipped_items.append({**item, "skip_reason": reason or "成片不可用"})
+            update_collection_job(
+                root,
+                job_id,
+                message=f"已跳过不可用短片：{item.get('title') or item.get('history_id')}｜{reason}",
+                skipped_items=skipped_items,
+            )
+            continue
         normalized = work_dir / f"clip_{index:02d}.mp4"
         update_collection_job(root, job_id, message=f"正在统一视频规格：{index}/{len(job.get('items') or [])}")
-        _run([
-            "ffmpeg", "-y",
-            "-i", str(video_path),
-            "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30",
-            "-af", "aresample=48000,loudnorm=I=-15:TP=-1.5:LRA=11",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(normalized),
-        ])
+        try:
+            _run([
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30",
+                "-af", "aresample=48000,loudnorm=I=-15:TP=-1.5:LRA=11",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(normalized),
+            ])
+        except Exception as exc:
+            skipped_items.append({**item, "skip_reason": f"规格统一失败：{exc}"})
+            update_collection_job(
+                root,
+                job_id,
+                message=f"已跳过规格异常短片：{item.get('title') or item.get('history_id')}",
+                skipped_items=skipped_items,
+            )
+            continue
         clips.append(normalized)
-    if not clips:
+        included_items.append(item)
+    content_clip_count = len(included_items)
+    if content_clip_count <= 0:
         raise RuntimeError("没有可用于合集的视频素材")
     concat_list = work_dir / "concat.txt"
     concat_list.write_text("".join(f"file '{clip.as_posix()}'\n" for clip in clips), encoding="utf-8")
@@ -311,7 +399,7 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
         "-movflags", "+faststart",
         str(final_path),
     ])
-    collection_items = list(job.get("items") or [])
+    collection_items = included_items
     titles = [str(item.get("title") or "") for item in collection_items]
     collection = {
         "collection_id": job_id,
@@ -323,6 +411,9 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
         "intro_video_path": str(intro_video_path) if intro_video_path and intro_video_path.is_file() else "",
         "intro_script": str(job.get("intro_script") or ""),
         "items": collection_items,
+        "skipped_items": skipped_items,
+        "included_count": len(collection_items),
+        "skipped_count": len(skipped_items),
         "description": "\n".join(f"{idx + 1}. {title}" for idx, title in enumerate(titles)),
     }
     with FILE_LOCK:
