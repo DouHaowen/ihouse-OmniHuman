@@ -1,0 +1,16 @@
+[Unit]
+Description=iHouse 5090 GPU service orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/saita/ihouse-gpu-orchestrator
+Environment=IHOUSE_GPU_ORCHESTRATOR_TOKEN=local-gpu-orchestrator-5090
+Environment=IHOUSE_GPU_ORCHESTRATOR_STATE=/home/saita/ihouse-gpu-orchestrator/state.txt
+ExecStart=/home/saita/miniforge3/envs/qwen3-tts/bin/uvicorn gpu_orchestrator_5090:app --host 0.0.0.0 --port 8898
+Restart=always
+RestartSec=8
+
+[Install]
+WantedBy=default.target

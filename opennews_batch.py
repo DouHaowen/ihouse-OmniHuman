@@ -17,7 +17,7 @@ from opennews_trends import search_english_trends
 
 DEFAULT_BATCH_CONFIG = {
     "enabled": False,
-    "interval_minutes": 120,
+    "interval_minutes": 180,
     "category": "all",
     "time_range": "6h",
     "limit": 20,
@@ -45,13 +45,29 @@ _RUN_LOCK = threading.Lock()
 _SCHEDULER_STARTED = False
 _AFTER_FETCH_CALLBACK = None
 RETENTION_SECONDS = max(3600, int(os.getenv("OPENNEWS_BATCH_RETENTION_SECONDS", str(2 * 24 * 60 * 60)) or str(2 * 24 * 60 * 60)))
+DEDUPE_MEMORY_SECONDS = max(
+    RETENTION_SECONDS,
+    int(os.getenv("OPENNEWS_BATCH_DEDUPE_MEMORY_SECONDS", str(14 * 24 * 60 * 60)) or str(14 * 24 * 60 * 60)),
+)
 EVENT_DUPLICATE_TOKEN_OVERLAP = max(
-    0.50,
-    min(0.95, float(os.getenv("OPENNEWS_BATCH_EVENT_DUPLICATE_TOKEN_OVERLAP", "0.72") or "0.72")),
+    0.42,
+    min(0.95, float(os.getenv("OPENNEWS_BATCH_EVENT_DUPLICATE_TOKEN_OVERLAP", "0.58") or "0.58")),
 )
 EVENT_DUPLICATE_MIN_TOKENS = max(
     4,
     min(12, int(os.getenv("OPENNEWS_BATCH_EVENT_DUPLICATE_MIN_TOKENS", "5") or "5")),
+)
+FETCH_OVERFETCH_MULTIPLIER = max(
+    1,
+    min(8, int(os.getenv("OPENNEWS_BATCH_FETCH_OVERFETCH_MULTIPLIER", "4") or "4")),
+)
+FETCH_OVERFETCH_MIN = max(
+    20,
+    min(120, int(os.getenv("OPENNEWS_BATCH_FETCH_OVERFETCH_MIN", "80") or "80")),
+)
+FETCH_OVERFETCH_MAX = max(
+    FETCH_OVERFETCH_MIN,
+    min(160, int(os.getenv("OPENNEWS_BATCH_FETCH_OVERFETCH_MAX", "100") or "100")),
 )
 
 TITLE_DEDUPE_STOPWORDS = {
@@ -62,6 +78,9 @@ TITLE_DEDUPE_STOPWORDS = {
     "says", "say", "than", "that", "the", "their", "this", "to", "top", "update",
     "updates", "video", "watch", "what", "when", "where", "why", "will", "with",
     "would", "报道", "最新", "视频", "新闻", "更新",
+    "according", "reportedly", "breaking", "exclusive", "analysis", "opinion", "explainer",
+    "today", "yesterday", "monday", "tuesday", "wednesday", "thursday", "friday",
+    "saturday", "sunday", "jst", "gmt", "utc",
 }
 
 
@@ -200,7 +219,7 @@ def _prune_old_batches_locked(root: Path, *, now: float | None = None) -> dict:
             if not isinstance(value, dict):
                 continue
             last_seen_at = _safe_float(value.get("last_seen_at") or value.get("first_seen_at"), 0)
-            if (last_seen_at and last_seen_at >= now - RETENTION_SECONDS) or str(key) in kept_keys:
+            if (last_seen_at and last_seen_at >= now - DEDUPE_MEMORY_SECONDS) or str(key) in kept_keys:
                 fresh_seen[key] = value
         if len(fresh_seen) != len(seen):
             _write_json(_seen_path(root), fresh_seen)
@@ -270,6 +289,17 @@ def _candidate_key(candidate: dict) -> str:
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:18]
 
 
+def _candidate_url_key(candidate: dict) -> str:
+    url = str(candidate.get("url") or candidate.get("source_url") or "").strip().lower()
+    if not url:
+        return ""
+    url = re.sub(r"#.*$", "", url)
+    url = re.sub(r"[?&](?:utm_[^=&]+|fbclid|gclid|mc_cid|mc_eid|ref|ref_src|cmpid|outputType)=[^&]*", "", url)
+    url = re.sub(r"[?&]+$", "", url)
+    url = url.rstrip("/")
+    return hashlib.sha1(url.encode("utf-8")).hexdigest()[:18] if url else ""
+
+
 def _normalize_dedupe_word(token: str) -> str:
     token = str(token or "").lower().strip("._-")
     if len(token) > 5 and token.endswith("ies"):
@@ -290,9 +320,13 @@ def _candidate_dedupe_text(candidate: dict) -> str:
         candidate.get("title"),
         candidate.get("title_zh"),
         candidate.get("translated_title"),
+        candidate.get("original_title"),
+        candidate.get("english_title"),
         candidate.get("summary"),
         candidate.get("summary_zh"),
         candidate.get("translated_summary"),
+        candidate.get("description"),
+        candidate.get("content"),
     ]
     text = " ".join(str(field or "") for field in fields)
     text = re.sub(r"<[^>]+>", " ", text)
@@ -302,9 +336,23 @@ def _candidate_dedupe_text(candidate: dict) -> str:
 
 
 def _candidate_title_key(candidate: dict) -> str:
-    title = str(candidate.get("title") or candidate.get("title_zh") or candidate.get("translated_title") or "").lower()
+    compact = _candidate_title_compact(candidate)
+    return hashlib.sha1(compact.encode("utf-8")).hexdigest()[:18] if compact else ""
+
+
+def _candidate_title_compact(candidate: dict) -> str:
+    title = str(
+        candidate.get("title")
+        or candidate.get("title_zh")
+        or candidate.get("translated_title")
+        or candidate.get("original_title")
+        or candidate.get("english_title")
+        or ""
+    ).lower()
     title = re.sub(r"<[^>]+>", " ", title)
     title = re.sub(r"https?://\S+", " ", title)
+    title = re.sub(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\.?\s+\d{1,2},?\s+\d{4}\b", " ", title)
+    title = re.sub(r"\b20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}日?\b", " ", title)
     title = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", " ", title)
     words = []
     for raw in title.split():
@@ -312,8 +360,7 @@ def _candidate_title_key(candidate: dict) -> str:
         if len(word) < 2 or word in TITLE_DEDUPE_STOPWORDS:
             continue
         words.append(word)
-    compact = " ".join(words[:24]).strip()
-    return hashlib.sha1(compact.encode("utf-8")).hexdigest()[:18] if compact else ""
+    return " ".join(words[:24]).strip()
 
 
 def _candidate_event_tokens(candidate: dict) -> list[str]:
@@ -324,12 +371,70 @@ def _candidate_event_tokens(candidate: dict) -> list[str]:
         "united states": "us",
         "wall street": "wallstreet",
         "federal reserve": "fed",
+        "federal open market committee": "fed",
         "artificial intelligence": "ai",
+        "generative artificial intelligence": "ai",
+        "ai chip": "aichip",
+        "ai chips": "aichip",
+        "semiconductor": "chip",
+        "semiconductors": "chip",
         "donald trump": "trump",
+        "president trump": "trump",
+        "jensen huang": "jensenhuang",
+        "nvidia ceo": "jensenhuang",
+        "elon musk": "elonmusk",
+        "x ai": "xai",
+        "amazon web services": "aws",
+        "amazon bedrock": "bedrock",
+        "aws bedrock": "bedrock",
+        "grok 4.3": "grok43",
+        "grok-4.3": "grok43",
+        "grok4.3": "grok43",
+        "grok 4 3": "grok43",
+        "white house": "whitehouse",
+        "middle east": "middleeast",
+        "stock market": "stockmarket",
+        "oil price": "oilprice",
+        "oil prices": "oilprice",
+        "mortgage rate": "mortgagerate",
+        "mortgage rates": "mortgagerate",
+        "real estate": "realestate",
+        "housing market": "housingmarket",
+        "人工智能": " ai ",
+        "英伟达": " nvidia ",
+        "黃仁勳": " jensenhuang ",
+        "黄仁勋": " jensenhuang ",
+        "特朗普": " trump ",
+        "白宫": " whitehouse ",
+        "白宮": " whitehouse ",
+        "美联储": " fed ",
+        "聯準會": " fed ",
+        "房地产": " realestate ",
+        "房产": " realestate ",
+        "房價": " homeprice ",
+        "房价": " homeprice ",
+        "油价": " oilprice ",
+        "油價": " oilprice ",
+        "伊朗": " iran ",
+        "以色列": " israel ",
+        "乌克兰": " ukraine ",
+        "烏克蘭": " ukraine ",
+        "俄罗斯": " russia ",
+        "俄羅斯": " russia ",
+        "中国": " china ",
+        "中國": " china ",
+        "台湾": " taiwan ",
+        "台灣": " taiwan ",
+        "北约": " nato ",
+        "北約": " nato ",
+        "马斯克": " elonmusk ",
+        "馬斯克": " elonmusk ",
+        "亚马逊": " amazon aws ",
+        "亞馬遜": " amazon aws ",
     }
     for source, replacement in aliases.items():
         text = text.replace(source, f" {replacement} ")
-    raw_tokens = re.findall(r"[a-z0-9][a-z0-9.+-]{1,}|\b[\u4e00-\u9fff]{2,}\b", text)
+    raw_tokens = re.findall(r"[a-z0-9][a-z0-9.+-]{1,}|[\u4e00-\u9fff]{2,}", text)
     tokens: list[str] = []
     seen: set[str] = set()
     for raw in raw_tokens:
@@ -342,25 +447,144 @@ def _candidate_event_tokens(candidate: dict) -> list[str]:
             continue
         seen.add(token)
         tokens.append(token)
-        if len(tokens) >= 28:
+        if len(tokens) >= 40:
             break
     return tokens
 
 
-def _candidate_event_key(candidate: dict) -> str:
+def _candidate_canonical_event_key(candidate: dict) -> str:
+    text = _candidate_dedupe_text(candidate)
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff.]+", " ", text.lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return ""
+
+    def has(pattern: str) -> bool:
+        return bool(re.search(pattern, normalized, flags=re.I))
+
+    # Product-version stories are the easiest to repeat under many headlines.
+    # Give them stable event clusters before the softer token overlap logic.
+    if has(r"\bgrok\s*[-_ ]*4\s*(?:\.|[-_ ])\s*3\b|\bgrok4\.?3\b"):
+        if has(r"\b(?:aws|amazon|bedrock)\b|亚马逊|亞馬遜"):
+            return "ai:grok_4_3_aws_bedrock"
+        return "ai:grok_4_3"
+    if has(r"\bclaude\s*(?:sonnet\s*)?4\s*(?:\.|[-_ ])\s*6\b|\bclaude4\.?6\b"):
+        return "ai:claude_sonnet_4_6"
+    if has(r"\bgpt\s*[-_ ]?5(?:\.\d+)?\b|\bchatgpt\s*5(?:\.\d+)?\b"):
+        version = re.search(r"\b(?:gpt|chatgpt)\s*[-_ ]?5(?:\.(\d+))?\b", normalized, flags=re.I)
+        suffix = f"_{version.group(1)}" if version and version.group(1) else ""
+        return f"ai:gpt_5{suffix}"
+    if has(r"\bgemini\s*3(?:\.\d+)?\b"):
+        return "ai:gemini_3"
+
+    # Obituaries often appear under rewritten headlines that omit "Fed" while
+    # still describing the same person/event. Anchor the person + death signal
+    # before the broader Federal Reserve branch so cross-source copies collapse.
+    if has(r"\b(?:alan greenspan|greenspan)\b|格林斯潘") and has(r"\b(?:die|dies|died|dead|death|decease|obituary)\b|去世|逝世|離世|离世|享年"):
+        return "obit:alan_greenspan_death"
+
+    if has(r"\b(?:nvidia|jensen huang|jensenhuang)\b|英伟达|黃仁勳|黄仁勋"):
+        if has(r"\b(?:china|export|restriction|ban|chip|semiconductor|aichip)\b|出口|限制|芯片|晶片"):
+            return "ai:nvidia_china_chip_export_controls"
+        if has(r"\b(?:data center|datacenter|energy|electricity|power)\b|数据中心|資料中心|能源|电力|電力"):
+            return "ai:nvidia_ai_datacenter_energy"
+
+    if has(r"\b(?:fed|federal reserve|powell|jerome powell)\b|美联储|聯準會"):
+        if has(r"\b(?:rate|interest|inflation|cut|hold)\b|利率|降息|通胀|通膨"):
+            return "finance:fed_rates_inflation"
+
+    if has(r"\b(?:iran|israel|strait of hormuz|hormuz)\b|伊朗|以色列|霍尔木兹|霍爾木茲"):
+        return "military:iran_israel_hormuz_conflict"
+
+    return ""
+
+
+def _candidate_event_signature_tokens(candidate: dict) -> list[str]:
     tokens = _candidate_event_tokens(candidate)
+    canonical_key = _candidate_canonical_event_key(candidate)
+    if canonical_key:
+        tokens = [canonical_key.replace(":", "_")] + tokens
+    if not tokens:
+        return []
+    priority_patterns = (
+        r"^(?:ai|aichip|chip|nvidia|jensenhuang|openai|anthropic|google|microsoft|meta|apple|tesla|robot|robotic|robotics)$",
+        r"^(?:xai|grok|grok43|aws|amazon|bedrock|claude|gemini|chatgpt|gpt)$",
+        r"^(?:ai_grok_4_3|ai_grok_4_3_aws_bedrock|ai_claude_sonnet_4_6|ai_gpt_5|ai_gpt_5_[0-9]+|ai_gemini_3)$",
+        r"^(?:trump|whitehouse|congress|senate|fed|powell|iran|israel|ukraine|russia|china|taiwan|nato)$",
+        r"^(?:stockmarket|market|stock|oilprice|oil|dollar|inflation|tariff|rate|mortgagerate|housingmarket|realestate|homeprice)$",
+        r"^[0-9]{4}$",
+        r"^[0-9]+(?:\.[0-9]+)?(?:bn|billion|mn|million|trillion|%)?$",
+    )
+    priority: list[str] = []
+    regular: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        bucket = priority if any(re.search(pattern, token) for pattern in priority_patterns) else regular
+        if token not in seen:
+            bucket.append(token)
+            seen.add(token)
+    combined = priority + regular
+    return sorted(combined[:24])
+
+
+def _candidate_event_key(candidate: dict) -> str:
+    canonical_key = _candidate_canonical_event_key(candidate)
+    if canonical_key:
+        return hashlib.sha1(canonical_key.encode("utf-8")).hexdigest()[:18]
+    tokens = _candidate_event_signature_tokens(candidate)
     if not tokens:
         return ""
-    basis = " ".join(tokens[:18])
+    basis = " ".join(tokens)
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:18]
 
 
-def _is_duplicate_event(candidate_tokens: list[str], existing_tokens: list[str]) -> bool:
-    if len(candidate_tokens) < EVENT_DUPLICATE_MIN_TOKENS or len(existing_tokens) < EVENT_DUPLICATE_MIN_TOKENS:
+STRONG_EVENT_ANCHOR_TOKENS = {
+    "ai", "aichip", "chip", "nvidia", "jensenhuang", "openai", "anthropic", "google", "microsoft", "meta",
+    "apple", "tesla", "trump", "whitehouse", "congress", "senate", "fed", "powell", "iran", "israel",
+    "ukraine", "russia", "china", "taiwan", "nato", "stockmarket", "oilprice", "mortgagerate",
+    "housingmarket", "realestate", "homeprice", "elonmusk", "spacex", "xai", "grok", "grok43",
+    "aws", "amazon", "bedrock", "claude", "gemini", "chatgpt", "gpt",
+    "ai_grok_4_3", "ai_grok_4_3_aws_bedrock", "ai_claude_sonnet_4_6", "ai_gpt_5", "ai_gemini_3",
+}
+
+
+def _strong_event_anchor_overlap(candidate_tokens: set[str], existing_tokens: set[str]) -> int:
+    return len((candidate_tokens & existing_tokens) & STRONG_EVENT_ANCHOR_TOKENS)
+
+
+def _has_grok43_signature(tokens: set[str]) -> bool:
+    return "grok43" in tokens or ("grok" in tokens and ("4.3" in tokens or "43" in tokens))
+
+
+def _has_aws_bedrock_signature(tokens: set[str]) -> bool:
+    return bool(tokens & {"aws", "amazon", "bedrock"})
+
+
+def _candidate_title_similar(left: str, right: str) -> bool:
+    left_tokens = [token for token in left.split() if token]
+    right_tokens = [token for token in right.split() if token]
+    if len(left_tokens) < 3 or len(right_tokens) < 3:
         return False
+    left_set = set(left_tokens)
+    right_set = set(right_tokens)
+    overlap = len(left_set & right_set)
+    if overlap >= 5:
+        return True
+    denominator = max(1, min(len(left_set), len(right_set)))
+    return overlap / denominator >= 0.62
+
+
+def _is_duplicate_event(candidate_tokens: list[str], existing_tokens: list[str]) -> bool:
     candidate_set = set(candidate_tokens)
     existing_set = set(existing_tokens)
+    if _has_grok43_signature(candidate_set) and _has_grok43_signature(existing_set):
+        if _has_aws_bedrock_signature(candidate_set) or _has_aws_bedrock_signature(existing_set):
+            return True
+    if len(candidate_tokens) < EVENT_DUPLICATE_MIN_TOKENS or len(existing_tokens) < EVENT_DUPLICATE_MIN_TOKENS:
+        return _strong_event_anchor_overlap(candidate_set, existing_set) >= 3
     overlap = len(candidate_set & existing_set)
+    if _strong_event_anchor_overlap(candidate_set, existing_set) >= 3:
+        return True
     if overlap >= 7:
         return True
     denominator = max(1, min(len(candidate_set), len(existing_set)))
@@ -430,9 +654,11 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
         "message": "",
     }
     try:
-        result = search_english_trends(category=category, time_range=time_range, keyword="", limit=limit)
+        fetch_limit = max(limit, min(FETCH_OVERFETCH_MAX, max(FETCH_OVERFETCH_MIN, limit * FETCH_OVERFETCH_MULTIPLIER)))
+        result = search_english_trends(category=category, time_range=time_range, keyword="", limit=fetch_limit)
         candidates = result.get("candidates") or []
         payload["raw_count"] = len(candidates)
+        payload["source_limit"] = fetch_limit
         payload["source_errors"] = result.get("source_errors", [])
         with _FILE_LOCK:
             _prune_old_batches_locked(root, now=started_at)
@@ -444,6 +670,11 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
                 for value in seen.values()
                 if isinstance(value, dict) and value.get("title_key")
             }
+            seen_url_keys = {
+                str(value.get("url_key") or "")
+                for value in seen.values()
+                if isinstance(value, dict) and value.get("url_key")
+            }
             seen_event_keys = {
                 str(value.get("event_key") or "")
                 for value in seen.values()
@@ -454,25 +685,38 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
                 for value in seen.values()
                 if isinstance(value, dict) and isinstance(value.get("event_tokens"), list)
             ]
+            seen_title_compacts = [
+                str(value.get("title_compact") or "")
+                for value in seen.values()
+                if isinstance(value, dict) and value.get("title_compact")
+            ]
             new_items = []
             duplicate_count = 0
             duplicate_event_count = 0
+            duplicate_reason_counts: dict[str, int] = {}
             for candidate in candidates:
                 key = _candidate_key(candidate)
+                url_key = _candidate_url_key(candidate)
                 title_key = _candidate_title_key(candidate)
+                title_compact = _candidate_title_compact(candidate)
                 event_key = _candidate_event_key(candidate)
                 event_tokens = _candidate_event_tokens(candidate)
                 duplicate_reason = ""
                 if key in seen:
                     duplicate_reason = "same_source_title"
+                elif url_key and url_key in seen_url_keys:
+                    duplicate_reason = "same_url"
                 elif title_key and title_key in seen_title_keys:
                     duplicate_reason = "same_title"
+                elif title_compact and any(_candidate_title_similar(title_compact, existing) for existing in seen_title_compacts):
+                    duplicate_reason = "similar_title"
                 elif event_key and event_key in seen_event_keys:
                     duplicate_reason = "same_event_key"
                 elif any(_is_duplicate_event(event_tokens, existing_tokens) for existing_tokens in seen_event_tokens):
                     duplicate_reason = "similar_event_tokens"
                 if duplicate_reason:
                     duplicate_count += 1
+                    duplicate_reason_counts[duplicate_reason] = duplicate_reason_counts.get(duplicate_reason, 0) + 1
                     if duplicate_reason != "same_source_title":
                         duplicate_event_count += 1
                     existing_key = key if key in seen else ""
@@ -480,7 +724,13 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
                         for seen_key, seen_value in seen.items():
                             if not isinstance(seen_value, dict):
                                 continue
+                            if url_key and seen_value.get("url_key") == url_key:
+                                existing_key = str(seen_key)
+                                break
                             if title_key and seen_value.get("title_key") == title_key:
+                                existing_key = str(seen_key)
+                                break
+                            if title_compact and _candidate_title_similar(title_compact, str(seen_value.get("title_compact") or "")):
                                 existing_key = str(seen_key)
                                 break
                             if event_key and seen_value.get("event_key") == event_key:
@@ -496,12 +746,16 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
                     continue
                 item = _candidate_payload(candidate, batch_id=batch_id, category=category, fetched_at=started_at)
                 item["dedupe_key"] = key
+                item["url_key"] = url_key
                 item["title_key"] = title_key
+                item["title_compact"] = title_compact
                 item["event_key"] = event_key
                 new_items.append(item)
                 seen[key] = {
                     "key": key,
+                    "url_key": url_key,
                     "title_key": title_key,
+                    "title_compact": title_compact,
                     "event_key": event_key,
                     "event_tokens": event_tokens,
                     "title": item.get("title") or item.get("title_zh") or "",
@@ -511,18 +765,23 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
                     "seen_count": 1,
                     "batch_id": batch_id,
                 }
+                if url_key:
+                    seen_url_keys.add(url_key)
                 if title_key:
                     seen_title_keys.add(title_key)
                 if event_key:
                     seen_event_keys.add(event_key)
                 if event_tokens:
                     seen_event_tokens.append(event_tokens)
+                if title_compact:
+                    seen_title_compacts.append(title_compact)
             payload["items"] = new_items[:limit]
             payload["duplicate_count"] = duplicate_count
             payload["duplicate_event_count"] = duplicate_event_count
+            payload["duplicate_reason_counts"] = duplicate_reason_counts
             payload["finished_at"] = time.time()
             payload["message"] = (
-                f"抓取完成：新增 {len(payload['items'])} 条，过滤重复 {duplicate_count} 条"
+                f"抓取完成：源头候选 {len(candidates)} 条，新增 {len(payload['items'])} 条，过滤重复 {duplicate_count} 条"
                 f"（跨来源/相似事件 {duplicate_event_count} 条）。"
             )
             _write_json(_seen_path(root), seen)
@@ -575,6 +834,41 @@ def find_batch_items(root: Path, item_ids: list[str]) -> list[dict]:
     return found
 
 
+def _remember_candidate_seen_locked(root: Path, candidate: dict, *, reason: str = "seen") -> None:
+    if not isinstance(candidate, dict):
+        return
+    seen = _read_json(_seen_path(root), {})
+    if not isinstance(seen, dict):
+        seen = {}
+    now = time.time()
+    key = str(candidate.get("dedupe_key") or _candidate_key(candidate) or candidate.get("batch_item_id") or candidate.get("id") or "").strip()
+    if not key:
+        return
+    url_key = str(candidate.get("url_key") or _candidate_url_key(candidate) or "")
+    title_key = str(candidate.get("title_key") or _candidate_title_key(candidate) or "")
+    title_compact = str(candidate.get("title_compact") or _candidate_title_compact(candidate) or "")
+    event_key = str(candidate.get("event_key") or _candidate_event_key(candidate) or "")
+    event_tokens = _candidate_event_tokens(candidate)
+    existing = seen.get(key) if isinstance(seen.get(key), dict) else {}
+    seen[key] = {
+        **existing,
+        "key": key,
+        "url_key": url_key,
+        "title_key": title_key,
+        "title_compact": title_compact,
+        "event_key": event_key,
+        "event_tokens": event_tokens,
+        "title": candidate.get("title_zh") or candidate.get("translated_title") or candidate.get("title") or existing.get("title") or "",
+        "url": candidate.get("url") or existing.get("url") or "",
+        "first_seen_at": _safe_float(existing.get("first_seen_at"), now) if existing else now,
+        "last_seen_at": now,
+        "seen_count": int(existing.get("seen_count") or 0) + 1 if existing else 1,
+        "batch_id": candidate.get("batch_id") or existing.get("batch_id") or "",
+        "remember_reason": reason,
+    }
+    _write_json(_seen_path(root), seen)
+
+
 def mark_batch_items(root: Path, item_ids: list[str], updates: dict) -> None:
     wanted = {str(item or "").strip() for item in item_ids if str(item or "").strip()}
     if not wanted:
@@ -590,6 +884,8 @@ def mark_batch_items(root: Path, item_ids: list[str], updates: dict) -> None:
                 key = str(item.get("batch_item_id") or item.get("id") or "")
                 if key in wanted:
                     item.update(updates or {})
+                    if str((updates or {}).get("status") or "").lower() in {"completed", "done", "published"}:
+                        _remember_candidate_seen_locked(root, item, reason=str((updates or {}).get("status") or "completed"))
                     changed = True
             if changed:
                 payload["updated_at"] = time.time()

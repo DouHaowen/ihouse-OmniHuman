@@ -5,13 +5,25 @@
 
 import os
 import re
+import json
 import hashlib
 import time
-from urllib.parse import urljoin, urlparse
+import shutil
+import tempfile
+import threading
+import xml.etree.ElementTree as ET
+from urllib.parse import quote_plus, urljoin, urlparse
 import requests
 from dotenv import load_dotenv
 from PIL import Image, ImageStat
-from material_library import copy_material_to_output, list_material_library_items, search_material_library
+from material_library import (
+    MATERIAL_LIBRARY_DIR,
+    copy_material_to_output,
+    list_material_library_items,
+    register_material_file,
+    search_material_library,
+    update_material_library_item,
+)
 
 load_dotenv(override=False)
 
@@ -35,6 +47,35 @@ OPENNEWS_LIBRARY_FALLBACK_MAX_IMAGES = max(
     1,
     min(10, int(os.getenv("OPENNEWS_LIBRARY_FALLBACK_MAX_IMAGES", "4") or "4")),
 )
+OPENNEWS_MATERIAL_LIBRARY_DAILY_IMAGE_LIMIT = max(
+    1,
+    int(os.getenv("OPENNEWS_MATERIAL_LIBRARY_DAILY_IMAGE_LIMIT", "1") or "1"),
+)
+OPENNEWS_MATERIAL_LIBRARY_MONTHLY_IMAGE_LIMIT = max(
+    1,
+    int(os.getenv("OPENNEWS_MATERIAL_LIBRARY_MONTHLY_IMAGE_LIMIT", "5") or "5"),
+)
+OPENNEWS_MATERIAL_LIBRARY_USAGE_PATH = os.getenv(
+    "OPENNEWS_MATERIAL_LIBRARY_USAGE_PATH",
+    str(MATERIAL_LIBRARY_DIR.parent / "output" / "opennews_material_usage.json"),
+).strip()
+OPENNEWS_MATERIAL_LIBRARY_USAGE_LOCK = threading.Lock()
+OPENNEWS_SOURCE_IMAGE_DAILY_HASH_LIMIT = max(
+    1,
+    int(os.getenv("OPENNEWS_SOURCE_IMAGE_DAILY_HASH_LIMIT", "1") or "1"),
+)
+OPENNEWS_SOURCE_IMAGE_MONTHLY_HASH_LIMIT = max(
+    1,
+    int(os.getenv("OPENNEWS_SOURCE_IMAGE_MONTHLY_HASH_LIMIT", "5") or "5"),
+)
+OPENNEWS_SOURCE_IMAGES_PER_PAGE_LIMIT = max(
+    1,
+    int(os.getenv("OPENNEWS_SOURCE_IMAGES_PER_PAGE_LIMIT", "1") or "1"),
+)
+OPENNEWS_SOURCE_IMAGES_PER_DOMAIN_LIMIT = max(
+    1,
+    int(os.getenv("OPENNEWS_SOURCE_IMAGES_PER_DOMAIN_LIMIT", "2") or "2"),
+)
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 PEXELS_API_URL = "https://api.pexels.com/v1/search"
 PEXELS_VIDEO_URL = "https://api.pexels.com/videos/search"
@@ -49,8 +90,49 @@ OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL = (
     not in {"0", "false", "no", "off"}
 )
 OPENNEWS_MATERIAL_LIBRARY_ONLY = (
-    os.getenv("OPENNEWS_MATERIAL_LIBRARY_ONLY", "1").strip().lower()
+    os.getenv("OPENNEWS_MATERIAL_LIBRARY_ONLY", "0").strip().lower()
     not in {"0", "false", "no", "off"}
+)
+OPENNEWS_REALTIME_SOURCE_REVIEW_ENABLED = (
+    os.getenv("OPENNEWS_REALTIME_SOURCE_REVIEW_ENABLED", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_REALTIME_SOURCE_REVIEW_REQUIRED = (
+    os.getenv("OPENNEWS_REALTIME_SOURCE_REVIEW_REQUIRED", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_REALTIME_SOURCE_MAX_IMAGES = max(
+    1,
+    min(8, int(os.getenv("OPENNEWS_REALTIME_SOURCE_MAX_IMAGES", "4") or "4")),
+)
+OPENNEWS_REALTIME_SOURCE_CANDIDATE_LIMIT = max(
+    6,
+    min(120, int(os.getenv("OPENNEWS_REALTIME_SOURCE_CANDIDATE_LIMIT", "60") or "60")),
+)
+OPENNEWS_REALTIME_SOURCE_AUTO_IMPORT = (
+    os.getenv("OPENNEWS_REALTIME_SOURCE_AUTO_IMPORT", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_QWEN_REVIEW_TIMEOUT_SECONDS = max(
+    12,
+    min(90, int(os.getenv("OPENNEWS_QWEN_REVIEW_TIMEOUT_SECONDS", "45") or "45")),
+)
+OPENNEWS_QWEN_REVIEW_MAX_SIDE = max(
+    720,
+    min(1800, int(os.getenv("OPENNEWS_QWEN_REVIEW_MAX_SIDE", "1280") or "1280")),
+)
+OPENNEWS_MATERIAL_VECTOR_ENABLED = (
+    os.getenv("OPENNEWS_MATERIAL_VECTOR_ENABLED", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_MATERIAL_VECTOR_REQUIRED = (
+    os.getenv("OPENNEWS_MATERIAL_VECTOR_REQUIRED", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_MATERIAL_VECTOR_URL = os.getenv("OPENNEWS_MATERIAL_VECTOR_URL", "http://192.168.0.34:8897").strip().rstrip("/")
+OPENNEWS_MATERIAL_VECTOR_TIMEOUT_SECONDS = max(
+    2,
+    min(30, int(os.getenv("OPENNEWS_MATERIAL_VECTOR_TIMEOUT_SECONDS", "8") or "8")),
 )
 OPENNEWS_IMAGE_SERVICE_URL = os.getenv("OPENNEWS_IMAGE_SERVICE_URL", "http://192.168.0.34:8894").strip().rstrip("/")
 OPENNEWS_IMAGE_SERVICE_TOKEN = os.getenv("OPENNEWS_IMAGE_SERVICE_TOKEN", "local-image-5090").strip()
@@ -108,6 +190,10 @@ OPENNEWS_IMAGE_DOMAIN_STYLES = {
     "technology": (
         "AI data center, server racks, GPU infrastructure, semiconductor research lab, "
         "enterprise AI software office, engineers monitoring computing systems, high-tech investment atmosphere"
+    ),
+    "cybersecurity": (
+        "cybersecurity operations center, network threat monitoring dashboard, secure server racks, "
+        "multi-factor authentication, phishing detection, encrypted digital lock, professional cyber defense atmosphere"
     ),
     "finance": (
         "global finance district, institutional investors, stock market screens, modern trading floor, "
@@ -282,6 +368,7 @@ def _opennews_safe_ai_subject(subject: str) -> str:
 def _opennews_visual_domain_from_text(*parts: str) -> str:
     text = " ".join(str(part or "") for part in parts).lower()
     domain_markers = {
+        "cybersecurity": ("cybersecurity", "cyber crime", "cybercrime", "hacker", "phishing", "scam", "network security", "网络安全", "网络犯罪", "诈骗", "黑客", "网络攻击"),
         "ai": ("ai", "artificial intelligence", "人工智能", "data center", "gpu", "chip", "semiconductor", "openai", "anthropic", "nvidia"),
         "real_estate": ("real estate", "housing", "residential", "property", "房产", "住宅", "不动产", "地产"),
         "finance": ("stock", "market", "fund", "investment", "investor", "sovereign wealth", "finance", "economy", "股市", "基金", "投资", "金融"),
@@ -917,6 +1004,15 @@ SOURCE_MATERIAL_ADULT_TOKENS = (
 )
 
 OPENNEWS_VISUAL_DOMAIN_TOKENS = {
+    "cybersecurity": {
+        "cyber", "cybersecurity", "cyber security", "cyber crime", "cybercrime",
+        "network security", "hacker", "hackers", "hacking", "phishing", "scam",
+        "ransomware", "malware", "data breach", "password", "authentication",
+        "two-factor", "mfa", "firewall", "encryption", "encrypted", "lock",
+        "threat", "vulnerability", "computer security", "网络安全", "网络犯罪",
+        "网络攻击", "黑客", "诈骗", "钓鱼", "勒索软件", "恶意软件", "数据泄露",
+        "密码", "认证", "防火墙", "加密", "漏洞", "威胁",
+    },
     "technology": {
         "ai", "artificial intelligence", "technology", "tech", "software", "app",
         "chip", "semiconductor", "nvidia", "openai", "anthropic", "meta",
@@ -927,6 +1023,12 @@ OPENNEWS_VISUAL_DOMAIN_TOKENS = {
         "stock", "stocks", "market", "nasdaq", "nyse", "wall street", "shares",
         "ipo", "earnings", "investor", "investors", "inflation", "fed",
         "interest rate", "bank", "finance", "economy", "trading", "tariff",
+    },
+    "real_estate": {
+        "real estate", "housing", "home", "homes", "house", "houses", "property",
+        "rental", "rent", "landlord", "mortgage", "dscr", "non-qm", "single-family",
+        "residential", "apartment", "investor-owned", "房产", "房地产", "住宅",
+        "房贷", "租金", "房东", "单户住宅", "不动产",
     },
     "military": {
         "military", "defense", "war", "army", "navy", "air force", "fighter",
@@ -946,11 +1048,22 @@ OPENNEWS_VISUAL_DOMAIN_TOKENS = {
 }
 
 OPENNEWS_WRONG_DOMAIN_BLOCKS = {
+    "cybersecurity": {
+        "shopping", "online shopping", "cart", "product recall", "recall", "airshow",
+        "sports", "selfie", "fashion", "beauty", "warehouse", "bunnings",
+        "vacuum", "pacific airshow", "shoe", "shoes", "购物", "网购", "召回",
+        "航展", "自拍", "时尚", "仓库", "鞋",
+    },
     "technology": {"white house", "parliament", "congress", "press briefing", "government meeting", "cabinet meeting", "foreign ministry", "diplomacy"},
     "finance": {
         "missile", "drone", "fighter jet", "warship", "military exercise", "troops",
         "nvidia", "openai", "anthropic", "semiconductor", "chip", "robot", "white house",
         "trump", "election", "congress", "parliament", "press briefing",
+    },
+    "real_estate": {
+        "stock market", "trading floor", "wall street", "nasdaq", "nyse", "bearish",
+        "bull market", "crypto", "semiconductor", "chip", "nvidia", "openai",
+        "military", "warship", "missile", "white house", "parliament",
     },
     "military": {"stock market", "ipo", "wall street", "earnings", "investors"},
 }
@@ -961,6 +1074,60 @@ OPENNEWS_GENERIC_MEDIA_TOKENS = {
 }
 
 OPENNEWS_STRICT_FALLBACK_SOURCES = {"article", "related_article", "opengraph", "news_source"}
+
+OPENNEWS_NAMED_ENTITY_PATTERNS = {
+    "openai": (r"\bopenai\b",),
+    "anthropic": (r"\banthropic\b|\bclaude\b",),
+    "google": (r"\bgoogle\b|\balphabet\b|\bgemini\b",),
+    "microsoft": (r"\bmicrosoft\b|\bazure\b",),
+    "meta": (r"\bmeta\b|\bfacebook\b",),
+    "deepseek": (r"\bdeepseek\b",),
+    "copilot": (r"\bcopilot\b",),
+    "nvidia_huang": (r"\bnvidia\b|\bjensen\s+huang\b|\bjensenhuang\b|英伟达|黃仁勳|黄仁勋",),
+    "xai_grok": (r"\bxai\b|\bx\.ai\b|\bgrok\b",),
+    "amazon_aws": (r"\bamazon\b|\baws\b|\bamazon\s+web\s+services\b|\bbedrock\b|亚马逊|亞馬遜",),
+    "apple": (r"\bapple\b|\biphone\b|\bsiri\b|\bwwdc\b|苹果",),
+    "smartphone": (r"\bsmartphone\b|\bmobile\s+phone\b|\bphone\b|手机|智能手机",),
+    "tesla_spacex": (r"\btesla\b|\bspacex\b|\belon\s+musk\b|\belonmusk\b|马斯克|馬斯克",),
+    "qualcomm": (r"\bqualcomm\b",),
+    "broadcom": (r"\bbroadcom\b",),
+    "marvell": (r"\bmarvell\b",),
+    "oracle": (r"\boracle\b",),
+    "trump": (r"\btrump\b|特朗普",),
+    "white_house": (r"\bwhite\s+house\b|白宫|白宮",),
+    "fed_powell": (r"\bfed\b|\bfederal\s+reserve\b|\bpowell\b|美联储|聯準會",),
+    "iran_israel": (r"\biran\b|\bisrael\b|\bhormuz\b|伊朗|以色列|霍尔木兹|霍爾木茲",),
+}
+
+OPENNEWS_AI_COMPANY_ENTITY_GROUPS = {
+    "openai", "anthropic", "google", "microsoft", "meta", "nvidia_huang",
+    "xai_grok", "amazon_aws", "apple", "tesla_spacex", "deepseek", "copilot", "qualcomm",
+    "broadcom", "marvell", "oracle", "smartphone",
+}
+
+OPENNEWS_ENTITY_DISPLAY_TERMS = {
+    "openai": ["OpenAI", "ChatGPT"],
+    "anthropic": ["Anthropic", "Claude"],
+    "google": ["Google", "Alphabet", "Gemini"],
+    "microsoft": ["Microsoft", "Azure", "Copilot"],
+    "meta": ["Meta", "Facebook", "Llama"],
+    "deepseek": ["DeepSeek"],
+    "copilot": ["Copilot"],
+    "nvidia_huang": ["Nvidia", "Jensen Huang", "英伟达", "黄仁勋"],
+    "xai_grok": ["xAI", "Grok", "Elon Musk"],
+    "amazon_aws": ["Amazon", "AWS", "Bedrock"],
+    "apple": ["Apple", "iPhone", "Siri", "WWDC"],
+    "smartphone": ["smartphone", "mobile phone"],
+    "tesla_spacex": ["Tesla", "SpaceX", "Elon Musk"],
+    "qualcomm": ["Qualcomm"],
+    "broadcom": ["Broadcom"],
+    "marvell": ["Marvell"],
+    "oracle": ["Oracle"],
+    "trump": ["Trump", "特朗普"],
+    "white_house": ["White House", "白宫"],
+    "fed_powell": ["Federal Reserve", "Jerome Powell", "Alan Greenspan", "美联储"],
+    "iran_israel": ["Iran", "Israel", "Hormuz", "伊朗", "以色列"],
+}
 
 
 def _normalized_media_basename(path: str) -> str:
@@ -1134,6 +1301,225 @@ def _opennews_theme_queries(seg: dict) -> list[str]:
     return queries
 
 
+def _opennews_clean_query(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _opennews_anchor_queries(seg: dict, relevance_tokens: set[str], visual_domain: str) -> list[dict]:
+    """Build concrete visual anchors so web image search does not collapse into one broad keyword."""
+    blob = " ".join(
+        str(seg.get(key) or "")
+        for key in ("title", "title_zh", "material_keyword", "material_search_keyword", "material_desc", "script")
+    )
+    blob_lower = blob.lower()
+    entities = _opennews_query_named_entities(seg, relevance_tokens)
+    anchors: list[dict] = []
+
+    def add(anchor: str, *queries: str) -> None:
+        clean_queries = []
+        for query in queries:
+            query = _opennews_clean_query(query)
+            if query and query.lower() not in {item.lower() for item in clean_queries}:
+                clean_queries.append(query)
+        if not clean_queries:
+            return
+        if anchor in {item.get("anchor") for item in anchors}:
+            return
+        anchors.append({"anchor": anchor, "queries": clean_queries})
+
+    for entity in sorted(entities):
+        display_terms = OPENNEWS_ENTITY_DISPLAY_TERMS.get(entity) or [entity.replace("_", " ")]
+        main_term = display_terms[0]
+        add(f"entity:{entity}", f"{main_term} news photo", f"{main_term} official newsroom image")
+
+    if re.search(r"\bjapan\b|日本|日元|东京|東京|japanese", blob_lower):
+        add("scene:japan_government", "Japan government AI chip space investment news", "Japan government press conference technology investment")
+    finance_anchor_needed = bool(re.search(r"日元|yen|stock|stocks|share price|nasdaq|nyse|wall street|fed|federal reserve|interest rate|oil price|股市|股票|股价|美联储|利率|油价", blob_lower))
+    if finance_anchor_needed or (
+        visual_domain == "finance"
+        and not re.search(r"real estate|housing|property|mortgage|landlord|rental|dscr|single-family|房产|房地产|住宅|房贷|房东|租金|单户住宅", blob_lower)
+    ):
+        add("scene:finance", "Japanese yen investment stock market news", "stock market investment finance newsroom")
+    if re.search(r"real estate|housing|property|mortgage|landlord|rental|dscr|single-family|房产|房地产|住宅|房贷|房东|租金|单户住宅", blob_lower):
+        add(
+            "scene:real_estate",
+            "real estate investors single family homes mortgage news photo",
+            "housing market rental property landlord mortgage document",
+            "DSCR loan real estate investor house purchase",
+        )
+    if re.search(r"chip|semiconductor|芯片|半导体|半導體", blob_lower):
+        add("scene:semiconductor", "semiconductor chip factory news photo", "AI chip semiconductor wafer fab")
+    if re.search(r"space|太空|rocket|satellite|航天|宇宙", blob_lower):
+        add("scene:space", "space industry rocket satellite news photo", "Japan space agency rocket satellite")
+
+    if visual_domain in {"ai", "technology"}:
+        add("scene:ai_infrastructure", "AI data center GPU server racks news photo", "artificial intelligence chip data center")
+    if visual_domain == "cybersecurity":
+        add("scene:cybersecurity", "cybersecurity operations center network threat news photo", "cyber crime hacker security dashboard")
+    if visual_domain == "finance":
+        add("scene:finance_market", "stock market trading floor financial news photo", "central bank interest rate market news")
+    if visual_domain == "real_estate":
+        add("scene:housing_market", "housing market homes for sale real estate investors", "suburban single family rental homes mortgage application")
+    if visual_domain == "military":
+        add("scene:military", "military news warship fighter jet drone missile", "defense exercise press briefing news photo")
+    if visual_domain == "politics":
+        add("scene:politics", "government press briefing parliament news photo", "official government building diplomacy news")
+    if visual_domain == "real_estate":
+        add("scene:real_estate", "housing market homes real estate news photo", "residential property mortgage news")
+    if visual_domain == "immigration":
+        add("scene:immigration", "airport immigration visa passport news photo", "border immigration policy news")
+
+    for index, query in enumerate(_opennews_theme_queries(seg)[:4]):
+        add(f"theme:{index}", f"{query} news photo", f"{query} official image")
+
+    fallback_query = _opennews_clean_query(
+        str(seg.get("material_search_keyword") or seg.get("material_keyword") or seg.get("title_zh") or "")
+    )
+    if fallback_query:
+        add("scene:main_news", f"{fallback_query} news photo", f"{fallback_query} related article image")
+    return anchors[:8]
+
+
+def _opennews_extract_images_from_html(
+    html: str,
+    base_url: str,
+    *,
+    limit: int = 8,
+    context_tokens: set[str] | None = None,
+) -> list[dict]:
+    images: list[dict] = []
+    seen: set[str] = set()
+    context_tokens = {
+        token.lower()
+        for token in (context_tokens or set())
+        if len(str(token or "")) >= 4 and token.lower() not in {"news", "photo", "image", "article"}
+    }
+
+    def add(url: str, title: str = "", *, require_context: bool = False) -> None:
+        if len(images) >= limit:
+            return
+        url = str(url or "").strip()
+        if not url or url.startswith("data:"):
+            return
+        absolute = urljoin(base_url, url)
+        parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return
+        if absolute in seen:
+            return
+        if re.search(r"(logo|icon|avatar|sprite|placeholder|tracking|pixel)", absolute, flags=re.I):
+            return
+        if require_context and context_tokens:
+            haystack = f"{absolute} {title}".lower()
+            if not any(token in haystack for token in context_tokens):
+                return
+        seen.add(absolute)
+        images.append({"url": absolute, "title": title})
+
+    for pattern in (
+        r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image(?::secure_url)?["\']',
+        r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image(?::src)?["\']',
+    ):
+        for match in re.finditer(pattern, html, flags=re.I):
+            add(match.group(1), "article social image")
+    for match in re.finditer(r'<img[^>]+(?:src|data-src|data-original)=["\']([^"\']+)["\'][^>]*>', html, flags=re.I):
+        tag = match.group(0)
+        alt_match = re.search(r'alt=["\']([^"\']{0,160})["\']', tag, flags=re.I)
+        title = alt_match.group(1) if alt_match else "article inline image"
+        add(match.group(1), title, require_context=True)
+    return images
+
+
+def _opennews_fetch_related_article_images(query: str, *, anchor: str, limit: int = 6) -> list[dict]:
+    query = _opennews_clean_query(query)
+    if not query:
+        return []
+    headers = {"User-Agent": "Mozilla/5.0 iHouse OpenNews media matcher/1.0"}
+    candidates: list[dict] = []
+    seen_urls: set[str] = set()
+    context_tokens = _tokenize_opennews_relevance(query)
+    try:
+        rss_url = f"https://www.bing.com/news/search?q={quote_plus(query)}&format=rss"
+        response = requests.get(rss_url, timeout=12, headers=headers)
+        response.raise_for_status()
+        root = ET.fromstring(response.text)
+        for item in root.findall(".//item")[:8]:
+            title = (item.findtext("title") or query).strip()
+            link = (item.findtext("link") or "").strip()
+            for media in list(item):
+                tag = str(media.tag or "").lower()
+                if tag.endswith("content") or tag.endswith("thumbnail"):
+                    url = media.attrib.get("url") or ""
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        candidates.append({
+                            "url": url,
+                            "kind": "image",
+                            "source": "related_article",
+                            "title": f"{title}｜{anchor}",
+                            "source_url": link,
+                            "visual_anchor": anchor,
+                            "_anchor_query": query,
+                        })
+            if len(candidates) >= limit:
+                break
+            if not link:
+                continue
+            try:
+                article_response = requests.get(link, timeout=10, headers=headers)
+                article_response.raise_for_status()
+                for image in _opennews_extract_images_from_html(
+                    article_response.text[:700000],
+                    link,
+                    limit=4,
+                    context_tokens=context_tokens,
+                ):
+                    url = image["url"]
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    candidates.append({
+                        "url": url,
+                        "kind": "image",
+                        "source": "related_article",
+                        "title": f"{title}｜{image.get('title') or anchor}",
+                        "source_url": link,
+                        "visual_anchor": anchor,
+                        "_anchor_query": query,
+                    })
+                    if len(candidates) >= limit:
+                        break
+            except Exception:
+                continue
+            if len(candidates) >= limit:
+                break
+    except Exception as exc:
+        print(f"  ⚠️ 相关报道图片扩展失败：{query}｜{exc}")
+    return candidates[:limit]
+
+
+def _opennews_expand_source_material_candidates(seg: dict, relevance_tokens: set[str], visual_domain: str) -> list[dict]:
+    anchors = _opennews_anchor_queries(seg, relevance_tokens, visual_domain)
+    expanded: list[dict] = []
+    seen: set[str] = set()
+    for anchor in anchors:
+        anchor_name = str(anchor.get("anchor") or "scene")
+        for query in anchor.get("queries") or []:
+            for item in _opennews_fetch_related_article_images(query, anchor=anchor_name, limit=4):
+                keys = _source_identity_keys(str(item.get("url") or ""))
+                if not keys or keys & seen:
+                    continue
+                seen.update(keys)
+                expanded.append(item)
+            if len([item for item in expanded if item.get("visual_anchor") == anchor_name]) >= 4:
+                break
+    if expanded:
+        print(f"  🧭 OpenNews 已按视觉锚点扩展相关报道图片候选：{len(expanded)} 条")
+    return expanded[: min(80, max(12, OPENNEWS_REALTIME_SOURCE_CANDIDATE_LIMIT))]
+
+
 def _tokenize_opennews_relevance(text: str) -> set[str]:
     text = (text or "").lower()
     aliases = {
@@ -1157,6 +1543,20 @@ def _tokenize_opennews_relevance(text: str) -> set[str]:
         "海啸": "tsunami",
         "菲律宾": "philippines",
         "亚马逊": "amazon",
+        "谷歌母公司": "alphabet",
+        "格林斯潘": "greenspan",
+        "鲍威尔": "powell",
+        "联邦储备": "federal reserve",
+        "关税": "tariff",
+        "房贷": "mortgage",
+        "首套房": "starter home",
+        "百万美元": "million dollar",
+        "油价": "oil price",
+        "霍尔木兹": "hormuz",
+        "伊朗": "iran",
+        "以色列": "israel",
+        "手机": "smartphone",
+        "智能手机": "smartphone",
     }
     for source, replacement in aliases.items():
         text = text.replace(source, f" {replacement} ")
@@ -1168,6 +1568,9 @@ def _tokenize_opennews_relevance(text: str) -> set[str]:
         "biotechnology", "stock market", "investors", "ukraine", "russia",
         "taiwan strait", "drone", "missile", "wwdc", "siri", "iphone",
         "apple intelligence", "earthquake", "tsunami", "philippines",
+        "federal reserve", "jerome powell", "alan greenspan", "wall street",
+        "mortgage", "starter home", "oil price", "crude oil",
+        "strait of hormuz", "smartphone",
     }
     for phrase in phrases:
         if phrase in text:
@@ -1176,6 +1579,7 @@ def _tokenize_opennews_relevance(text: str) -> set[str]:
         "news", "latest", "image", "photo", "video", "official", "press", "media",
         "article", "source", "related", "public", "content", "government", "meeting",
         "briefing", "company", "companies", "market", "tools", "tool",
+        "america", "american", "united", "states", "state", "us", "usa", "u.s",
     }
     return {token for token in tokens if token not in generic and len(token) >= 3}
 
@@ -1198,10 +1602,6 @@ def _opennews_relevance_tokens(seg: dict) -> set[str]:
 
 def _opennews_visual_domain(seg: dict, relevance_tokens: set[str]) -> str:
     explicit = str(seg.get("opennews_category") or seg.get("category") or "").strip().lower()
-    if explicit == "ai":
-        return "technology"
-    if explicit in OPENNEWS_VISUAL_DOMAIN_TOKENS:
-        return explicit
     text = " ".join([
         str(seg.get("material_keyword") or ""),
         str(seg.get("material_search_keyword") or ""),
@@ -1222,11 +1622,33 @@ def _opennews_visual_domain(seg: dict, relevance_tokens: set[str]) -> str:
         "ai model", "large language model", "robotics", "software platform",
         "芯片技术", "产品发布", "大模型", "机器人", "半导体制造",
     }
+    cybersecurity_markers = {
+        "cyber", "cybersecurity", "cyber security", "cyber crime", "cybercrime",
+        "network security", "hacker", "phishing", "scam", "ransomware", "malware",
+        "data breach", "authentication", "two-factor", "mfa", "网络安全", "网络犯罪",
+        "网络攻击", "黑客", "诈骗", "钓鱼", "勒索软件", "恶意软件", "数据泄露",
+    }
+    real_estate_markers = {
+        "real estate", "housing", "home", "homes", "house", "houses", "property",
+        "rental", "rent", "landlord", "mortgage", "dscr", "non-qm", "single-family",
+        "residential", "apartment", "房产", "房地产", "住宅", "房贷", "租金",
+        "房东", "单户住宅", "不动产", "购房",
+    }
     finance_hits = sum(1 for token in finance_markers if token in text)
     technology_hits = sum(1 for token in technology_markers if token in text)
+    cybersecurity_hits = sum(1 for token in cybersecurity_markers if token in text)
+    real_estate_hits = sum(1 for token in real_estate_markers if token in text)
+    if real_estate_hits >= 2:
+        return "real_estate"
     # 股票、油价、利率新闻里经常会提到英伟达/AI/特朗普，但画面应使用金融市场素材。
     if finance_hits >= 2 and finance_hits >= technology_hits:
         return "finance"
+    if cybersecurity_hits >= 2:
+        return "cybersecurity"
+    if explicit == "ai":
+        return "technology"
+    if explicit in OPENNEWS_VISUAL_DOMAIN_TOKENS:
+        return explicit
     best_domain = ""
     best_hits = 0
     for domain, tokens in OPENNEWS_VISUAL_DOMAIN_TOKENS.items():
@@ -1358,6 +1780,8 @@ def _opennews_library_category_hints(seg: dict, visual_domain: str) -> set[str]:
     ).lower()
     hints: set[str] = {"新闻", "通用新闻", "通用氛围"}
     category = str(seg.get("opennews_category") or seg.get("category") or "").strip().lower()
+    if visual_domain == "cybersecurity":
+        hints.update({"科技", "AI", "通用新闻"})
     if category == "ai" or visual_domain == "technology" and re.search(r"\b(ai|artificial intelligence|nvidia|openai|anthropic)\b|人工智能|英伟达", blob):
         hints.update({"AI", "科技"})
     if category == "technology" or visual_domain == "technology":
@@ -1383,6 +1807,8 @@ def _opennews_library_primary_categories(visual_domain: str, seg: dict | None = 
         for key in ("material_keyword", "material_search_keyword", "material_desc", "script")
     ).lower()
     policy_cross_topic = bool(re.search(r"\btrump\b|特朗普|白宫|白宮|white house", blob))
+    if domain == "cybersecurity":
+        return {"AI", "科技", "通用新闻"}
     if category == "ai":
         return {"AI", "科技", "政治"} if policy_cross_topic else {"AI", "科技"}
     if category in {"real_estate", "property", "housing"}:
@@ -1434,6 +1860,319 @@ def _opennews_library_item_fingerprint(item: dict) -> str:
     return f"file:{str(item.get('filename') or item.get('id') or '').strip().lower()}"
 
 
+def _opennews_material_usage_day(ts: float | None = None) -> str:
+    # Use JST for the user's “一天” rule, independent of the server timezone.
+    return time.strftime("%Y-%m-%d", time.gmtime((ts or time.time()) + 9 * 3600))
+
+
+def _opennews_material_usage_keys(item: dict) -> set[str]:
+    keys: set[str] = set()
+    for prefix, field in (
+        ("id", "id"),
+        ("filename", "filename"),
+        ("source", "source_url"),
+    ):
+        value = str(item.get(field) or "").strip().lower()
+        if value:
+            keys.add(f"{prefix}:{value}")
+    fingerprint = _opennews_library_item_fingerprint(item)
+    if fingerprint:
+        keys.add(f"fingerprint:{fingerprint.strip().lower()}")
+    return keys
+
+
+def _opennews_read_material_usage() -> dict:
+    path = OPENNEWS_MATERIAL_LIBRARY_USAGE_PATH
+    if not path:
+        return {"entries": []}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, dict) and isinstance(payload.get("entries"), list):
+            return payload
+    except FileNotFoundError:
+        return {"entries": []}
+    except Exception as exc:
+        print(f"  ⚠️ OpenNews 素材库使用记录读取失败，将临时按空记录处理：{exc}")
+    return {"entries": []}
+
+
+def _opennews_write_material_usage(payload: dict) -> None:
+    path = OPENNEWS_MATERIAL_LIBRARY_USAGE_PATH
+    if not path:
+        return
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def _opennews_prune_material_usage(entries: list[dict], now: float) -> list[dict]:
+    cutoff = now - 40 * 86400
+    pruned: list[dict] = []
+    for entry in entries:
+        try:
+            ts = float(entry.get("used_at") or 0)
+        except Exception:
+            ts = 0
+        if ts >= cutoff:
+            pruned.append(entry)
+    return pruned
+
+
+def _opennews_library_image_usage_status(item: dict, *, now: float | None = None) -> tuple[bool, str]:
+    if str(item.get("kind") or "").lower() != "image":
+        return True, ""
+    keys = _opennews_material_usage_keys(item)
+    if not keys:
+        return True, ""
+    current = now or time.time()
+    today = _opennews_material_usage_day(current)
+    monthly_cutoff = current - 30 * 86400
+    with OPENNEWS_MATERIAL_LIBRARY_USAGE_LOCK:
+        payload = _opennews_read_material_usage()
+        entries = _opennews_prune_material_usage(payload.get("entries") or [], current)
+    day_count = 0
+    month_count = 0
+    for entry in entries:
+        entry_keys = {str(key or "").strip().lower() for key in (entry.get("keys") or []) if str(key or "").strip()}
+        if not entry_keys or not (entry_keys & keys):
+            continue
+        try:
+            used_at = float(entry.get("used_at") or 0)
+        except Exception:
+            used_at = 0
+        if str(entry.get("day") or "") == today:
+            day_count += 1
+        if used_at >= monthly_cutoff:
+            month_count += 1
+    if day_count >= OPENNEWS_MATERIAL_LIBRARY_DAILY_IMAGE_LIMIT:
+        return False, f"当天已使用 {day_count} 次，达到上限 {OPENNEWS_MATERIAL_LIBRARY_DAILY_IMAGE_LIMIT}"
+    if month_count >= OPENNEWS_MATERIAL_LIBRARY_MONTHLY_IMAGE_LIMIT:
+        return False, f"近30天已使用 {month_count} 次，达到上限 {OPENNEWS_MATERIAL_LIBRARY_MONTHLY_IMAGE_LIMIT}"
+    return True, ""
+
+
+def _opennews_record_library_image_usage(item: dict) -> None:
+    if str(item.get("kind") or "").lower() != "image":
+        return
+    keys = sorted(_opennews_material_usage_keys(item))
+    if not keys:
+        return
+    now = time.time()
+    entry = {
+        "used_at": now,
+        "day": _opennews_material_usage_day(now),
+        "keys": keys,
+        "id": str(item.get("id") or ""),
+        "filename": str(item.get("filename") or ""),
+        "title": str(item.get("title") or ""),
+        "source_url": str(item.get("source_url") or ""),
+    }
+    with OPENNEWS_MATERIAL_LIBRARY_USAGE_LOCK:
+        payload = _opennews_read_material_usage()
+        entries = _opennews_prune_material_usage(payload.get("entries") or [], now)
+        entries.append(entry)
+        payload["entries"] = entries
+        payload["updated_at"] = now
+        _opennews_write_material_usage(payload)
+    item_id = str(item.get("id") or "").strip()
+    if item_id:
+        try:
+            update_material_library_item(
+                item_id,
+                {
+                    "usage_count": int(item.get("usage_count") or 0) + 1,
+                    "last_used_at": now,
+                },
+            )
+        except Exception as exc:
+            print(f"  ⚠️ OpenNews 素材库使用次数写回失败：{item_id}｜{exc}")
+
+
+def _opennews_source_page_key(item: dict) -> str:
+    source_url = str(item.get("source_url") or "").strip() or str(item.get("page_url") or "").strip()
+    if not source_url:
+        source_url = str(item.get("url") or "").strip()
+    return _source_url_key(source_url)
+
+
+def _opennews_source_domain_key(item: dict) -> str:
+    for value in (item.get("source_url"), item.get("page_url"), item.get("url")):
+        parsed = urlparse(str(value or ""))
+        if parsed.netloc:
+            return parsed.netloc.lower()
+    return ""
+
+
+def _opennews_source_image_hash_usage_status(content_hash: str, *, now: float | None = None) -> tuple[bool, str]:
+    normalized_hash = str(content_hash or "").strip().lower()
+    if not normalized_hash:
+        return True, ""
+    current = now or time.time()
+    today = _opennews_material_usage_day(current)
+    monthly_cutoff = current - 30 * 86400
+    key = f"hash:{normalized_hash}"
+    with OPENNEWS_MATERIAL_LIBRARY_USAGE_LOCK:
+        payload = _opennews_read_material_usage()
+        entries = _opennews_prune_material_usage(payload.get("entries") or [], current)
+    day_count = 0
+    month_count = 0
+    for entry in entries:
+        if str(entry.get("type") or "") != "source_image":
+            continue
+        entry_keys = {str(item or "").strip().lower() for item in (entry.get("keys") or []) if str(item or "").strip()}
+        if key not in entry_keys:
+            continue
+        try:
+            used_at = float(entry.get("used_at") or 0)
+        except Exception:
+            used_at = 0
+        if str(entry.get("day") or "") == today:
+            day_count += 1
+        if used_at >= monthly_cutoff:
+            month_count += 1
+    if day_count >= OPENNEWS_SOURCE_IMAGE_DAILY_HASH_LIMIT:
+        return False, f"同一网络图片当天已使用 {day_count} 次，达到上限 {OPENNEWS_SOURCE_IMAGE_DAILY_HASH_LIMIT}"
+    if month_count >= OPENNEWS_SOURCE_IMAGE_MONTHLY_HASH_LIMIT:
+        return False, f"同一网络图片近30天已使用 {month_count} 次，达到上限 {OPENNEWS_SOURCE_IMAGE_MONTHLY_HASH_LIMIT}"
+    return True, ""
+
+
+def _opennews_record_source_image_usage(item: dict, *, content_hash: str, copied_path: str) -> None:
+    normalized_hash = str(content_hash or "").strip().lower()
+    if not normalized_hash:
+        return
+    now = time.time()
+    source_url = str(item.get("source_url") or "").strip()
+    image_url = str(item.get("url") or "").strip()
+    page_key = _opennews_source_page_key(item)
+    domain_key = _opennews_source_domain_key(item)
+    keys = {
+        f"hash:{normalized_hash}",
+        *(f"image:{key}" for key in _source_identity_keys(image_url)),
+    }
+    if page_key:
+        keys.add(f"page:{page_key}")
+    if domain_key:
+        keys.add(f"domain:{domain_key}")
+    entry = {
+        "type": "source_image",
+        "used_at": now,
+        "day": _opennews_material_usage_day(now),
+        "keys": sorted(keys),
+        "hash": normalized_hash,
+        "image_url": image_url,
+        "source_url": source_url,
+        "source_domain": domain_key,
+        "title": str(item.get("title") or ""),
+        "path": os.path.basename(copied_path),
+    }
+    with OPENNEWS_MATERIAL_LIBRARY_USAGE_LOCK:
+        payload = _opennews_read_material_usage()
+        entries = _opennews_prune_material_usage(payload.get("entries") or [], now)
+        entries.append(entry)
+        payload["entries"] = entries
+        payload["updated_at"] = now
+        _opennews_write_material_usage(payload)
+
+
+def _opennews_named_entities_from_text(text: str) -> set[str]:
+    haystack = str(text or "").lower()
+    entities: set[str] = set()
+    for entity, patterns in OPENNEWS_NAMED_ENTITY_PATTERNS.items():
+        if any(re.search(pattern, haystack, flags=re.I) for pattern in patterns):
+            entities.add(entity)
+    return entities
+
+
+def _opennews_strip_negative_entity_phrases(text: str) -> str:
+    """Prevent "不要使用手机/特朗普图" from becoming required entity constraints."""
+    cleaned = str(text or "")
+    cleaned = re.sub(r"(?:不要|避免|禁止|排除|不要使用|不要出现|不能使用|不使用)[^。；;\n]{0,120}", " ", cleaned)
+    cleaned = re.sub(
+        r"(?:do\s+not|don't|avoid|exclude|without|no)\s+[^.；;,\n]{0,80}",
+        " ",
+        cleaned,
+        flags=re.I,
+    )
+    return cleaned
+
+
+def _opennews_query_named_entities(seg: dict, relevance_tokens: set[str]) -> set[str]:
+    blob = " ".join([
+        str(seg.get("material_keyword") or ""),
+        str(seg.get("material_search_keyword") or ""),
+        _opennews_strip_negative_entity_phrases(seg.get("material_desc") or ""),
+        str(seg.get("script") or "")[:1400],
+        " ".join(sorted(relevance_tokens)),
+    ])
+    for theme in seg.get("material_theme_plan") or []:
+        if not isinstance(theme, dict):
+            continue
+        blob += " " + " ".join([
+            str(theme.get("title") or ""),
+            str(theme.get("visual_need") or ""),
+            str(theme.get("script") or ""),
+            " ".join(str(query or "") for query in theme.get("queries") or []),
+        ])
+    return _opennews_named_entities_from_text(blob)
+
+
+def _opennews_primary_named_entities(seg: dict) -> set[str]:
+    """Entities in headline/search/visual need are harder intent than script background."""
+    blob = " ".join([
+        str(seg.get("material_keyword") or ""),
+        str(seg.get("material_search_keyword") or ""),
+        _opennews_strip_negative_entity_phrases(seg.get("material_desc") or ""),
+        str(seg.get("theme_title") or ""),
+    ])
+    for theme in seg.get("material_theme_plan") or []:
+        if not isinstance(theme, dict):
+            continue
+        blob += " " + " ".join([
+            str(theme.get("title") or ""),
+            _opennews_strip_negative_entity_phrases(theme.get("visual_need") or ""),
+            " ".join(str(query or "") for query in theme.get("queries") or []),
+        ])
+    return _opennews_named_entities_from_text(blob)
+
+
+def _opennews_topic_conflict_reason(searchable: str, relevance_tokens: set[str], visual_domain: str) -> str:
+    text = str(searchable or "").lower()
+    tokens_text = " ".join(sorted(relevance_tokens)).lower()
+
+    def query_has(*terms: str) -> bool:
+        return any(term in tokens_text for term in terms)
+
+    technology_conflicts = [
+        (("robot", "robotics", "humanoid", "机器人", "人形机器人"), ("robot", "robotics", "humanoid", "机器人"), "机器人素材与当前科技新闻主题不符"),
+        (("iphone", "siri", "wwdc", "apple intelligence", "苹果"), ("iphone", "siri", "wwdc", "apple", "苹果"), "苹果/手机素材与当前科技新闻主题不符"),
+        (("tesla", "spacex", "elon musk", "马斯克", "馬斯克"), ("tesla", "spacex", "elon", "musk", "马斯克"), "马斯克/Tesla/SpaceX素材与当前科技新闻主题不符"),
+        (("nvidia", "jensen", "huang", "gpu", "英伟达", "黄仁勋", "黃仁勳"), ("nvidia", "jensen", "huang", "gpu", "英伟达", "黄仁勋"), "英伟达/黄仁勋素材与当前科技新闻主题不符"),
+        (("openai", "anthropic", "chatgpt", "claude"), ("openai", "anthropic", "chatgpt", "claude"), "OpenAI/Anthropic素材与当前科技新闻主题不符"),
+    ]
+    if visual_domain == "technology":
+        for item_terms, query_terms, reason in technology_conflicts:
+            if any(term in text for term in item_terms) and not query_has(*query_terms):
+                return reason
+    if visual_domain == "cybersecurity":
+        cyber_hits = _opennews_domain_hits(text, "cybersecurity")
+        wrong_hits = _opennews_wrong_domain_hits(text, "cybersecurity")
+        if wrong_hits:
+            return f"网络安全新闻禁止混入无关消费/广告/活动素材：{', '.join(sorted(wrong_hits)[:4])}"
+        if not cyber_hits:
+            return "网络安全新闻素材缺少 cyber/security/hacker/phishing/network 等核心语义"
+    if visual_domain == "finance":
+        finance_conflicts = ("robot", "humanoid", "nvidia", "openai", "anthropic", "iphone", "siri", "wwdc", "机器人", "英伟达")
+        if any(term in text for term in finance_conflicts):
+            return "金融新闻禁止混入科技公司/机器人素材"
+    return ""
+
+
 def _opennews_library_entity_locks(seg: dict, relevance_tokens: set[str]) -> dict[str, set[str]]:
     blob = " ".join([
         str(seg.get("material_keyword") or ""),
@@ -1456,6 +2195,19 @@ def _opennews_library_entity_locks(seg: dict, relevance_tokens: set[str]) -> dic
                 company_terms.add(term)
         if company_terms:
             locks["ai_company"] = company_terms
+    if re.search(r"\b(xai|x\.ai|grok)\b", blob):
+        locks["xai_grok"] = {"xai", "x.ai", "grok"}
+    if re.search(r"\b(amazon|aws|bedrock)\b|亚马逊|亞馬遜", blob):
+        locks["amazon_aws"] = {"amazon", "aws", "bedrock", "亚马逊", "亞馬遜"}
+    if re.search(r"\b(apple|iphone|siri|wwdc)\b|苹果", blob):
+        locks["apple"] = {"apple", "iphone", "siri", "wwdc", "苹果"}
+    if re.search(r"\b(qualcomm|broadcom|marvell|oracle)\b", blob):
+        chip_terms = set()
+        for term in ("qualcomm", "broadcom", "marvell", "oracle"):
+            if term in blob:
+                chip_terms.add(term)
+        if chip_terms:
+            locks["tech_company"] = chip_terms
     return locks
 
 
@@ -1471,6 +2223,8 @@ def _opennews_library_entity_hit_score(searchable: str, entity_locks: dict[str, 
                 score += 110
             elif group in {"trump", "white_house"}:
                 score += 55
+            elif group in {"xai_grok", "amazon_aws"}:
+                score += 80
             else:
                 score += 35
         else:
@@ -1498,6 +2252,13 @@ def _opennews_library_domain_score(
     domain_hits = _opennews_domain_hits(searchable, visual_domain)
     entity_locks = _opennews_library_entity_locks(seg, relevance_tokens)
     entity_score, entity_hit_groups, entity_missed_groups = _opennews_library_entity_hit_score(searchable, entity_locks)
+    query_entities = _opennews_query_named_entities(seg, relevance_tokens)
+    item_entities = _opennews_named_entities_from_text(searchable)
+    entity_overlap = query_entities & item_entities
+    entity_conflicts = item_entities - query_entities
+    topic_conflict_reason = _opennews_topic_conflict_reason(searchable, relevance_tokens, visual_domain)
+    if topic_conflict_reason and not entity_overlap:
+        return False, -780, topic_conflict_reason
 
     if category in blocked_categories:
         return False, -1000, f"素材分类 {category} 与新闻领域 {visual_domain} 冲突"
@@ -1517,6 +2278,59 @@ def _opennews_library_domain_score(
         score += len(phrase_hits) * 18
     if domain_hits:
         score += min(len(domain_hits) * 10, 35)
+    if entity_overlap:
+        score += len(entity_overlap) * 55
+    if topic_conflict_reason and entity_overlap:
+        score -= 25
+    # 同一大类不等于同一新闻。AI/科技素材里如果出现了明确公司、人物或产品，
+    # 但新闻本身没有这些实体，就不要拿来当“泛 AI 图”。
+    if (
+        visual_domain == "technology"
+        and item_entities
+        and not entity_overlap
+        and (item_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS)
+    ):
+        if query_entities:
+            return False, -850, (
+                "同类但实体不匹配：新闻实体 "
+                f"{', '.join(sorted(query_entities))}，素材实体 {', '.join(sorted(item_entities))}"
+            )
+        if item_entities & {"nvidia_huang", "xai_grok", "amazon_aws", "apple", "tesla_spacex"}:
+            return False, -760, f"泛AI新闻禁止混入强命名实体素材：{', '.join(sorted(item_entities))}"
+    # 组合事件必须同时尊重主角。比如 Grok + Amazon Bedrock 新闻，
+    # 不能只因为图片里有 Amazon 就接受 OpenAI/Nvidia/手机图。
+    if "xai_grok" in query_entities and "xai_grok" not in item_entities:
+        if item_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS:
+            return False, -880, (
+                "Grok/xAI 新闻素材未命中 Grok/xAI，且混入其他AI公司实体："
+                f"{', '.join(sorted(item_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS))}"
+            )
+        if not (domain_hits or phrase_hits or overlap):
+            return False, -700, "Grok/xAI 新闻素材未命中主角且缺少足够上下文"
+    if "amazon_aws" in query_entities and "xai_grok" in query_entities:
+        if item_entities and not {"amazon_aws", "xai_grok"}.issubset(item_entities):
+            return False, -890, (
+                "Amazon Bedrock + Grok 组合新闻必须同时命中 Amazon/AWS/Bedrock 与 Grok/xAI，"
+                f"当前素材实体：{', '.join(sorted(item_entities))}"
+            )
+        ai_conflicts = (item_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS) - {"amazon_aws", "xai_grok"}
+        if ai_conflicts and "xai_grok" not in item_entities:
+            return False, -870, (
+                "Amazon Bedrock + Grok 新闻禁止使用其他AI公司画面："
+                f"{', '.join(sorted(ai_conflicts))}"
+            )
+    if (
+        query_entities
+        and item_entities
+        and not entity_overlap
+        and (item_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS)
+        and (query_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS)
+    ):
+        return False, -820, (
+            "AI/科技公司实体冲突：新闻 "
+            f"{', '.join(sorted(query_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS))}，素材 "
+            f"{', '.join(sorted(item_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS))}"
+        )
     if entity_score:
         score += entity_score
     if category == "政治" and entity_locks and not (entity_hit_groups & {"trump", "white_house"}):
@@ -1531,6 +2345,17 @@ def _opennews_library_domain_score(
         score -= 35
     if "trump" in entity_locks and "white_house" in entity_locks and entity_hit_groups & {"trump", "white_house"}:
         score += 20
+    if ("xai_grok" in entity_locks or "amazon_aws" in entity_locks) and not (
+        entity_hit_groups & {"xai_grok", "amazon_aws"}
+    ):
+        neutral_infra = (
+            not item_entities
+            and bool(domain_hits)
+            and bool(re.search(r"\b(data center|server|cloud|infrastructure|compute|storage|network)\b|数据中心|服务器|云计算|算力|基础设施", searchable))
+        )
+        if not allow_generic and not neutral_infra:
+            return False, -900, "Grok/Amazon Bedrock 新闻第一轮只接受 xAI/Grok/AWS/Amazon/Bedrock 相关素材"
+        score -= 35 if neutral_infra else 95
     if entity_locks and not entity_hit_groups and allow_generic:
         score -= 45
     if str(item.get("kind") or "").lower() == "video":
@@ -1544,6 +2369,779 @@ def _opennews_library_domain_score(
     if primary_categories and category not in primary_categories and not allow_generic:
         return False, score, "第一轮只接受同领域素材"
     return score > 0, score, "通过素材库领域过滤"
+
+
+def _opennews_focus_entity_terms(seg: dict, relevance_tokens: set[str]) -> list[str]:
+    entities = _opennews_query_named_entities(seg, relevance_tokens)
+    ordered: list[str] = []
+    priority = [
+        "nvidia_huang", "xai_grok", "amazon_aws", "openai", "anthropic",
+        "google", "microsoft", "meta", "deepseek", "apple", "tesla_spacex",
+        "trump", "white_house", "fed_powell", "iran_israel",
+    ]
+    for entity in priority:
+        if entity not in entities:
+            continue
+        ordered.extend(OPENNEWS_ENTITY_DISPLAY_TERMS.get(entity, [entity]))
+    for entity in sorted(entities):
+        if entity in priority:
+            continue
+        ordered.extend(OPENNEWS_ENTITY_DISPLAY_TERMS.get(entity, [entity]))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in ordered:
+        key = str(term or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(str(term).strip())
+    return deduped[:10]
+
+
+def _opennews_focus_event_terms(relevance_tokens: set[str], visual_domain: str) -> list[str]:
+    token_text = " ".join(sorted(relevance_tokens)).lower()
+    candidates = {
+        "finance": [
+            ("stock market trading screen", ("stock", "shares", "wall street", "nasdaq", "nyse", "股市", "股票", "股价")),
+            ("Federal Reserve central bank", ("fed", "federal reserve", "interest rate", "inflation", "美联储", "利率", "通胀")),
+            ("oil price energy market", ("oil", "crude", "opec", "油价", "石油")),
+            ("housing mortgage market", ("housing", "mortgage", "real estate", "房贷", "房地产", "首套房")),
+        ],
+        "technology": [
+            ("AI data center server room", ("ai", "artificial intelligence", "data center", "server", "人工智能", "数据中心")),
+            ("semiconductor chip laboratory", ("chip", "semiconductor", "gpu", "芯片", "半导体")),
+            ("software product launch", ("software", "model", "launch", "大模型", "发布")),
+            ("robotics laboratory", ("robot", "robotics", "机器人")),
+        ],
+        "cybersecurity": [
+            ("cybersecurity operations center", ("cyber", "cybersecurity", "network security", "网络安全", "网络攻击")),
+            ("hacker phishing scam malware", ("hacker", "phishing", "scam", "malware", "黑客", "诈骗", "钓鱼", "恶意软件")),
+            ("digital lock authentication dashboard", ("lock", "authentication", "password", "mfa", "加密", "认证", "密码")),
+        ],
+        "politics": [
+            ("government press briefing", ("white house", "congress", "policy", "government", "白宫", "国会", "政策")),
+            ("diplomacy official meeting", ("diplomacy", "minister", "foreign", "外交")),
+        ],
+        "military": [
+            ("warship fighter jet missile drone", ("warship", "fighter", "missile", "drone", "军舰", "战机", "导弹", "无人机")),
+            ("military conflict map diplomacy", ("iran", "israel", "ukraine", "russia", "伊朗", "以色列", "乌克兰")),
+        ],
+    }
+    terms: list[str] = []
+    for label, needles in candidates.get(visual_domain, []):
+        if any(needle in token_text for needle in needles):
+            terms.append(label)
+    if not terms and visual_domain in candidates:
+        terms.append(candidates[visual_domain][0][0])
+    return terms[:4]
+
+
+def _opennews_vector_entity_constraints(seg: dict, relevance_tokens: set[str], visual_domain: str) -> tuple[list[str], list[str]]:
+    query_entities = _opennews_query_named_entities(seg, relevance_tokens)
+    primary_entities = _opennews_primary_named_entities(seg)
+    intent_blob = " ".join([
+        str(seg.get("material_keyword") or ""),
+        str(seg.get("material_search_keyword") or ""),
+        str(seg.get("theme_title") or ""),
+        " ".join(str((theme or {}).get("title") or "") for theme in (seg.get("material_theme_plan") or []) if isinstance(theme, dict)),
+    ]).lower()
+    if "xai_grok" in primary_entities and "tesla" not in intent_blob and "spacex" not in intent_blob:
+        primary_entities.discard("tesla_spacex")
+        query_entities.discard("tesla_spacex")
+    required: list[str] = []
+    forbidden: list[str] = []
+
+    def add_terms(target: list[str], entity: str) -> None:
+        for term in OPENNEWS_ENTITY_DISPLAY_TERMS.get(entity, [entity]):
+            text = str(term or "").strip().lower()
+            if text and text not in target:
+                target.append(text)
+
+    # 强主角新闻优先把主角推到向量库检索层。服务端会让有实体标签的
+    # 图片必须命中 required；无实体背景图仍会回来，再由本地二审决定。
+    for entity in sorted(primary_entities):
+        if entity in OPENNEWS_AI_COMPANY_ENTITY_GROUPS or entity in {"trump", "white_house", "fed_powell", "iran_israel"}:
+            add_terms(required, entity)
+
+    # 如果新闻明确讲某个 AI/科技公司，先禁止其他强公司实体，避免
+    # Grok 新闻拿 OpenAI/Apple 图、黄仁勋新闻拿手机/机器人图。
+    if query_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS:
+        for entity in sorted(OPENNEWS_AI_COMPANY_ENTITY_GROUPS - query_entities):
+            add_terms(forbidden, entity)
+
+    # 金融新闻需要更干净：除非新闻本身明确讲某公司股票，否则不要让
+    # AI公司/手机/机器人主视觉挤进来。
+    if visual_domain == "finance" and not (primary_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS):
+        for entity in sorted(OPENNEWS_AI_COMPANY_ENTITY_GROUPS | {"trump", "white_house"}):
+            add_terms(forbidden, entity)
+
+    # 只传前若干个，避免服务端过滤过严导致全空。
+    return required[:18], forbidden[:32]
+
+
+def _opennews_vector_query_text(seg: dict, visual_domain: str) -> str:
+    relevance_tokens = _opennews_relevance_tokens(seg)
+    entity_terms = _opennews_focus_entity_terms(seg, relevance_tokens)
+    event_terms = _opennews_focus_event_terms(relevance_tokens, visual_domain)
+    parts: list[str] = []
+    for label, key in (
+        ("category", "opennews_category"),
+        ("category", "category"),
+        ("headline", "material_keyword"),
+        ("search_keyword", "material_search_keyword"),
+        ("visual_need", "material_desc"),
+        ("theme", "theme_title"),
+    ):
+        value = str(seg.get(key) or "").strip()
+        if value:
+            parts.append(f"{label}: {value}")
+    if entity_terms:
+        parts.append(f"main_entities: {', '.join(entity_terms)}")
+    if event_terms:
+        parts.append(f"event_visuals: {', '.join(event_terms)}")
+    script = str(seg.get("script") or "").strip()
+    if script:
+        parts.append(f"script_summary: {script[:520]}")
+    for theme in seg.get("material_theme_plan") or []:
+        if not isinstance(theme, dict):
+            continue
+        for key in ("title", "visual_need", "query", "description"):
+            value = str(theme.get(key) or "").strip()
+            if value:
+                parts.append(f"theme_{key}: {value[:220]}")
+        for query in theme.get("queries") or []:
+            value = str(query or "").strip()
+            if value:
+                parts.append(f"theme_query: {value[:180]}")
+    if visual_domain:
+        parts.append(f"required_visual_domain: {visual_domain}")
+    parts.append("match requirement: choose approved local news image with the same main entity or the same concrete scene, not just the same broad category")
+    return "\n".join(parts)
+
+
+def _opennews_vector_analysis_terms(analysis: dict) -> list[str]:
+    terms: list[str] = []
+    for key in ("category", "description", "entities", "scenes", "concepts", "visible_text"):
+        value = analysis.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    terms.extend(str(v) for v in item.values() if v)
+                else:
+                    terms.append(str(item or ""))
+        elif value:
+                terms.append(str(value))
+    return [term.strip() for term in terms if term and term.strip()]
+
+
+def _opennews_qwen_review_title(seg: dict, item: dict) -> str:
+    # Keep this neutral: the 5090 vision model should describe what is visible,
+    # not infer relevance from our target headline/search query.
+    parts = [
+        "OpenNews source candidate image",
+        f"source_title: {str(item.get('title') or '')[:180]}",
+        f"source_url: {str(item.get('source_url') or item.get('url') or '')[:220]}",
+        "instruction: describe only visible image content; do not infer from headline or URL",
+    ]
+    return "\n".join(part for part in parts if part.strip())
+
+
+def _opennews_qwen_analyze_uploaded_image(path: str, *, title: str, material_id: str, timeout_seconds: int | None = None) -> dict:
+    if not OPENNEWS_MATERIAL_VECTOR_URL:
+        raise RuntimeError("未配置 5090 Qwen3-VL 素材审核服务")
+    request_timeout = timeout_seconds or OPENNEWS_QWEN_REVIEW_TIMEOUT_SECONDS
+    with open(path, "rb") as handle:
+        response = requests.post(
+            f"{OPENNEWS_MATERIAL_VECTOR_URL}/analyze-upload",
+            data={"material_id": material_id, "title": title},
+            files={"file": (os.path.basename(path), handle, "application/octet-stream")},
+            timeout=request_timeout,
+        )
+    response.raise_for_status()
+    payload = response.json()
+    analysis = payload.get("analysis") if isinstance(payload, dict) else {}
+    return analysis if isinstance(analysis, dict) else {}
+
+
+def _opennews_analysis_safety_reason(analysis: dict) -> str:
+    safety_status = str(analysis.get("safety_status") or "safe").strip().lower()
+    text = " ".join(_opennews_vector_analysis_terms(analysis)).lower()
+    unsafe_tokens = (
+        "nude", "nudity", "naked", "sexual", "porn", "pornographic", "erotic",
+        "lingerie", "underwear", "bikini", "swimsuit", "cleavage", "shirtless",
+        "blood", "gore", "graphic violence", "暴露", "裸露", "色情", "内衣", "泳装",
+        "血腥", "暴力血腥",
+    )
+    if safety_status in {"blocked", "risky"}:
+        return f"Qwen3-VL safety_status={safety_status}"
+    if any(token in text for token in unsafe_tokens):
+        return "Qwen3-VL 安全描述命中裸露/色情/血腥风险词"
+    return ""
+
+
+def _opennews_prepare_qwen_review_image(path: str) -> tuple[str, bool]:
+    """Resize large crawler images before Qwen review; keep original for final video."""
+    try:
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            width, height = image.size
+            max_side = max(width, height)
+            if max_side <= OPENNEWS_QWEN_REVIEW_MAX_SIDE and os.path.getsize(path) <= 1_800_000:
+                return path, False
+            scale = OPENNEWS_QWEN_REVIEW_MAX_SIDE / float(max_side)
+            new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+            image = image.resize(new_size, Image.LANCZOS)
+            fd, temp_path = tempfile.mkstemp(prefix="opennews_qwen_review_", suffix=".jpg")
+            os.close(fd)
+            image.save(temp_path, format="JPEG", quality=86, optimize=True)
+            return temp_path, True
+    except Exception:
+        return path, False
+
+
+def _opennews_analysis_searchable_item(analysis: dict, *, visual_domain: str) -> dict:
+    analysis_terms = _opennews_vector_analysis_terms(analysis)
+    return {
+        "kind": "image",
+        "category": _opennews_category_from_domain(visual_domain),
+        "title": "",
+        "tags": analysis_terms,
+        "ai_tags": analysis_terms,
+        "news_topics": analysis_terms,
+        "notes": analysis.get("description") or "",
+        "source_url": "",
+        "source_site": "",
+        "original_filename": "",
+    }
+
+
+def _opennews_concrete_scene_hit(searchable: str, visual_domain: str) -> bool:
+    text = str(searchable or "").lower()
+    patterns = {
+        "cybersecurity": (
+            r"\b(cybersecurity|cyber security|hacker|hacking|phishing|malware|ransomware|"
+            r"network security|security operations center|server rack|firewall|password|"
+            r"authentication|encrypted|digital lock|data breach)\b|网络安全|黑客|钓鱼|恶意软件|"
+            r"勒索软件|防火墙|密码|认证|加密|数据泄露"
+        ),
+        "technology": (
+            r"\b(data center|server room|server rack|semiconductor|chip|gpu|robotics|robot|"
+            r"software dashboard|ai model|computer lab|engineer|technology company)\b|"
+            r"数据中心|服务器|芯片|半导体|机器人|大模型|算力|实验室"
+        ),
+        "finance": (
+            r"\b(stock market|trading screen|wall street|nasdaq|nyse|investor|bank|"
+            r"federal reserve|interest rate|inflation|oil price|crude oil|housing market|mortgage)\b|"
+            r"股市|交易屏|华尔街|美联储|利率|通胀|油价|石油|房贷|房地产市场"
+        ),
+        "military": (
+            r"\b(warship|fighter jet|missile|drone|soldier|troops|military exercise|"
+            r"defense briefing|naval|air force|combat vehicle)\b|军舰|战机|导弹|无人机|军演|国防|部队"
+        ),
+        "politics": (
+            r"\b(white house|congress|parliament|government building|press briefing|"
+            r"diplomatic meeting|minister|president|official flag)\b|白宫|国会|政府|记者会|外交|总统|部长"
+        ),
+        "real_estate": (
+            r"\b(house|housing|apartment|residential|real estate|mortgage|property|city skyline)\b|"
+            r"住宅|公寓|房地产|房贷|房产|城市天际线"
+        ),
+    }
+    pattern = patterns.get(visual_domain)
+    return bool(pattern and re.search(pattern, text, flags=re.I))
+
+
+def _opennews_strict_realtime_visual_decision(
+    analysis: dict,
+    *,
+    seg: dict,
+    relevance_tokens: set[str],
+    visual_domain: str,
+) -> tuple[bool, str, int]:
+    """Realtime web images must visually match the news, not just the broad category."""
+    enriched = _opennews_analysis_searchable_item(analysis, visual_domain=visual_domain)
+    searchable = _opennews_library_item_searchable(enriched)
+    item_tokens = _tokenize_opennews_relevance(searchable)
+    core_tokens = _opennews_core_relevance_tokens(relevance_tokens)
+    overlap = core_tokens & item_tokens
+    phrase_hits = {token for token in core_tokens if " " in token and token in searchable}
+    domain_hits = _opennews_domain_hits(searchable, visual_domain)
+    query_entities = _opennews_query_named_entities(seg, relevance_tokens)
+    item_entities = _opennews_named_entities_from_text(searchable)
+    entity_overlap = query_entities & item_entities
+    strong_entities = query_entities & (
+        OPENNEWS_AI_COMPANY_ENTITY_GROUPS | {"trump", "white_house", "fed_powell", "iran_israel"}
+    )
+    conflict_reason = _opennews_topic_conflict_reason(searchable, relevance_tokens, visual_domain)
+    if conflict_reason and not entity_overlap:
+        return False, f"视觉内容主题冲突：{conflict_reason}", -900
+
+    has_scene = _opennews_concrete_scene_hit(searchable, visual_domain)
+    event_terms = _opennews_focus_event_terms(relevance_tokens, visual_domain)
+    event_hits = {term for term in event_terms if term.lower() in searchable}
+    concrete_hit = bool(entity_overlap or phrase_hits or event_hits or has_scene)
+
+    if strong_entities:
+        if item_entities and not entity_overlap:
+            return False, (
+                "视觉图出现了其他明确主体，未命中新闻主角："
+                f"news={', '.join(sorted(strong_entities))}; image={', '.join(sorted(item_entities))}"
+            ), -860
+        if not entity_overlap and not (has_scene or event_hits):
+            return False, "视觉图未命中新闻主角，也缺少可接受的同场景背景", -760
+    elif query_entities and item_entities and not entity_overlap:
+        return False, (
+            "视觉图实体与新闻实体不一致："
+            f"news={', '.join(sorted(query_entities))}; image={', '.join(sorted(item_entities))}"
+        ), -780
+
+    if visual_domain == "cybersecurity" and not (domain_hits or has_scene):
+        return False, "网络安全新闻图片缺少安全运营、黑客、恶意软件、加密等可见语义", -820
+    if visual_domain == "finance" and not (domain_hits or has_scene or entity_overlap):
+        return False, "金融新闻图片缺少股市、交易、银行、美联储、油价或房地产市场语义", -800
+    if visual_domain == "technology" and not (domain_hits or has_scene or entity_overlap):
+        return False, "科技/AI新闻图片缺少AI、芯片、数据中心、软件或机器人等可见语义", -790
+    if not concrete_hit and len(overlap) < 2:
+        return False, "视觉图只达到泛相关，未命中新闻核心对象或具体场景", -650
+
+    score = 0
+    score += len(overlap) * 18
+    score += len(phrase_hits) * 30
+    score += len(domain_hits) * 20
+    score += len(event_hits) * 24
+    if has_scene:
+        score += 45
+    if entity_overlap:
+        score += len(entity_overlap) * 90
+    if strong_entities and not entity_overlap:
+        score -= 35
+    if score < 58:
+        return False, f"视觉相关性不足：{score}", score
+    return True, f"视觉审核通过：score={score}", score
+
+
+def _opennews_review_source_image_with_qwen(
+    path: str,
+    item: dict,
+    *,
+    seg: dict,
+    relevance_tokens: set[str],
+    visual_domain: str,
+) -> tuple[bool, str, dict, int]:
+    title = _opennews_qwen_review_title(seg, item)
+    review_id = "review_" + hashlib.sha1(
+        f"{path}|{title}|{time.time()}".encode("utf-8", errors="ignore")
+    ).hexdigest()[:18]
+    review_path, remove_review_path = _opennews_prepare_qwen_review_image(path)
+    try:
+        analysis = _opennews_qwen_analyze_uploaded_image(review_path, title=title, material_id=review_id)
+    finally:
+        if remove_review_path:
+            try:
+                os.remove(review_path)
+            except Exception:
+                pass
+    safety_reason = _opennews_analysis_safety_reason(analysis)
+    if safety_reason:
+        return False, safety_reason, analysis, -1000
+
+    strict_keep, strict_reason, strict_score = _opennews_strict_realtime_visual_decision(
+        analysis,
+        seg=seg,
+        relevance_tokens=relevance_tokens,
+        visual_domain=visual_domain,
+    )
+    if not strict_keep:
+        return False, f"Qwen3-VL 严格视觉审核未通过：{strict_reason}", analysis, strict_score
+
+    # For semantic review, never score with the crawler query/title/source URL.
+    # Those fields often contain the target news text and can falsely prove relevance.
+    enriched = _opennews_analysis_searchable_item(analysis, visual_domain=visual_domain)
+    keep, domain_score, reason = _opennews_library_domain_score(
+        enriched,
+        seg=seg,
+        visual_domain=visual_domain,
+        relevance_tokens=relevance_tokens,
+        allow_generic=False,
+    )
+    if not keep:
+        keep, domain_score, reason = _opennews_library_domain_score(
+            enriched,
+            seg=seg,
+            visual_domain=visual_domain,
+            relevance_tokens=relevance_tokens,
+            allow_generic=True,
+        )
+    if not keep:
+        return False, f"Qwen3-VL 语义审核未通过：{reason}", analysis, domain_score
+    focus_keep, focus_reason, focus_score = _opennews_vector_focus_decision(
+        enriched,
+        seg=seg,
+        relevance_tokens=relevance_tokens,
+        visual_domain=visual_domain,
+        vector_score=0.72,
+    )
+    if not focus_keep:
+        return False, f"Qwen3-VL 主题二审未通过：{focus_reason}", analysis, focus_score
+    final_score = int(domain_score + focus_score + strict_score + 80)
+    return True, f"{strict_reason}; {reason}; {focus_reason}", analysis, final_score
+
+
+def _opennews_category_from_domain(visual_domain: str) -> str:
+    return {
+        "ai": "AI",
+        "technology": "科技",
+        "cybersecurity": "科技",
+        "finance": "金融",
+        "real_estate": "房产",
+        "military": "军事",
+        "politics": "政治",
+        "immigration": "移民",
+        "energy": "能源",
+    }.get(str(visual_domain or "").lower(), "通用新闻")
+
+
+def _opennews_sync_registered_material_to_vector(item: dict) -> None:
+    if not OPENNEWS_MATERIAL_VECTOR_URL:
+        return
+    filename = os.path.basename(str(item.get("filename") or ""))
+    if not filename:
+        return
+    file_path = (MATERIAL_LIBRARY_DIR / filename).resolve()
+    library_root = MATERIAL_LIBRARY_DIR.resolve()
+    if not str(file_path).startswith(str(library_root)) or not file_path.exists():
+        return
+    title = " | ".join(
+        part
+        for part in [
+            str(item.get("title") or ""),
+            str(item.get("category") or ""),
+            " ".join(map(str, item.get("ai_tags") or [])),
+            " ".join(map(str, item.get("news_topics") or [])),
+        ]
+        if part.strip()
+    )
+    try:
+        _opennews_qwen_analyze_uploaded_image(
+            str(file_path),
+            title=title,
+            material_id=f"prod_{item.get('id') or file_path.stem}",
+        )
+    except Exception as exc:
+        print(f"  ⚠️ 实时素材已入库，但同步 5090 向量库失败：{item.get('id') or filename}｜{exc}")
+
+
+def _opennews_import_reviewed_source_image(
+    path: str,
+    item: dict,
+    *,
+    seg: dict,
+    analysis: dict,
+    visual_domain: str,
+    review_reason: str,
+) -> str:
+    if not OPENNEWS_REALTIME_SOURCE_AUTO_IMPORT:
+        return ""
+    suffix = os.path.splitext(path)[1].lower() or ".jpg"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        temp_copy = tmp.name
+    shutil.copy2(path, temp_copy)
+    title = (
+        str(item.get("title") or "").strip()
+        or str(seg.get("material_keyword") or "").strip()
+        or f"OpenNews 实时素材 {int(time.time())}"
+    )[:180]
+    tags = _opennews_vector_analysis_terms(analysis)
+    try:
+        registered = register_material_file(
+            temp_path=temp_copy,
+            original_filename=f"opennews_realtime_{hashlib.sha1(path.encode()).hexdigest()[:10]}{suffix}",
+            title=title,
+            category=_opennews_category_from_domain(visual_domain),
+            tags=tags[:18],
+            ai_tags=tags[:24],
+            notes=f"OpenNews 实时网络素材，Qwen3-VL 审核通过：{review_reason}",
+            uploader_username="opennews_auto",
+            uploader_display_name="OpenNews 自动入库",
+            source="opennews_realtime_qwen_reviewed",
+            source_url=item.get("source_url") or item.get("url") or "",
+            source_site=urlparse(str(item.get("source_url") or item.get("url") or "")).netloc,
+            license_note="自动抓取的新闻相关网络素材；用于内部新闻视频生产。",
+            safety_status=str(analysis.get("safety_status") or "safe"),
+            news_topics=[
+                str(seg.get("material_keyword") or ""),
+                str(seg.get("material_search_keyword") or ""),
+                *tags[:12],
+            ],
+        )
+        updated = update_material_library_item(
+            str(registered.get("id") or ""),
+            {
+                "status": "approved",
+                "reviewed_at": time.time(),
+                "reviewed_by_username": "opennews_auto",
+                "reviewed_by_display_name": "OpenNews 自动审核",
+                "ai_provider": "5090-qwen3-vl-realtime-review",
+                "ai_summary": str(analysis.get("description") or "").strip(),
+                "ai_tags": tags[:32],
+                "safety_status": str(analysis.get("safety_status") or "safe"),
+            },
+        )
+        _opennews_sync_registered_material_to_vector(updated)
+        print(f"  ✅ 实时素材已自动入正式素材库：{updated.get('id')}｜{title}")
+        return str(updated.get("id") or "")
+    except Exception as exc:
+        try:
+            if os.path.exists(temp_copy):
+                os.remove(temp_copy)
+        except Exception:
+            pass
+        print(f"  ⚠️ 实时素材自动入库失败，不影响本次视频：{exc}")
+        return ""
+
+
+def _opennews_vector_focus_decision(
+    item: dict,
+    *,
+    seg: dict,
+    relevance_tokens: set[str],
+    visual_domain: str,
+    vector_score: float,
+) -> tuple[bool, str, int]:
+    searchable = _opennews_library_item_searchable(item)
+    query_entities = _opennews_query_named_entities(seg, relevance_tokens)
+    item_entities = _opennews_named_entities_from_text(searchable)
+    entity_overlap = query_entities & item_entities
+    domain_hits = _opennews_domain_hits(searchable, visual_domain)
+    item_relevance_score = _source_material_relevance_score(item, relevance_tokens)
+    event_terms = _opennews_focus_event_terms(relevance_tokens, visual_domain)
+    event_hit_terms = {term for term in event_terms if term.lower() in searchable}
+    related_scene_hits = domain_hits or event_hit_terms or bool(
+        re.search(
+            r"\b(data center|server room|server rack|cloud|ai model|chatbot|software|dashboard|"
+            r"stock market|trading screen|wall street|oil price|refinery|housing|mortgage|"
+            r"government building|press briefing|warship|fighter jet|missile|drone)\b|"
+            r"数据中心|服务器|云计算|大模型|聊天机器人|股市|交易屏|华尔街|油价|炼油厂|房贷|"
+            r"政府|白宫|记者会|军舰|战机|导弹|无人机",
+            searchable,
+        )
+    )
+    topic_conflict_reason = _opennews_topic_conflict_reason(searchable, relevance_tokens, visual_domain)
+
+    if topic_conflict_reason and not entity_overlap:
+        return False, f"向量命中但主题冲突：{topic_conflict_reason}", -900
+
+    # 如果新闻和素材双方都有明确实体，必须有交集。否则“AI新闻”很容易
+    # 从本地库里误拿到 Apple/Nvidia/机器人等同类但不对应的图。
+    if query_entities and item_entities and not entity_overlap:
+        if item_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS or query_entities & OPENNEWS_AI_COMPANY_ENTITY_GROUPS:
+            return False, (
+                "向量命中但实体不匹配：新闻 "
+                f"{', '.join(sorted(query_entities))}，素材 {', '.join(sorted(item_entities))}"
+            ), -880
+
+    # 新闻有强主角实体时，优先要主角相同；没有同主角时只接受“无明确实体”
+    # 且领域足够明确的背景图，避免拿到另一个公司的主视觉。
+    strong_entities = query_entities & (
+        OPENNEWS_AI_COMPANY_ENTITY_GROUPS | {"trump", "white_house", "fed_powell", "iran_israel"}
+    )
+    if strong_entities and not entity_overlap:
+        if item_entities:
+            return False, (
+                "向量命中但缺少新闻主角："
+                f"{', '.join(sorted(strong_entities))}"
+            ), -820
+        if not related_scene_hits:
+            return False, "向量命中为泛背景图，但没有足够同领域/同场景支撑", -520
+
+    # 金融新闻尤其容易被公司名带偏；没有金融语义的图不要。
+    if visual_domain == "finance":
+        finance_hits = _opennews_domain_hits(searchable, "finance")
+        if not finance_hits and not (query_entities & item_entities & {"fed_powell"}):
+            return False, "金融新闻向量候选缺少金融语义", -760
+    if visual_domain == "cybersecurity":
+        cyber_hits = _opennews_domain_hits(searchable, "cybersecurity")
+        if not cyber_hits:
+            return False, "网络安全新闻向量候选缺少网络安全语义", -780
+
+    bonus = 0
+    if entity_overlap:
+        bonus += len(entity_overlap) * 90
+    elif strong_entities and related_scene_hits and not item_entities:
+        bonus += 36
+    if domain_hits:
+        bonus += min(len(domain_hits) * 18, 54)
+    if event_hit_terms:
+        bonus += min(len(event_hit_terms) * 16, 48)
+    bonus += min(item_relevance_score, 40)
+    bonus += int(vector_score * 100)
+    if strong_entities and not entity_overlap and not item_entities:
+        return True, "未命中主角，使用同领域/同场景相关背景图", bonus
+    return True, "通过向量实体二审", bonus
+
+
+def _search_opennews_material_vector_fallback(
+    seg: dict,
+    *,
+    visual_domain: str,
+    target_market: str = "",
+    department_id: str = "",
+    limit_images: int = 1,
+) -> list[dict]:
+    if not OPENNEWS_MATERIAL_VECTOR_ENABLED or not OPENNEWS_MATERIAL_VECTOR_URL or limit_images <= 0:
+        return []
+
+    query = _opennews_vector_query_text(seg, visual_domain)
+    if not query.strip():
+        return []
+    relevance_tokens = _opennews_relevance_tokens(seg)
+    required_entities, forbidden_entities = _opennews_vector_entity_constraints(seg, relevance_tokens, visual_domain)
+    if required_entities or forbidden_entities:
+        print(
+            "  🧭 向量素材实体约束："
+            f"required={required_entities[:8] or []} "
+            f"forbidden={forbidden_entities[:10] or []}"
+        )
+
+    def run_vector_search(*, mode: str) -> list[dict]:
+        if mode == "strict":
+            payload_required = required_entities
+            payload_forbidden = forbidden_entities
+        elif mode == "related":
+            payload_required = []
+            payload_forbidden = forbidden_entities
+        else:
+            payload_required = []
+            payload_forbidden = []
+        response = requests.post(
+            f"{OPENNEWS_MATERIAL_VECTOR_URL}/search",
+            json={
+                "query": query,
+                "required_entities": payload_required,
+                "forbidden_entities": payload_forbidden,
+                "top_k": max(20, min(60, limit_images * 14)),
+            },
+            timeout=OPENNEWS_MATERIAL_VECTOR_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        vector_rows = payload.get("items") if isinstance(payload, dict) else []
+        return vector_rows if isinstance(vector_rows, list) else []
+
+    try:
+        vector_items = run_vector_search(mode="strict")
+        if not vector_items and (required_entities or forbidden_entities):
+            print("  ℹ️ 向量素材精准约束无结果，改用相关素材候选并继续本地二审")
+            vector_items = run_vector_search(mode="related")
+        if not vector_items and (required_entities or forbidden_entities):
+            print("  ℹ️ 向量素材相关候选仍为空，最后尝试无硬约束候选并继续本地二审")
+            vector_items = run_vector_search(mode="loose")
+    except Exception as exc:
+        print(f"  ⚠️ 5090 向量素材库不可用，回退普通素材库：{exc}")
+        return []
+
+    if not isinstance(vector_items, list) or not vector_items:
+        return []
+
+    approved = list_material_library_items(status="approved")
+    by_id = {str(item.get("id") or ""): item for item in approved if item.get("id")}
+    by_filename = {str(item.get("filename") or ""): item for item in approved if item.get("filename")}
+    selected: list[dict] = []
+    selected_ids: set[str] = set()
+    selected_fingerprints: set[str] = set()
+    scored: list[tuple[int, dict]] = []
+
+    for vector_item in vector_items:
+        if not isinstance(vector_item, dict):
+            continue
+        material_id = str(vector_item.get("material_id") or "").strip()
+        raw_id = material_id[5:] if material_id.startswith("prod_") else material_id
+        path_name = os.path.basename(str(vector_item.get("path") or ""))
+        item = by_id.get(raw_id) or by_filename.get(path_name)
+        if not item:
+            continue
+        if str(item.get("kind") or "").lower() != "image":
+            continue
+        usage_ok, usage_reason = _opennews_library_image_usage_status(item)
+        if not usage_ok:
+            print(f"  ⏳ 向量素材复用频控过滤：{usage_reason}｜{item.get('title') or item.get('filename')}")
+            continue
+        item_id = str(item.get("id") or "")
+        if item_id and item_id in selected_ids:
+            continue
+        markets = {value.lower() for value in item.get("target_markets") or []}
+        departments = {value.lower() for value in item.get("department_ids") or []}
+        if markets and target_market and target_market.lower() not in markets:
+            continue
+        if departments and department_id and department_id.lower() not in departments:
+            continue
+        analysis = vector_item.get("analysis") if isinstance(vector_item.get("analysis"), dict) else {}
+        enriched = {**item}
+        vector_terms = _opennews_vector_analysis_terms(analysis)
+        enriched["ai_tags"] = list(item.get("ai_tags") or []) + vector_terms
+        enriched["news_topics"] = list(item.get("news_topics") or []) + vector_terms
+        if analysis.get("category") and not enriched.get("category"):
+            categories = analysis.get("category")
+            if isinstance(categories, list) and categories:
+                enriched["category"] = str(categories[0])
+        keep, domain_score, reason = _opennews_library_domain_score(
+            enriched,
+            seg=seg,
+            visual_domain=visual_domain,
+            relevance_tokens=relevance_tokens,
+            allow_generic=False,
+        )
+        if not keep:
+            keep, domain_score, reason = _opennews_library_domain_score(
+                enriched,
+                seg=seg,
+                visual_domain=visual_domain,
+                relevance_tokens=relevance_tokens,
+                allow_generic=True,
+            )
+        if not keep:
+            continue
+        vector_score = float(vector_item.get("score") or 0.0)
+        focus_keep, focus_reason, focus_score = _opennews_vector_focus_decision(
+            enriched,
+            seg=seg,
+            relevance_tokens=relevance_tokens,
+            visual_domain=visual_domain,
+            vector_score=vector_score,
+        )
+        if not focus_keep:
+            print(f"  ⚠️ 向量素材二审过滤：{focus_reason}｜{item.get('title') or item.get('filename')}")
+            continue
+        final_score = int(domain_score + focus_score + vector_score * 120)
+        scored.append((
+            final_score,
+            {
+                **item,
+                "score": final_score,
+                "opennews_library_fallback": True,
+                "opennews_vector_match": True,
+                "vector_score": vector_score,
+                "vector_reason": f"{reason}; {focus_reason}",
+                "vector_analysis": analysis,
+            },
+        ))
+
+    scored.sort(key=lambda pair: (pair[0], pair[1].get("created_at", 0)), reverse=True)
+    for _score, item in scored:
+        item_id = str(item.get("id") or "")
+        if item_id and item_id in selected_ids:
+            continue
+        fingerprint = _opennews_library_item_fingerprint(item)
+        if fingerprint and fingerprint in selected_fingerprints:
+            continue
+        selected.append(item)
+        if item_id:
+            selected_ids.add(item_id)
+        if fingerprint:
+            selected_fingerprints.add(fingerprint)
+        if len(selected) >= limit_images:
+            break
+    return selected
 
 
 def _search_opennews_material_library_fallback(
@@ -1598,6 +3196,10 @@ def _search_opennews_material_library_fallback(
             kind = str(item.get("kind") or "").lower()
             if kind not in {"image", "video"}:
                 continue
+            usage_ok, usage_reason = _opennews_library_image_usage_status(item)
+            if not usage_ok:
+                print(f"  ⏳ 本地素材库复用频控过滤：{usage_reason}｜{item.get('title') or item.get('filename')}")
+                continue
             if kind == "video" and video_count >= limit_videos:
                 continue
             if kind != "video" and image_count >= limit_images:
@@ -1625,6 +3227,8 @@ def _search_opennews_material_library_fallback(
 def _search_opennews_material_library_safe_any(
     *,
     visual_domain: str,
+    seg: dict | None = None,
+    relevance_tokens: set[str] | None = None,
     target_market: str = "",
     department_id: str = "",
     limit_images: int = 1,
@@ -1634,10 +3238,17 @@ def _search_opennews_material_library_safe_any(
         return []
     primary_categories = _opennews_library_primary_categories(visual_domain, None)
     generic_categories = {"新闻", "通用新闻", "通用氛围", "城市街景"}
+    seg = seg or {}
+    relevance_tokens = relevance_tokens or set()
+    query_entities = _opennews_query_named_entities(seg, relevance_tokens) if seg else set()
     pool: list[tuple[int, dict]] = []
     for item in list_material_library_items(status="approved"):
         kind = str(item.get("kind") or "").lower()
         if kind != "image":
+            continue
+        usage_ok, usage_reason = _opennews_library_image_usage_status(item)
+        if not usage_ok:
+            print(f"  ⏳ 安全兜底素材复用频控过滤：{usage_reason}｜{item.get('title') or item.get('filename')}")
             continue
         markets = {value.lower() for value in item.get("target_markets") or []}
         departments = {value.lower() for value in item.get("department_ids") or []}
@@ -1646,11 +3257,38 @@ def _search_opennews_material_library_safe_any(
         if departments and department_id and department_id.lower() not in departments:
             continue
         category = str(item.get("category") or "").strip()
+        if primary_categories and category not in primary_categories and category not in generic_categories:
+            continue
+        searchable = _opennews_library_item_searchable(item)
+        item_entities = _opennews_named_entities_from_text(searchable)
+        entity_overlap = query_entities & item_entities
+        topic_conflict_reason = _opennews_topic_conflict_reason(searchable, relevance_tokens, visual_domain)
+        if topic_conflict_reason and not entity_overlap:
+            continue
+        item_relevance_score = _source_material_relevance_score(item, relevance_tokens) if relevance_tokens else 0
+        if query_entities and not entity_overlap and not item_entities and category in generic_categories and item_relevance_score < 18:
+            continue
+        if query_entities and item_entities and not entity_overlap:
+            continue
+        if (
+            visual_domain == "technology"
+            and not query_entities
+            and (item_entities & {"nvidia_huang", "xai_grok", "amazon_aws", "apple", "tesla_spacex"})
+        ):
+            continue
         score = 10
         if category in primary_categories:
             score += 60
         elif category in generic_categories:
             score += 30
+        if query_entities and entity_overlap:
+            score += len(entity_overlap) * 60
+        elif query_entities and not item_entities:
+            score += 8
+        elif item_entities:
+            score -= 20
+        if relevance_tokens:
+            score += min(item_relevance_score, 35)
         score -= int(item.get("usage_count") or 0)
         score += int(float(item.get("created_at") or 0) // 86400) % 7
         pool.append((score, item))
@@ -1697,6 +3335,10 @@ def _append_library_material_items(
         library_key = str(item.get("id") or item.get("path") or item.get("filename") or "")
         if library_key and library_key in used_library_ids:
             continue
+        usage_ok, usage_reason = _opennews_library_image_usage_status(item)
+        if not usage_ok:
+            print(f"  ⏳ 本地素材库素材复用频控过滤：{usage_reason}｜{item.get('title') or item.get('filename')}")
+            continue
         copied_path = copy_material_to_output(item, output_dir, segment_index, len(material_items))
         ok, reason = _opennews_material_path_is_usable(copied_path, str(item.get("kind") or "")) if is_opennews_material_only else (True, "")
         if not ok:
@@ -1713,6 +3355,10 @@ def _append_library_material_items(
         entry["library_score"] = item.get("score", 0)
         if item.get("opennews_library_fallback"):
             entry["opennews_library_fallback"] = True
+        if item.get("opennews_vector_match"):
+            entry["opennews_vector_match"] = True
+            entry["vector_score"] = item.get("vector_score", 0)
+            entry["vector_reason"] = item.get("vector_reason", "")
         material_items.append(entry)
         if library_key:
             used_library_ids.add(library_key)
@@ -1720,6 +3366,7 @@ def _append_library_material_items(
             video_count += 1
         else:
             image_count += 1
+            _opennews_record_library_image_usage(item)
         print(f"  ✅ 已命中本地素材库：{os.path.basename(copied_path)}")
     return video_count, image_count
 
@@ -1750,18 +3397,30 @@ def fetch_materials_for_segment(
     used_source_hashes = used_source_hashes if used_source_hashes is not None else set()
     used_library_ids = used_library_ids if used_library_ids is not None else set()
     seen_source_urls: set[str] = set()
+    used_source_page_counts: dict[str, int] = {}
+    used_source_domain_counts: dict[str, int] = {}
     source_materials = []
     relevance_tokens = _opennews_relevance_tokens(seg) if is_opennews_material_only and seg.get("strict_news_media_only") else set()
     visual_domain = _opennews_visual_domain(seg, relevance_tokens) if relevance_tokens else "general"
     rejection_log: list[dict] = []
-    opennews_library_only = bool(is_opennews_material_only and OPENNEWS_MATERIAL_LIBRARY_ONLY)
+    realtime_source_review_enabled = bool(is_opennews_material_only and OPENNEWS_REALTIME_SOURCE_REVIEW_ENABLED)
+    if realtime_source_review_enabled:
+        max_source_videos = 0
+        max_source_images = max(1, min(max_source_images, OPENNEWS_REALTIME_SOURCE_MAX_IMAGES))
+        max_total_materials = max(1, min(max_total_materials, max_source_images))
+    opennews_library_only = bool(is_opennews_material_only and OPENNEWS_MATERIAL_LIBRARY_ONLY and not realtime_source_review_enabled)
     source_fallback_available = (
         is_opennews_material_only
         and not opennews_library_only
         and OPENNEWS_AI_IMAGE_ONLY
         and OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL
     )
-    if opennews_library_only:
+    if realtime_source_review_enabled:
+        print(
+            "  🧠 OpenNews 实时素材审核模式：先爬取网络候选图片，经 5090 Qwen3-VL 语义/安全审核后使用；"
+            "不足再用本地向量素材库兜底"
+        )
+    elif opennews_library_only:
         print("  🛡️ OpenNews 素材安全模式：禁用外网爬图/新闻源图片/5090 AI生图，仅使用本地正式素材库")
     elif is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY and not source_fallback_available:
         print("  ℹ️ OpenNews AI图片专用模式：跳过新闻网页/网络图片素材，只使用5090生成图")
@@ -1778,13 +3437,18 @@ def fetch_materials_for_segment(
             identity_keys = _source_identity_keys(str(item.get("url") or ""))
             if not identity_keys or identity_keys & seen_source_urls or identity_keys & used_source_urls:
                 continue
-            if _looks_like_bad_source_material(item) or _looks_like_unsafe_source_material(item):
+            if _looks_like_unsafe_source_material(item) or (
+                not realtime_source_review_enabled and _looks_like_bad_source_material(item)
+            ):
                 rejection_log.append({
                     "url": item.get("url") or "",
                     "title": item.get("title") or "",
-                    "reason": "素材 URL 命中成人/裸露站点黑名单",
+                    "reason": "素材 URL 命中成人/裸露站点黑名单" if _looks_like_unsafe_source_material(item) else "素材 URL 命中低质量图标/广告黑名单",
                 })
-                print(f"  ⚠️ 新闻素材安全过滤：成人/裸露站点｜{item.get('url')}")
+                print(
+                    "  ⚠️ 新闻素材预过滤："
+                    f"{'成人/裸露站点' if _looks_like_unsafe_source_material(item) else '低质量图标/广告'}｜{item.get('url')}"
+                )
                 continue
             if is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY:
                 kind = str(item.get("kind") or "").strip().lower()
@@ -1798,6 +3462,8 @@ def fetch_materials_for_segment(
                     continue
             relevance_score = _source_material_relevance_score(item, relevance_tokens) if relevance_tokens else 1
             min_relevance_score = _opennews_min_relevance_score(item)
+            if realtime_source_review_enabled:
+                min_relevance_score = max(8, min(min_relevance_score, 18))
             if relevance_tokens and relevance_score < min_relevance_score:
                 rejection_log.append({
                     "url": item.get("url") or "",
@@ -1811,7 +3477,7 @@ def fetch_materials_for_segment(
                 continue
             if relevance_tokens:
                 keep_item, quality_reason, quality_score = _opennews_quality_decision(item, relevance_tokens, visual_domain)
-                if not keep_item:
+                if not keep_item and not realtime_source_review_enabled:
                     rejection_log.append({
                         "url": item.get("url") or "",
                         "title": item.get("title") or "",
@@ -1830,12 +3496,28 @@ def fetch_materials_for_segment(
             item["_quality_reason"] = quality_reason
             seen_source_urls.update(identity_keys)
             source_materials.append(item)
+        if realtime_source_review_enabled:
+            for item in _opennews_expand_source_material_candidates(seg, relevance_tokens, visual_domain):
+                identity_keys = _source_identity_keys(str(item.get("url") or ""))
+                if not identity_keys or identity_keys & seen_source_urls or identity_keys & used_source_urls:
+                    continue
+                if _looks_like_unsafe_source_material(item) or _looks_like_bad_source_material(item):
+                    rejection_log.append({
+                        "url": item.get("url") or "",
+                        "title": item.get("title") or "",
+                        "reason": "扩展候选命中成人/低质量素材黑名单",
+                    })
+                    continue
+                seen_source_urls.update(identity_keys)
+                source_materials.append(item)
         if is_opennews_material_only:
             source_materials = _theme_balanced_source_materials(source_materials, relevance_tokens)
     else:
         source_materials.sort(key=_rank_source_material, reverse=True)
     source_video_count = 0
     source_image_count = 0
+    review_required_for_source = realtime_source_review_enabled
+    used_visual_anchors: set[str] = set()
     if is_opennews_material_only and not opennews_library_only:
         ai_materials = _generate_opennews_ai_image_materials(
             seg,
@@ -1858,6 +3540,12 @@ def fetch_materials_for_segment(
             and OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL
             and ai_image_count == 0
         )
+        if allow_strict_source_fallback_now:
+            review_required_for_source = bool(OPENNEWS_REALTIME_SOURCE_REVIEW_ENABLED)
+            if review_required_for_source:
+                max_source_videos = 0
+                max_source_images = max(1, min(max_source_images, OPENNEWS_REALTIME_SOURCE_MAX_IMAGES))
+                max_total_materials = max(1, min(max_total_materials, max_source_images))
         if ai_materials and OPENNEWS_AI_IMAGE_REPLACE_SOURCE and not allow_strict_source_fallback_now:
             source_materials = []
         if OPENNEWS_AI_IMAGE_ONLY and not allow_strict_source_fallback_now:
@@ -1876,18 +3564,40 @@ def fetch_materials_for_segment(
         and OPENNEWS_MATERIAL_LIBRARY_FIRST
         and library_fallback_enabled
         and not material_items
+        and not realtime_source_review_enabled
     ):
         library_target_images = max(0, min(max_total_materials, max_source_images))
-        library_items = _search_opennews_material_library_fallback(
+        library_items = _search_opennews_material_vector_fallback(
             seg,
             visual_domain=visual_domain,
             target_market=target_market or str(seg.get("target_market") or ""),
             department_id=department_id or str(seg.get("department_id") or ""),
-            limit_videos=0,
             limit_images=library_target_images,
         )
         if library_items:
-            print(f"  ✅ OpenNews 优先使用正式素材库：{len(library_items)} 条候选")
+            print(f"  ✅ OpenNews 优先使用 5090 向量素材库：{len(library_items)} 条候选")
+        elif OPENNEWS_MATERIAL_VECTOR_REQUIRED:
+            print("  ⚠️ OpenNews 未通过5090视觉向量素材库命中，启用正式素材库安全兜底")
+            library_items = _search_opennews_material_library_safe_any(
+                visual_domain=visual_domain,
+                seg=seg,
+                relevance_tokens=relevance_tokens,
+                target_market=target_market or str(seg.get("target_market") or ""),
+                department_id=department_id or str(seg.get("department_id") or ""),
+                limit_images=max(1, min(library_target_images, OPENNEWS_LIBRARY_FALLBACK_MAX_IMAGES, 2)),
+            )
+        else:
+            library_items = _search_opennews_material_library_fallback(
+                seg,
+                visual_domain=visual_domain,
+                target_market=target_market or str(seg.get("target_market") or ""),
+                department_id=department_id or str(seg.get("department_id") or ""),
+                limit_videos=0,
+                limit_images=library_target_images,
+            )
+        if library_items:
+            if not any(item.get("opennews_vector_match") for item in library_items):
+                print(f"  ✅ OpenNews 优先使用正式素材库：{len(library_items)} 条候选")
             source_video_count, source_image_count = _append_library_material_items(
                 library_items=library_items,
                 material_items=material_items,
@@ -1903,10 +3613,24 @@ def fetch_materials_for_segment(
                 is_opennews_material_only=is_opennews_material_only,
             )
         else:
-            if opennews_library_only:
+            if opennews_library_only and OPENNEWS_MATERIAL_VECTOR_REQUIRED:
+                print("  ⚠️ OpenNews 强制优先视觉向量素材库，未命中时启用正式素材库安全兜底")
+                library_items = _search_opennews_material_library_safe_any(
+                    visual_domain=visual_domain,
+                    seg=seg,
+                    relevance_tokens=relevance_tokens,
+                    target_market=target_market or str(seg.get("target_market") or ""),
+                    department_id=department_id or str(seg.get("department_id") or ""),
+                    limit_images=max(1, min(library_target_images, OPENNEWS_LIBRARY_FALLBACK_MAX_IMAGES, 2)),
+                )
+                if library_items:
+                    print(f"  ✅ OpenNews 使用本地素材库安全兜底：{len(library_items)} 条")
+            elif opennews_library_only:
                 print("  ℹ️ OpenNews 正式素材库未精准命中，改用本地素材库安全兜底")
                 library_items = _search_opennews_material_library_safe_any(
                     visual_domain=visual_domain,
+                    seg=seg,
+                    relevance_tokens=relevance_tokens,
                     target_market=target_market or str(seg.get("target_market") or ""),
                     department_id=department_id or str(seg.get("department_id") or ""),
                     limit_images=library_target_images,
@@ -1930,7 +3654,11 @@ def fetch_materials_for_segment(
             else:
                 print("  ℹ️ OpenNews 正式素材库未命中，准备启用严格网络素材兜底")
 
-    source_attempt_limit = 260 if is_opennews_material_only else 24
+    source_attempt_limit = (
+        OPENNEWS_REALTIME_SOURCE_CANDIDATE_LIMIT
+        if review_required_for_source
+        else (260 if is_opennews_material_only else 24)
+    )
     if opennews_library_only:
         source_materials = []
     for item in source_materials[:source_attempt_limit]:
@@ -1939,17 +3667,99 @@ def fetch_materials_for_segment(
         if source_video_count >= max_source_videos and source_image_count >= max_source_images:
             break
         kind = str(item.get("kind") or "").strip().lower()
+        if review_required_for_source and kind == "video":
+            rejection_log.append({
+                "url": item.get("url") or "",
+                "title": item.get("title") or "",
+                "reason": "Qwen3-VL 网络素材审核模式暂只接受图片素材，不使用网络视频",
+            })
+            continue
         if kind == "video" and source_video_count >= max_source_videos:
             continue
         if is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY and kind == "video":
             continue
         if kind != "video" and source_image_count >= max_source_images:
             continue
+        if kind != "video":
+            visual_anchor = str(item.get("visual_anchor") or item.get("theme_title") or "").strip().lower()
+            if visual_anchor and visual_anchor in used_visual_anchors:
+                rejection_log.append({
+                    "url": item.get("url") or "",
+                    "source_url": item.get("source_url") or "",
+                    "title": item.get("title") or "",
+                    "reason": f"同一视觉锚点已使用：{visual_anchor}",
+                })
+                print(f"  ⏳ 网络素材同视觉锚点去重：{visual_anchor}｜{item.get('title') or item.get('url')}")
+                continue
+            page_key = _opennews_source_page_key(item)
+            domain_key = _opennews_source_domain_key(item)
+            if page_key and used_source_page_counts.get(page_key, 0) >= OPENNEWS_SOURCE_IMAGES_PER_PAGE_LIMIT:
+                rejection_log.append({
+                    "url": item.get("url") or "",
+                    "source_url": item.get("source_url") or "",
+                    "title": item.get("title") or "",
+                    "reason": f"同一新闻源页面已使用 {used_source_page_counts.get(page_key, 0)} 张，达到上限 {OPENNEWS_SOURCE_IMAGES_PER_PAGE_LIMIT}",
+                })
+                print(f"  ⏳ 网络素材同页频控过滤：{item.get('title') or item.get('url')}")
+                continue
+            if domain_key and used_source_domain_counts.get(domain_key, 0) >= OPENNEWS_SOURCE_IMAGES_PER_DOMAIN_LIMIT:
+                rejection_log.append({
+                    "url": item.get("url") or "",
+                    "source_url": item.get("source_url") or "",
+                    "title": item.get("title") or "",
+                    "reason": f"同一新闻源域名 {domain_key} 已使用 {used_source_domain_counts.get(domain_key, 0)} 张，达到上限 {OPENNEWS_SOURCE_IMAGES_PER_DOMAIN_LIMIT}",
+                })
+                print(f"  ⏳ 网络素材同域名频控过滤：{domain_key}｜{item.get('title') or item.get('url')}")
+                continue
         try:
             copied_path = _download_source_material(str(item.get("url") or ""), output_dir, segment_index, len(material_items), kind=kind)
         except Exception as exc:
             print(f"  ⚠️ 新闻来源素材下载失败：{item.get('url')}｜{exc}")
             continue
+        if review_required_for_source and _asset_kind_for_suffix(copied_path) != "video":
+            try:
+                keep_source, review_reason, review_analysis, review_score = _opennews_review_source_image_with_qwen(
+                    copied_path,
+                    item,
+                    seg=seg,
+                    relevance_tokens=relevance_tokens,
+                    visual_domain=visual_domain,
+                )
+            except Exception as exc:
+                keep_source = False
+                review_reason = f"Qwen3-VL 审核不可用：{exc}"
+                review_analysis = {}
+                review_score = 0
+            if not keep_source:
+                rejection_log.append({
+                    "url": item.get("url") or "",
+                    "title": item.get("title") or "",
+                    "reason": review_reason,
+                    "score": review_score,
+                    "domain": visual_domain,
+                })
+                print(f"  ⚠️ Qwen3-VL 实时素材审核未通过：{review_reason}｜{item.get('title') or item.get('url')}")
+                try:
+                    os.remove(copied_path)
+                except Exception:
+                    pass
+                continue
+            item = dict(item)
+            item["_qwen_review_analysis"] = review_analysis
+            item["_qwen_review_reason"] = review_reason
+            item["_qwen_review_score"] = review_score
+            item["_quality_score"] = max(int(item.get("_quality_score") or 0), int(review_score or 0))
+            item["_quality_reason"] = f"Qwen3-VL审核通过：{review_reason}"
+            imported_id = _opennews_import_reviewed_source_image(
+                copied_path,
+                item,
+                seg=seg,
+                analysis=review_analysis,
+                visual_domain=visual_domain,
+                review_reason=review_reason,
+            )
+            if imported_id:
+                item["_imported_material_id"] = imported_id
         try:
             content_hash = _file_sha256(copied_path)
         except Exception:
@@ -1961,6 +3771,22 @@ def fetch_materials_for_segment(
                 pass
             print(f"  ⚠️ 新闻来源素材内容重复，已跳过：{item.get('url')}")
             continue
+        if content_hash and _asset_kind_for_suffix(copied_path) != "video":
+            hash_ok, hash_reason = _opennews_source_image_hash_usage_status(content_hash)
+            if not hash_ok:
+                rejection_log.append({
+                    "url": item.get("url") or "",
+                    "source_url": item.get("source_url") or "",
+                    "title": item.get("title") or "",
+                    "reason": hash_reason,
+                    "content_hash": content_hash,
+                })
+                try:
+                    os.remove(copied_path)
+                except Exception:
+                    pass
+                print(f"  ⏳ 网络图片全局复用频控过滤：{hash_reason}｜{item.get('title') or item.get('url')}")
+                continue
         if content_hash:
             used_source_hashes.add(content_hash)
         used_source_urls.update(_source_identity_keys(str(item.get("url") or "")))
@@ -1970,6 +3796,12 @@ def fetch_materials_for_segment(
         entry["title"] = item.get("title", "")
         entry["quality_score"] = item.get("_quality_score", 0)
         entry["quality_reason"] = item.get("_quality_reason", "")
+        if item.get("_qwen_review_analysis"):
+            entry["qwen_review"] = item.get("_qwen_review_analysis")
+            entry["qwen_review_reason"] = item.get("_qwen_review_reason", "")
+            entry["qwen_review_score"] = item.get("_qwen_review_score", 0)
+        if item.get("_imported_material_id"):
+            entry["imported_material_id"] = item.get("_imported_material_id")
         if is_opennews_material_only and OPENNEWS_AI_IMAGE_ONLY:
             entry["strict_fallback"] = True
             entry["fallback_reason"] = "5090 AI图片完全不可用，使用严格新闻源图片兜底"
@@ -1984,6 +3816,17 @@ def fetch_materials_for_segment(
             source_video_count += 1
         else:
             source_image_count += 1
+            visual_anchor = str(item.get("visual_anchor") or item.get("theme_title") or "").strip().lower()
+            if visual_anchor:
+                used_visual_anchors.add(visual_anchor)
+            page_key = _opennews_source_page_key(item)
+            domain_key = _opennews_source_domain_key(item)
+            if page_key:
+                used_source_page_counts[page_key] = used_source_page_counts.get(page_key, 0) + 1
+            if domain_key:
+                used_source_domain_counts[domain_key] = used_source_domain_counts.get(domain_key, 0) + 1
+            if content_hash:
+                _opennews_record_source_image_usage(item, content_hash=content_hash, copied_path=copied_path)
         print(f"  ✅ 已下载新闻来源素材：{os.path.basename(copied_path)}")
 
     blank_rejections: list[dict] = []
@@ -1996,22 +3839,52 @@ def fetch_materials_for_segment(
     library_items = []
     opennews_needs_library_fallback = (
         is_opennews_material_only
-        and not OPENNEWS_MATERIAL_LIBRARY_FIRST
+        and (not OPENNEWS_MATERIAL_LIBRARY_FIRST or realtime_source_review_enabled)
         and source_image_count < OPENNEWS_LIBRARY_FALLBACK_MIN_SOURCE_IMAGES
         and not any(item.get("source") == "opennews_ai_image" for item in material_items)
     )
     if remaining_slots and library_fallback_enabled:
         if is_opennews_material_only:
             if opennews_library_only:
-                library_items = _search_opennews_material_library_safe_any(
+                library_items = _search_opennews_material_vector_fallback(
                     visual_domain=visual_domain,
+                    seg=seg,
                     target_market=target_market or str(seg.get("target_market") or ""),
                     department_id=department_id or str(seg.get("department_id") or ""),
                     limit_images=max(0, min(remaining_slots, max_source_images - source_image_count)),
                 )
                 if library_items:
-                    print(f"  ✅ OpenNews 本地素材库补足素材：{len(library_items)} 条")
-            elif OPENNEWS_MATERIAL_LIBRARY_FIRST:
+                    print(f"  ✅ OpenNews 通过5090向量素材库补足素材：{len(library_items)} 条")
+                elif OPENNEWS_MATERIAL_VECTOR_REQUIRED:
+                    print("  ⚠️ OpenNews 强制优先视觉向量素材库，未命中时启用正式素材库安全补足")
+                    library_items = _search_opennews_material_library_safe_any(
+                        visual_domain=visual_domain,
+                        seg=seg,
+                        relevance_tokens=relevance_tokens,
+                        target_market=target_market or str(seg.get("target_market") or ""),
+                        department_id=department_id or str(seg.get("department_id") or ""),
+                        limit_images=max(
+                            1,
+                            min(
+                                remaining_slots,
+                                OPENNEWS_LIBRARY_FALLBACK_MAX_IMAGES,
+                                max_source_images - source_image_count,
+                                2,
+                            ),
+                        ),
+                    )
+                else:
+                    library_items = _search_opennews_material_library_safe_any(
+                        visual_domain=visual_domain,
+                        seg=seg,
+                        relevance_tokens=relevance_tokens,
+                        target_market=target_market or str(seg.get("target_market") or ""),
+                        department_id=department_id or str(seg.get("department_id") or ""),
+                        limit_images=max(0, min(remaining_slots, max_source_images - source_image_count)),
+                    )
+                    if library_items:
+                        print(f"  ✅ OpenNews 本地素材库补足素材：{len(library_items)} 条")
+            elif OPENNEWS_MATERIAL_LIBRARY_FIRST and not realtime_source_review_enabled:
                 print(
                     "  ℹ️ OpenNews 已优先检查正式素材库，剩余素材槽位只允许严格网络兜底："
                     f"library_or_source_images={source_image_count}"
@@ -2035,18 +3908,50 @@ def fetch_materials_for_segment(
                         ),
                     ),
                 }
-                library_items = _search_opennews_material_library_fallback(
+                library_items = _search_opennews_material_vector_fallback(
                     seg,
                     visual_domain=visual_domain,
                     target_market=target_market or str(seg.get("target_market") or ""),
                     department_id=department_id or str(seg.get("department_id") or ""),
-                    **library_limits,
+                    limit_images=library_limits["limit_images"],
                 )
                 if library_items:
                     print(
-                        "  ✅ OpenNews 网络素材为0，启用正式素材库兜底："
+                        "  ✅ OpenNews 网络素材为0，启用5090向量素材库兜底："
                         f"{len(library_items)} 条"
                     )
+                elif OPENNEWS_MATERIAL_VECTOR_REQUIRED:
+                    print("  ⚠️ OpenNews 未通过5090视觉向量素材库命中，启用正式素材库安全兜底")
+                    library_items = _search_opennews_material_library_safe_any(
+                        visual_domain=visual_domain,
+                        seg=seg,
+                        relevance_tokens=relevance_tokens,
+                        target_market=target_market or str(seg.get("target_market") or ""),
+                        department_id=department_id or str(seg.get("department_id") or ""),
+                        limit_images=max(
+                            1,
+                            min(
+                                remaining_slots,
+                                OPENNEWS_LIBRARY_FALLBACK_MAX_IMAGES,
+                                max_source_images - source_image_count,
+                                2,
+                            ),
+                        ),
+                    )
+                else:
+                    library_items = _search_opennews_material_library_fallback(
+                        seg,
+                        visual_domain=visual_domain,
+                        target_market=target_market or str(seg.get("target_market") or ""),
+                        department_id=department_id or str(seg.get("department_id") or ""),
+                        **library_limits,
+                    )
+                if library_items:
+                    if not any(item.get("opennews_vector_match") for item in library_items):
+                        print(
+                            "  ✅ OpenNews 网络素材为0，启用正式素材库兜底："
+                            f"{len(library_items)} 条"
+                        )
         else:
             library_limits = {
                 "limit_videos": max(0, min(remaining_slots, max_source_videos - source_video_count)),
@@ -2173,9 +4078,21 @@ def fetch_materials_for_segment(
             "local_library_only": opennews_library_only,
             "strict_source_fallback_enabled": OPENNEWS_STRICT_SOURCE_FALLBACK_WHEN_AI_FAIL,
             "strict_source_fallback_used": any(item.get("source") == "opennews_source" for item in material_items),
+            "source_qwen_review_required": review_required_for_source,
+            "source_qwen_reviewed_count": sum(
+                1 for item in material_items
+                if item.get("source") == "opennews_source" and item.get("qwen_review_score") is not None
+            ),
+            "source_unreviewed_count": sum(
+                1 for item in material_items
+                if item.get("source") == "opennews_source" and item.get("qwen_review_score") is None
+            ),
             "requires_human_review": False,
             "review_reason": "",
-            "auto_publish_allowed": True,
+            "auto_publish_allowed": not any(
+                item.get("source") == "opennews_source" and item.get("qwen_review_score") is None
+                for item in material_items
+            ),
             "source_counts": {
                 source: sum(1 for item in material_items if item.get("source") == source)
                 for source in sorted({str(item.get("source") or "unknown") for item in material_items})

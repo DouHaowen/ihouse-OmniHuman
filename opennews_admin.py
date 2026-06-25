@@ -127,6 +127,46 @@ def _get_opennews_model_provider() -> str:
     ).strip().lower() or "glm"
 
 
+def _get_opennews_local_llm_base_url() -> str:
+    return (
+        os.getenv("OPENNEWS_LOCAL_LLM_BASE_URL")
+        or os.getenv("OPENNEWS_QWEN_LLM_BASE_URL")
+        or "http://192.168.0.34:11434/v1"
+    ).strip().rstrip("/")
+
+
+def _get_opennews_local_llm_model() -> str:
+    return (
+        os.getenv("OPENNEWS_LOCAL_LLM_MODEL")
+        or os.getenv("OPENNEWS_QWEN_LLM_MODEL")
+        or "hf.co/bartowski/Qwen_Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+    ).strip()
+
+
+def _get_opennews_local_llm_timeout_seconds() -> int:
+    raw_value = (
+        os.getenv("OPENNEWS_LOCAL_LLM_TIMEOUT_SECONDS")
+        or os.getenv("OPENNEWS_QWEN_LLM_TIMEOUT_SECONDS")
+        or "240"
+    )
+    try:
+        return max(30, min(420, int(float(raw_value))))
+    except (TypeError, ValueError):
+        return 240
+
+
+def _get_opennews_local_llm_retry_attempts() -> int:
+    raw_value = (
+        os.getenv("OPENNEWS_LOCAL_LLM_RETRY_ATTEMPTS")
+        or os.getenv("OPENNEWS_QWEN_LLM_RETRY_ATTEMPTS")
+        or "1"
+    )
+    try:
+        return max(1, min(3, int(float(raw_value))))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _get_opennews_glm_api_key() -> str:
     return (
         os.getenv("OPENNEWS_GLM_API_KEY")
@@ -187,6 +227,9 @@ def _extract_chat_completion_text(payload: dict) -> str:
                         text = item.get("text") or item.get("content")
                         if isinstance(text, str):
                             chunks.append(text)
+            reasoning = message.get("reasoning")
+            if isinstance(reasoning, str):
+                chunks.append(reasoning)
         text = choice.get("text")
         if isinstance(text, str):
             chunks.append(text)
@@ -408,6 +451,72 @@ def _request_opennews_glm_json(prompt: str, *, max_output_tokens: int = 4096) ->
     raise RuntimeError(f"GLM-5.2 新闻稿生成失败：{last_error}")
 
 
+def _request_opennews_local_llm_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
+    base_url = _get_opennews_local_llm_base_url()
+    model = _get_opennews_local_llm_model()
+    if not base_url or not model:
+        raise RuntimeError("未配置 OpenNews 本地文案模型 base_url 或 model")
+    endpoint = f"{base_url}/chat/completions"
+    last_error: Exception | None = None
+    for retry_index in range(_get_opennews_local_llm_retry_attempts()):
+        raw = ""
+        try:
+            response = requests.post(
+                endpoint,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "你是专业中文新闻视频编辑。只输出可解析 JSON，不输出解释、markdown 或代码块。",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "max_tokens": max_output_tokens,
+                    "temperature": 0.45,
+                    "response_format": {"type": "json_object"},
+                    "stream": False,
+                },
+                timeout=_get_opennews_local_llm_timeout_seconds(),
+            )
+            if response.status_code >= 400:
+                last_error = RuntimeError(f"OpenNews 本地文案模型失败：{response.status_code} {response.text[:500]}")
+                if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_local_llm_retry_attempts():
+                    time.sleep(1.5 * (retry_index + 1))
+                    continue
+                break
+            raw = _extract_chat_completion_text(response.json())
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    parsed["_opennews_model_provider"] = "local_qwen"
+                    parsed["_opennews_model_name"] = model
+                    return parsed
+                last_error = RuntimeError("OpenNews 本地文案模型返回的 JSON 不是对象")
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                candidate = _extract_json_object_text(raw)
+                if candidate:
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            parsed["_opennews_model_provider"] = "local_qwen"
+                            parsed["_opennews_model_name"] = model
+                            return parsed
+                        last_error = RuntimeError("OpenNews 本地文案模型 JSON 提取结果不是对象")
+                    except json.JSONDecodeError as parse_exc:
+                        last_error = parse_exc
+                break
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            if retry_index + 1 < _get_opennews_local_llm_retry_attempts():
+                time.sleep(1.5 * (retry_index + 1))
+                continue
+            break
+    raise RuntimeError(f"OpenNews 本地文案模型生成失败：{last_error}")
+
+
 def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
     api_key = _get_openai_relay_api_key()
     if not api_key:
@@ -516,6 +625,17 @@ def _request_opennews_claude_json(prompt: str, *, max_output_tokens: int = 4096)
 
 def _request_opennews_model_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
     provider = _get_opennews_model_provider()
+    if provider in {"local", "local_qwen", "qwen", "qwen_local", "ollama"}:
+        try:
+            return _request_opennews_local_llm_json(prompt, max_output_tokens=max_output_tokens)
+        except Exception as exc:
+            print(f"[opennews_local_llm_fallback] 本地文案模型不可用，回退 GLM-5.2：{exc!r}")
+            fallback = _request_opennews_glm_json(prompt, max_output_tokens=max_output_tokens)
+            fallback["_opennews_model_provider"] = "glm_fallback_after_local_qwen"
+            fallback["_opennews_local_error"] = str(exc)
+            return fallback
+    if provider in {"local_only", "qwen_only", "ollama_only"}:
+        return _request_opennews_local_llm_json(prompt, max_output_tokens=max_output_tokens)
     if provider in {"relay", "api_relay", "openai_relay", "claude_relay"}:
         return _request_opennews_relay_json(prompt, max_output_tokens=max_output_tokens)
     if provider in {"claude", "anthropic"}:
@@ -914,21 +1034,24 @@ def _polish_opennews_broadcast_copy(
     summary = _strip_tags(str(draft.get("summary") or article.get("summary") or ""))
     script = _clean_opennews_script_text(str(draft.get("script") or summary or title))
     prompt = f"""
-你是电视新闻节目的资深中文/日文新闻编辑。请把下面内容改写成真正可以直接播出的短新闻口播稿。
+你是 OpenNews 的资深新闻编辑。请从爬取到的新闻标题、摘要和正文中提炼事实，整理成适合主播直接播报的新闻稿。
 
 输出语言：{language}
-目标长度：{length_rule}，一段完整口播，不要分标题小节。
+目标长度：{length_rule}，一段完整播出稿，不要分标题小节。
 
 必须遵守：
-- 根据新闻标题、摘要和正文内容写，必须具体讲这条新闻本身，不要写成“某领域新动向”。
-- 第一句直接交代“谁/哪家公司/哪个机构/哪个国家发生了什么”。
-- 中间至少写 2-3 句，补最关键的事实、数字、背景、现场信息或利益相关方。
-- 必须说明这件事为什么值得关注，但必须贴合新闻类型：教育讲考生和家庭，科技讲产品和行业，财经讲市场和投资，政治讲政策和各方反应，军事讲局势和官方通报。
-- 结尾自然收住，点出下一步最具体的看点，不能突然断，也不要套“后续仍需关注”“具体细节以原文为准”这种空话。
+- 只根据下方新闻标题、摘要、正文节选和相关报道写；不要自行补充原文没有明确写出的国家、公司、人物、时间、数字、演习、计划、结论或立场。
+- 任务是“提炼新闻内容并成稿”，不是评论、预测、科普，也不是泛泛介绍行业背景。
+- 使用新闻稿写法：第一句作为导语，清楚交代这条新闻的核心事实，包括“谁、发生了什么、涉及什么变化或决定”。
+- 主体部分按重要性提炼原文中最关键的事实、数字、背景、各方表态、影响对象或市场反应。
+- 如果原文有明确影响或后续安排，可以写出来；如果原文没有，不要编造“下一步”“未来安排”，用已知事实自然收束。
+- 句子要适合播报：清楚、稳重、有节奏，可以有短句，但不要过度口语化。
+- 结尾自然收住，不能突然断，也不要套“后续仍需关注”“具体细节以原文为准”这种空话。
 - 不要出现“一句话看事件”“背景方面”“影响方面”“首先/其次/最后”。
 - 不要出现“这条新闻值得关注的地方”“从已经公开的信息看”“这件事不只是单一事件”“后续还要看当事方说明”。
 - 不要加入原文没有的价格、人数、结论或立场。
-- 语气像新闻主播，不要像机器摘要，不要像论文简介。
+- 语气像正式新闻主播读稿：客观、准确、自然，不要像机器摘要，不要像论文简介，不要堆砌四字词。
+- 中文表达要自然，不要夹英文，除非是公司名、产品名、机构名或无法翻译的专有名词。
 
 来源：{source_name}
 发布时间：{published_at or "来源页面未标注明确发布时间"}
@@ -1637,6 +1760,84 @@ def _opennews_entity_search_query(keywords: list[str], article: dict, draft: dic
     return " ".join(filtered).strip() or str(article.get("title") or draft.get("video_title") or "news")
 
 
+def _opennews_precise_article_media_queries(
+    article: dict,
+    draft: dict | None = None,
+    keywords: Iterable[str] = (),
+    *,
+    limit: int = 12,
+) -> list[str]:
+    """Build narrow media queries: exact news/title first, generic category never first."""
+    draft = draft or {}
+    source_name = _compact_query(str(article.get("source_name") or ""), max_chars=42)
+    source_host = urlparse(str(article.get("url") or "")).netloc.lower().replace("www.", "")
+    title = _compact_query(str(article.get("title") or ""), max_chars=110)
+    summary = _compact_query(str(article.get("summary") or draft.get("summary") or ""), max_chars=110)
+    video_title = _compact_query(str(draft.get("video_title") or ""), max_chars=90)
+    keyword_terms = [
+        _compact_query(str(item or ""), max_chars=48)
+        for item in keywords or []
+        if _compact_query(str(item or ""), max_chars=48)
+    ]
+    entity_terms = _opennews_extract_entity_terms(
+        title,
+        summary,
+        video_title,
+        " ".join(keyword_terms[:6]),
+        max_terms=10,
+    )
+
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        compact = _compact_query(value, max_chars=110)
+        key = _normalized_text_key(compact)
+        if not compact or not key:
+            return
+        words = key.split()
+        if len(words) == 1 and words[0] in {
+            "ai", "artificial", "intelligence", "technology", "tech", "finance",
+            "market", "markets", "stocks", "politics", "military", "news",
+        }:
+            return
+        if _opennews_is_generic_media_query(compact):
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(compact)
+
+    seen: set[str] = set()
+    # 1) Most precise: the original English/source title itself.
+    add(title)
+    if title and source_name:
+        add(f"{title} {source_name}")
+    if title and source_host:
+        add(f"{title} {source_host}")
+
+    # 2) If the model produced a Chinese title, keep it behind the original title.
+    if video_title and video_title.lower() != title.lower():
+        add(video_title)
+
+    # 3) Source summary is useful when title is too short, but keep it exact-ish.
+    if summary and len(_normalized_text_key(summary).split()) >= 5:
+        add(summary)
+
+    # 4) Core entity + event terms, not category-wide fallback words.
+    for entity in entity_terms[:6]:
+        if keyword_terms:
+            add(f"{entity} {' '.join(keyword_terms[:2])}")
+        add(entity)
+
+    for keyword in keyword_terms[:6]:
+        if not _opennews_is_generic_media_query(keyword):
+            if title:
+                add(f"{title} {keyword}")
+            add(keyword)
+
+    return candidates[:limit]
+
+
 def _parse_timestamp(value: str) -> float:
     value = (value or "").strip()
     if not value:
@@ -2259,11 +2460,15 @@ def discover_general_search_media(queries: Iterable[str], *, limit: int = 180) -
     collected: list[dict] = []
     query_variants: list[str] = []
     for query in queries:
-        query = _compact_query(str(query or ""), max_chars=80)
+        query = _compact_query(str(query or ""), max_chars=110)
         if not query or _opennews_is_generic_media_query(query):
             continue
-        for suffix in ("official photo", "press release image", "news photo"):
-            variant = f"{query} {suffix}".strip()
+        variants = [query]
+        # Only add a light "news" hint. Heavy suffixes such as "official photo"
+        # and "press release image" produced many unrelated stock/PR images.
+        if "news" not in query.lower() and len(_normalized_text_key(query).split()) >= 3:
+            variants.append(f"{query} news")
+        for variant in variants:
             if variant.lower() not in {item.lower() for item in query_variants}:
                 query_variants.append(variant)
     for search_terms in query_variants:
@@ -2290,16 +2495,13 @@ def discover_general_web_media(queries: Iterable[str], *, article_url: str = "",
     source_host = urlparse(article_url or "").netloc.lower()
     query_variants: list[str] = []
     for query in queries:
-        query = _compact_query(str(query or ""), max_chars=80)
+        query = _compact_query(str(query or ""), max_chars=110)
         if not query or _opennews_is_generic_media_query(query):
             continue
-        for suffix in (
-            "official news photo",
-            "official photo",
-            "press release image",
-            "news photo",
-        ):
-            variant = f"{query} {suffix}".strip()
+        variants = [query]
+        if "news" not in query.lower() and len(_normalized_text_key(query).split()) >= 3:
+            variants.append(f"{query} news")
+        for variant in variants:
             if variant.lower() not in {item.lower() for item in query_variants}:
                 query_variants.append(variant)
     for search_terms in query_variants:
@@ -2942,15 +3144,21 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
         if part.strip()
     )
     category = str(article.get("category") or "all")
-    broad_queries = _expanded_media_queries(
-        str(article.get("title") or ""),
-        str(article.get("summary") or ""),
-        str(draft.get("summary") or ""),
-        " ".join(str(item).strip() for item in keyword_values if str(item).strip()),
-        str(draft.get("script") or "")[:600],
-        category=category,
+    broad_queries = _opennews_precise_article_media_queries(
+        article,
+        draft,
+        keyword_values,
         limit=12,
     )
+    if not broad_queries:
+        broad_queries = _expanded_media_queries(
+            str(article.get("title") or ""),
+            str(article.get("summary") or ""),
+            str(draft.get("summary") or ""),
+            " ".join(str(item).strip() for item in keyword_values if str(item).strip()),
+            category=category,
+            limit=8,
+        )
     related_media = discover_broad_opennews_media(
         source_id=str(article.get("source_id") or ""),
         category=category,

@@ -77,12 +77,76 @@ NEWS_HARVEST_PRESETS = {
 
 NEWS_TOPIC_HARVEST_PRESETS = [
     {
+        "id": "xai_grok_bedrock",
+        "name": "xAI Grok 与 Amazon Bedrock",
+        "category": "AI",
+        "topic": "xAI Grok Amazon Bedrock AWS generative AI model cloud official news logo data center",
+        "notes": "优先 xAI/Grok、Amazon AWS、Amazon Bedrock、云计算产品页、企业AI平台、数据中心和官方发布图；不要混入 OpenAI、英伟达、机器人或手机图。",
+        "tags": ["AI", "xAI", "Grok", "Amazon", "AWS", "Bedrock", "云计算", "大模型"],
+        "patterns": [r"\bgrok\b", r"\bxai\b", r"\bx\.ai\b", r"\bbedrock\b", r"\baws\b", r"\bamazon\b"],
+    },
+    {
+        "id": "anthropic_claude",
+        "name": "Anthropic 与 Claude",
+        "category": "AI",
+        "topic": "Anthropic Claude AI model company official news logo office product announcement",
+        "notes": "优先 Anthropic/Claude 官方图片、公司新闻、产品发布、办公室和AI产品演示图；不要混入 OpenAI、Google、Nvidia 等其他公司主视觉。",
+        "tags": ["AI", "Anthropic", "Claude", "大模型", "AI公司"],
+        "patterns": [r"\banthropic\b", r"\bclaude\b"],
+    },
+    {
+        "id": "openai_chatgpt",
+        "name": "OpenAI 与 ChatGPT",
+        "category": "AI",
+        "topic": "OpenAI ChatGPT GPT AI model company official news logo office product demo",
+        "notes": "优先 OpenAI/ChatGPT 官方图片、产品发布、办公室、应用界面和大模型新闻图；避免混入其他公司主视觉。",
+        "tags": ["AI", "OpenAI", "ChatGPT", "GPT", "大模型"],
+        "patterns": [r"\bopenai\b", r"\bchatgpt\b", r"\bgpt\b"],
+    },
+    {
+        "id": "google_gemini_ai",
+        "name": "Google Gemini 与 AI",
+        "category": "AI",
+        "topic": "Google Gemini AI model DeepMind official news logo product demo cloud AI",
+        "notes": "优先 Google/Gemini/DeepMind 官方图片、产品发布、AI工具演示和云端AI场景；不要混入 OpenAI/Anthropic 主视觉。",
+        "tags": ["AI", "Google", "Gemini", "DeepMind", "大模型"],
+        "patterns": [r"\bgemini\b", r"\bgoogle\b", r"\bdeepmind\b", r"\balphabet\b"],
+    },
+    {
+        "id": "meta_ai",
+        "name": "Meta AI 与 Llama",
+        "category": "AI",
+        "topic": "Meta AI Llama artificial intelligence model official news logo product demo",
+        "notes": "优先 Meta AI、Llama、Meta 官方新闻图、产品发布和AI工具画面；避免无关社交媒体截图。",
+        "tags": ["AI", "Meta", "Llama", "大模型"],
+        "patterns": [r"\bmeta\b", r"\bllama\b", r"\bfacebook\b"],
+    },
+    {
+        "id": "microsoft_copilot_ai",
+        "name": "Microsoft Copilot 与 Azure AI",
+        "category": "AI",
+        "topic": "Microsoft Copilot Azure AI official news logo product demo cloud artificial intelligence",
+        "notes": "优先 Microsoft Copilot、Azure AI、微软官方发布、企业办公AI和云计算场景。",
+        "tags": ["AI", "Microsoft", "Copilot", "Azure", "云计算"],
+        "patterns": [r"\bmicrosoft\b", r"\bcopilot\b", r"\bazure\b"],
+    },
+    {
+        "id": "deepseek_ai",
+        "name": "DeepSeek 与中国大模型",
+        "category": "AI",
+        "topic": "DeepSeek AI model Chinese artificial intelligence company official news logo product screenshot",
+        "notes": "优先 DeepSeek 官方、产品界面、模型发布、中国AI公司和数据中心场景；避免泛化机器人图。",
+        "tags": ["AI", "DeepSeek", "中国AI", "大模型"],
+        "patterns": [r"\bdeepseek\b"],
+    },
+    {
         "id": "ai_nvidia_chip",
         "name": "AI芯片与英伟达",
         "category": "AI",
         "topic": "Nvidia Jensen Huang AI chip GPU data center semiconductor artificial intelligence news official photo b-roll",
         "notes": "优先英伟达新闻室、数据中心、GPU服务器、芯片晶圆、AI大会、黄仁勋公开采访与发布会画面；避免泛化政治人物和无关商业配图。",
         "tags": ["AI", "英伟达", "黄仁勋", "GPU", "AI芯片", "数据中心", "半导体"],
+        "patterns": [r"\bnvidia\b", r"\bjensen\s+huang\b", r"英伟达", r"黄仁勋", r"黃仁勳"],
     },
     {
         "id": "ai_model_companies",
@@ -91,6 +155,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "OpenAI Anthropic Google AI Meta Microsoft Apple artificial intelligence model news office conference product demo",
         "notes": "优先 OpenAI、Anthropic、Google、Meta、微软、苹果等公司新闻室、产品发布、办公室、AI工具演示、科技会议画面。",
         "tags": ["AI", "大模型", "OpenAI", "Anthropic", "Google AI", "Meta AI", "微软AI", "苹果AI"],
+        "patterns": [r"\bai model\b", r"\bgenerative ai\b", r"大模型", r"人工智能"],
     },
     {
         "id": "data_center_servers",
@@ -99,6 +164,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "data center server racks cloud computing GPU server room AI infrastructure electricity cooling official photo",
         "notes": "优先服务器机柜、云计算数据中心、GPU集群、冷却系统、电力基础设施画面，适合 AI 能源、电力、算力新闻兜底。",
         "tags": ["科技", "数据中心", "服务器", "云计算", "算力", "电力"],
+        "patterns": [r"\bdata center\b", r"\bserver\b", r"\bcloud\b", r"数据中心", r"服务器", r"算力"],
     },
     {
         "id": "robotics_humanoid",
@@ -107,6 +173,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "humanoid robot robotics automation warehouse industrial robot laboratory robot conference official photo video",
         "notes": "优先人形机器人、机械臂、仓储自动化、工业机器人、实验室测试和机器人发布会画面；避免玩具、动漫或无关科幻图。",
         "tags": ["科技", "机器人", "人形机器人", "工业机器人", "自动化", "实验室"],
+        "patterns": [r"\brobot", r"\bhumanoid\b", r"机器人", r"人形机器人"],
     },
     {
         "id": "white_house_us_politics",
@@ -115,6 +182,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "White House US politics press briefing president congress official photo government meeting diplomacy news",
         "notes": "优先白宫、新闻发布厅、国会、政府会议、外交会谈和官方记者会画面；适合美国政策、总统讲话、监管新闻。",
         "tags": ["政治", "白宫", "美国政府", "国会", "记者会", "外交"],
+        "patterns": [r"\bwhite house\b", r"\bcongress\b", r"\bgovernment\b", r"白宫", r"国会"],
     },
     {
         "id": "trump_us_election",
@@ -123,6 +191,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "Donald Trump US election campaign rally White House policy press conference official photo news",
         "notes": "优先特朗普公开活动、竞选集会、政策讲话、白宫/国会相关画面；不要抓娱乐八卦或明显恶搞图。",
         "tags": ["政治", "特朗普", "美国大选", "竞选", "政策"],
+        "patterns": [r"\btrump\b", r"特朗普"],
     },
     {
         "id": "military_conflict",
@@ -131,6 +200,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "military conflict NATO Ukraine Russia defense warship fighter jet missile drone army exercise official photo b-roll",
         "notes": "优先官方军方、DVIDS、NATO、国防部、军演、舰艇、战机、无人机、防空系统画面；禁止血腥、尸体、伤者近景和裸露画面。",
         "tags": ["军事", "北约", "乌克兰", "俄罗斯", "军舰", "战机", "导弹", "无人机"],
+        "patterns": [r"\bnato\b", r"\bukraine\b", r"\brussia\b", r"\bmissile\b", r"\bdrone\b", r"北约", r"乌克兰", r"俄罗斯"],
     },
     {
         "id": "middle_east_iran_israel",
@@ -139,6 +209,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "Middle East Iran Israel conflict diplomacy military oil Strait of Hormuz official photo news map warship",
         "notes": "优先中东地图、外交会谈、军舰、油轮、霍尔木兹海峡、政府发布会画面；避免爆炸伤亡近景。",
         "tags": ["军事", "中东", "伊朗", "以色列", "霍尔木兹", "油轮", "外交"],
+        "patterns": [r"\biran\b", r"\bisrael\b", r"\bhormuz\b", r"伊朗", r"以色列", r"霍尔木兹"],
     },
     {
         "id": "oil_energy",
@@ -147,6 +218,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "oil price energy market crude oil tanker refinery OPEC gas station pipeline Strait of Hormuz news photo",
         "notes": "优先油井、油轮、炼油厂、加油站、输油管道、能源设施和油价市场图；适合油价、能源安全和中东影响新闻。",
         "tags": ["金融", "能源", "石油", "油价", "OPEC", "炼油厂", "油轮"],
+        "patterns": [r"\boil\b", r"\bcrude\b", r"\bopec\b", r"\benergy\b", r"石油", r"油价"],
     },
     {
         "id": "fed_inflation_markets",
@@ -155,6 +227,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "Federal Reserve inflation interest rate stock market trading floor Wall Street central bank economy official photo",
         "notes": "优先美联储大楼、央行发布会、交易所、交易屏幕、华尔街、银行、经济数据图画面。",
         "tags": ["金融", "美联储", "通胀", "降息", "股市", "华尔街", "央行"],
+        "patterns": [r"\bfed\b", r"\bfederal reserve\b", r"\bpowell\b", r"\bstock market\b", r"美联储", r"通胀", r"股市"],
     },
     {
         "id": "real_estate_us_housing",
@@ -163,6 +236,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "US housing market real estate homes apartment mortgage suburb city skyline property sign news photo",
         "notes": "优先美国住宅区、公寓楼、房产经纪牌、城市天际线、房贷合同、看房场景；适合房价、租金、百万美元首套房新闻。",
         "tags": ["房产", "美国房产", "住宅", "公寓", "房贷", "城市街景"],
+        "patterns": [r"\bhousing\b", r"\breal estate\b", r"\bmortgage\b", r"\bhome prices\b", r"房产", r"房地产", r"房贷"],
     },
     {
         "id": "immigration_visa",
@@ -171,6 +245,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "immigration visa passport airport border government office students migration policy official photo news",
         "notes": "优先护照、签证窗口、机场、移民局、边境、大学校园和政府窗口画面；避免敏感人脸特写。",
         "tags": ["移民", "签证", "护照", "机场", "边境", "留学"],
+        "patterns": [r"\bimmigration\b", r"\bvisa\b", r"\bpassport\b", r"\bborder\b", r"移民", r"签证", r"护照"],
     },
     {
         "id": "general_press_briefing",
@@ -179,6 +254,7 @@ NEWS_TOPIC_HARVEST_PRESETS = [
         "topic": "news press conference official building newsroom city street map data screen public statement photo b-roll",
         "notes": "优先记者会、新闻发布厅、官方建筑、城市街景、地图、数据屏、新闻编辑室；用于没有明确实体图时兜底。",
         "tags": ["通用新闻", "记者会", "新闻发布", "城市街景", "数据屏"],
+        "patterns": [r"\bpress briefing\b", r"\bnews conference\b", r"记者会", r"新闻发布"],
     },
 ]
 
@@ -260,6 +336,71 @@ CATEGORY_SEED_SOURCE_URLS = {
         "https://apnews.com/",
     ],
 }
+
+
+def _news_item_text(item: dict) -> str:
+    parts = [
+        item.get("title"),
+        item.get("title_zh"),
+        item.get("translated_title"),
+        item.get("original_title"),
+        item.get("english_title"),
+        item.get("summary"),
+        item.get("summary_zh"),
+        item.get("translated_summary"),
+        item.get("description"),
+        item.get("content"),
+        item.get("category"),
+        item.get("batch_category"),
+        item.get("source_name"),
+    ]
+    return " ".join(str(part or "") for part in parts if str(part or "").strip())
+
+
+def suggest_hotspot_material_topics(news_items: list[dict], *, limit: int = 12) -> list[dict]:
+    """Pick concrete material topics from recent OpenNews items.
+
+    This is intentionally entity-first. Broad categories like "AI" are useful only
+    after specific entities such as Grok, Claude, Nvidia or White House have been
+    considered, because those are what make visual matching precise.
+    """
+    scored: list[tuple[int, int, dict]] = []
+    joined_items = [_news_item_text(item) for item in news_items if isinstance(item, dict)]
+    all_text = "\n".join(joined_items)
+    for index, preset in enumerate(NEWS_TOPIC_HARVEST_PRESETS):
+        patterns = list(preset.get("patterns") or [])
+        if patterns:
+            hit_count = 0
+            for text in joined_items:
+                if any(re.search(pattern, text, flags=re.I) for pattern in patterns):
+                    hit_count += 1
+            if hit_count <= 0:
+                continue
+            score = hit_count * 100 + max(0, 30 - index)
+        else:
+            topic_terms = [term for term in re.split(r"\s+", str(preset.get("topic") or "").lower()) if len(term) >= 4]
+            hit_count = sum(1 for term in topic_terms[:16] if term in all_text.lower())
+            if hit_count <= 0:
+                continue
+            score = hit_count * 10 + max(0, 10 - index)
+        scored.append((score, -index, preset))
+    scored.sort(reverse=True, key=lambda row: (row[0], row[1]))
+    selected = [dict(row[2]) for row in scored[: max(1, int(limit or 12))]]
+    if selected:
+        return selected
+    # If the latest batch is thin or the source text is too generic, seed the most
+    # useful evergreen topics so the library still grows in the right direction.
+    fallback_ids = {
+        "xai_grok_bedrock",
+        "anthropic_claude",
+        "openai_chatgpt",
+        "ai_nvidia_chip",
+        "data_center_servers",
+        "white_house_us_politics",
+        "fed_inflation_markets",
+        "real_estate_us_housing",
+    }
+    return [dict(item) for item in NEWS_TOPIC_HARVEST_PRESETS if item.get("id") in fallback_ids][: max(1, int(limit or 12))]
 
 
 def _now() -> float:
@@ -831,3 +972,59 @@ def import_harvest_candidate_to_material_library(
     )
     update_harvest_candidate(candidate_id, {"status": "imported", "imported_material_id": item.get("id", "")})
     return item
+
+
+def run_harvest_job_and_import_pending(
+    job_id: str,
+    *,
+    uploader_username: str,
+    uploader_display_name: str,
+    max_import: int = 12,
+) -> dict:
+    """Run a harvest job and copy downloaded candidates into material-library pending review."""
+    job = run_harvest_job(job_id)
+    if str(job.get("status") or "") != "done":
+        return {"job": job, "imported_count": 0}
+    imported_count = 0
+    candidates = list_harvest_candidates(status="pending", job_id=job_id)
+    for candidate in candidates:
+        if imported_count >= max(0, int(max_import or 0)):
+            break
+        try:
+            import_harvest_candidate_to_material_library(
+                str(candidate.get("id") or ""),
+                uploader_username=uploader_username,
+                uploader_display_name=uploader_display_name,
+                category=str(candidate.get("category") or job.get("category") or ""),
+                notes=(
+                    "热点补库候选，需管理员审核后才进入正式素材库。\n"
+                    f"采集主题：{candidate.get('topic') or job.get('topic') or ''}\n"
+                    f"来源：{candidate.get('source_url') or ''}"
+                ),
+            )
+            imported_count += 1
+        except Exception as exc:
+            update_harvest_candidate(str(candidate.get("id") or ""), {"notes": f"自动导入 pending 失败：{exc}"})
+    _update_job(job_id, {"message": f"{job.get('message') or '采集完成'}；已导入 {imported_count} 条到素材库待审核区"})
+    return {"job": list_harvest_jobs()[0] if list_harvest_jobs() else job, "imported_count": imported_count}
+
+
+def run_harvest_job_and_import_pending_async(
+    job_id: str,
+    *,
+    uploader_username: str,
+    uploader_display_name: str,
+    max_import: int = 12,
+) -> None:
+    worker = threading.Thread(
+        target=run_harvest_job_and_import_pending,
+        kwargs={
+            "job_id": job_id,
+            "uploader_username": uploader_username,
+            "uploader_display_name": uploader_display_name,
+            "max_import": max_import,
+        },
+        daemon=True,
+        name=f"hotspot-harvest-{job_id}",
+    )
+    worker.start()

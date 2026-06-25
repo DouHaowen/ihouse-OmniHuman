@@ -1537,19 +1537,19 @@
               <div class="panel-header" style="margin-bottom:0;">
                 <div>
                   <div class="section-kicker">Auto Radar</div>
-                  <h3 class="section-title" style="font-size:22px;">热点自动抓取与合集生产</h3>
-                  <p class="section-desc">开启后系统会每2小时自动抓取 20 条 AI、房产、移民、科技、金融、军事、政治类英文热点；每批自动把热度最高的一条制作成竖屏 Shorts 发布 YouTube，同时按 AI 4 条、机器人 1 条、其他热点 5 条的比例制作横屏合集发布 YouTube。剩余新闻仍可手动勾选批量生产。</p>
+                  <h3 class="section-title" style="font-size:22px;">手动批量生产 OpenNews</h3>
+                  <p class="section-desc">系统每 3 小时自动抓取一批热点，并按 AI 4 条、机器人 1 条、其他热点 5 条的规则自动制作 10 条新闻短片；本批最高热度新闻会发布竖屏 Shorts，同时生成横屏合集并发布 YouTube。合集封面必须由 gpt-image-2 生成成功后才会发布。</p>
                 </div>
               </div>
-              <div class="field-grid" style="grid-template-columns: 150px 150px 150px 150px 150px minmax(0,1fr);">
-                <label class="check-card" style="min-height:auto; padding:14px;">
+              <div class="field-grid" style="grid-template-columns: 150px 150px minmax(0,1fr);">
+                <label class="check-card" style="min-height:auto; padding:14px; display:none;">
                   <span>
                     <strong>自动化状态</strong>
                     <small>勾选表示已开启</small>
                   </span>
                   <input id="openNewsBatchEnabled" type="checkbox">
                 </label>
-                <div class="field">
+                <div class="field" style="display:none;">
                   <label for="openNewsBatchIntervalSelect">抓取频率</label>
                   <select id="openNewsBatchIntervalSelect" class="select-input">
                     <option value="5">每5分钟</option>
@@ -1569,24 +1569,24 @@
                     <option value="50">50条</option>
                   </select>
                 </div>
-                <div class="field">
+                <div class="field" style="display:none;">
                   <label>&nbsp;</label>
                   <button class="btn btn-secondary" id="openNewsBatchSaveBtn" type="button" style="width:100%;">保存设置</button>
                 </div>
                 <div class="field">
                   <label>&nbsp;</label>
-                  <button class="btn btn-primary" id="openNewsBatchStartBtn" type="button" style="width:100%;">启动自动化</button>
+                  <button class="btn btn-primary" id="openNewsBatchStartBtn" type="button" style="width:100%;">启动一轮完整发布</button>
                 </div>
-                <div class="field">
+                <div class="field" style="display:none;">
                   <label>&nbsp;</label>
                   <button class="btn btn-ghost" id="openNewsBatchStopBtn" type="button" style="width:100%;">关闭自动化</button>
                 </div>
-                <div class="field">
+                <div class="field" style="display:none;">
                   <label>&nbsp;</label>
                   <button class="btn btn-primary" id="openNewsBatchRunBtn" type="button" style="width:100%;">立即抓取一批</button>
                 </div>
               </div>
-              <div class="topbar-status" id="openNewsBatchStatus">自动抓取设置加载中...</div>
+              <div class="topbar-status" id="openNewsBatchStatus">自动化将每 3 小时制作一批：最高热度 Shorts + 横屏合集发布 YouTube。</div>
             </div>
 
             <div class="field-grid" style="grid-template-columns: 180px minmax(0,1fr) 190px;">
@@ -1623,7 +1623,7 @@
                 <div>
                   <div class="section-kicker">Batches</div>
                   <h3 class="section-title" style="font-size:22px;">热点抓取批次</h3>
-                  <p class="section-desc">不同批次会自动去重。系统会自动挑选合集素材；你也可以勾选剩余新闻，选择语言、配音和主预览画幅后一键批量生产。</p>
+                  <p class="section-desc">不同批次会自动去重。可查看抓取结果，也可以手动勾选新闻进入后续制作流程。</p>
                 </div>
               </div>
               <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr));">
@@ -1644,12 +1644,12 @@
                   <small>最终仍会同时生成横屏和竖屏；这里决定优先预览版本。</small>
                 </div>
               </div>
-              <label class="check-card" style="margin-top:4px;">
+              <label class="check-card" style="margin-top:4px; display:none;">
                 <div>
                   <strong>生成完成后自动发布 YouTube</strong>
                   <p>勾选后会在横屏和竖屏成片完成后，自动发布到 ihouse AI Lab 频道，分类为 News & Politics。</p>
                 </div>
-                <input type="checkbox" id="openNewsBatchYoutubePublish" checked>
+                <input type="checkbox" id="openNewsBatchYoutubePublish">
               </label>
               <div class="actions">
                 <button class="btn btn-primary" id="openNewsBatchProduceBtn" type="button">一键制作选中新闻视频</button>
@@ -1663,7 +1663,7 @@
               <div class="file-board" id="openNewsLocalTokList" style="display:none;"></div>
             </div>
 
-            <div class="panel" id="openNewsCollectionPanel" style="padding:16px; gap:12px; margin-top:18px;">
+            <div class="panel" id="openNewsCollectionPanel" style="padding:16px; gap:12px; margin-top:18px; display:none;">
               <div class="panel-header" style="margin-bottom:0;">
                 <div>
                   <div class="section-kicker">Collections</div>
@@ -1985,6 +1985,7 @@
               <div class="helper" style="margin-top:6px;">先抓网页候选素材，再人工导入正式素材库。当前阶段不会直接参与生产匹配。</div>
             </div>
             <div class="actions" style="margin:0;">
+              <button class="btn btn-primary" id="materialHarvestHotspotBtn" type="button">按近期热点自动补库</button>
               <button class="btn btn-secondary" id="materialHarvestRefreshBtn" type="button">刷新候选池</button>
               <button class="btn btn-ghost" id="materialHarvestClearBtn" type="button">清空未导入候选</button>
             </div>
@@ -2020,6 +2021,7 @@
               <button class="btn btn-primary" id="materialHarvestStartBtn" type="button">开始采集候选素材</button>
             </div>
             <div class="helper" id="materialHarvestStatus">候选池是素材库独立开发阶段，不会直接改动现有生产逻辑。</div>
+            <div class="helper">“按近期热点自动补库”会读取最近 OpenNews 批次，优先补 Grok/xAI、Claude、OpenAI、Gemini、英伟达、白宫、美联储、油价、房产等高频缺口素材，并自动放入素材库待审核区。</div>
           </div>
           <div class="file-board" id="materialHarvestJobList"></div>
           <div class="file-board" id="materialHarvestCandidateList"></div>
@@ -2297,6 +2299,7 @@
       materialHarvestSourceText: document.getElementById('materialHarvestSourceText'),
       materialHarvestNotes: document.getElementById('materialHarvestNotes'),
       materialHarvestStartBtn: document.getElementById('materialHarvestStartBtn'),
+      materialHarvestHotspotBtn: document.getElementById('materialHarvestHotspotBtn'),
       materialHarvestRefreshBtn: document.getElementById('materialHarvestRefreshBtn'),
       materialHarvestClearBtn: document.getElementById('materialHarvestClearBtn'),
       materialHarvestStatus: document.getElementById('materialHarvestStatus'),
@@ -3288,6 +3291,42 @@
         if (els.materialHarvestStartBtn) {
           els.materialHarvestStartBtn.disabled = false;
           els.materialHarvestStartBtn.textContent = originalText;
+        }
+      }
+    }
+
+    async function startMaterialHotspotHarvest() {
+      const originalText = els.materialHarvestHotspotBtn?.textContent || '按近期热点自动补库';
+      if (els.materialHarvestHotspotBtn) {
+        els.materialHarvestHotspotBtn.disabled = true;
+        els.materialHarvestHotspotBtn.textContent = '正在分析热点...';
+      }
+      if (els.materialHarvestStatus) {
+        els.materialHarvestStatus.textContent = '正在读取近期 OpenNews 批次，提取高频实体并创建补库采集任务...';
+      }
+      const formData = new FormData();
+      formData.append('days', '7');
+      formData.append('max_topics', '10');
+      formData.append('per_topic', '8');
+      try {
+        const res = await fetch('/api/material-library/harvest/hotspots', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '热点补库任务创建失败');
+        const topicNames = (data.topics || []).map(item => item.name || item.id).filter(Boolean).slice(0, 8).join('、');
+        if (els.materialHarvestStatus) {
+          els.materialHarvestStatus.textContent = `${data.message || '热点补库任务已创建'}${topicNames ? ` 专题：${topicNames}` : ''}。稍后刷新即可在待审核区看到图片。`;
+        }
+        await loadMaterialHarvest();
+        await loadMaterialLibrary();
+      } catch (error) {
+        if (els.materialHarvestStatus) {
+          els.materialHarvestStatus.textContent = error.message || '热点补库任务创建失败';
+        }
+        alert(error.message || '热点补库任务创建失败');
+      } finally {
+        if (els.materialHarvestHotspotBtn) {
+          els.materialHarvestHotspotBtn.disabled = false;
+          els.materialHarvestHotspotBtn.textContent = originalText;
         }
       }
     }
@@ -4349,19 +4388,20 @@
         els.openNewsBatchEnabled.checked = !!config.enabled;
         els.openNewsBatchEnabled.disabled = !isAdmin;
       }
-      if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(config.interval_minutes || 120);
-      if (els.openNewsBatchLimitSelect) els.openNewsBatchLimitSelect.value = String(config.limit || 20);
+      if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(config.interval_minutes || 180);
+      if (els.openNewsBatchLimitSelect) els.openNewsBatchLimitSelect.value = '10';
       if (els.openNewsBatchSaveBtn) els.openNewsBatchSaveBtn.disabled = !isAdmin;
       if (els.openNewsBatchStartBtn) {
-        els.openNewsBatchStartBtn.disabled = !isAdmin || !!config.enabled;
-        els.openNewsBatchStartBtn.textContent = config.enabled ? '自动化已启动' : '启动自动化';
+        els.openNewsBatchStartBtn.disabled = !isAdmin;
+        els.openNewsBatchStartBtn.textContent = '启动一轮 10 条成片';
       }
       if (els.openNewsBatchStopBtn) {
         els.openNewsBatchStopBtn.disabled = !isAdmin || !config.enabled;
         els.openNewsBatchStopBtn.textContent = config.enabled ? '关闭自动化' : '自动化已关闭';
       }
-      const nextRun = config.next_run_at ? `下次抓取：${formatOpenNewsBatchTime(config.next_run_at)}` : '自动抓取未启用';
-      setOpenNewsBatchStatus(`${config.last_run_message || '自动抓取尚未启动。'}｜${nextRun}`);
+      const intervalText = config.interval_minutes ? `每 ${Number(config.interval_minutes) / 60} 小时` : '每 3 小时';
+      const nextRun = config.next_run_at ? `｜下次自动启动：${formatHistoryTime(config.next_run_at)}` : '';
+      setOpenNewsBatchStatus(`${config.last_run_message || '自动化等待下一轮。'}｜${config.enabled ? `${intervalText}自动制作：最高热度 Shorts + 横屏合集发布 YouTube，封面必须 gpt-image-2 成功。${nextRun}` : '自动化已关闭，可手动启动一轮完整发布。'}`);
     }
 
     async function loadOpenNewsBatchConfig() {
@@ -4389,7 +4429,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             enabled: !!els.openNewsBatchEnabled?.checked,
-            interval_minutes: Number(els.openNewsBatchIntervalSelect?.value || 120),
+            interval_minutes: Number(els.openNewsBatchIntervalSelect?.value || 180),
             category: els.openNewsCategorySelect?.value || 'all',
             time_range: els.openNewsTrendRangeSelect?.value || '6h',
             limit: Number(els.openNewsBatchLimitSelect?.value || 20),
@@ -4412,10 +4452,38 @@
     }
 
     async function startOpenNewsBatchAutomation() {
-      const saved = await saveOpenNewsBatchConfig(true);
-      if (!saved) return;
-      setOpenNewsBatchStatus('自动化已启动，正在立即抓取第一批热点新闻...');
-      await runOpenNewsBatchNow();
+      if (els.openNewsBatchStartBtn) {
+        els.openNewsBatchStartBtn.disabled = true;
+        els.openNewsBatchStartBtn.textContent = '启动中...';
+      }
+      setOpenNewsBatchStatus('正在手动启动一轮完整自动化：抓取热点、制作 10 条成片、发布最高热度 Shorts，并生成横屏合集发布 YouTube...');
+      try {
+        const res = await fetch('/api/opennews/batches/run-manual-production', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            category: els.openNewsCategorySelect?.value || 'all',
+            time_range: els.openNewsTrendRangeSelect?.value || '6h',
+            target_market: els.openNewsBatchMarketSelect?.value || state.selectedTargetMarket || 'cn',
+            voice_preset_id: els.openNewsBatchVoiceSelect?.value || '',
+            aspect_ratio: els.openNewsBatchAspectSelect?.value || 'horizontal',
+            notes: els.openNewsNotesInput?.value || '',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || data.message || '手动批量生产启动失败');
+        if (data.job) renderOpenNewsBatchJob(data.job);
+        setOpenNewsBatchStatus(data.message || `已启动 ${Number(data.selected_count || 0)} 条新闻完整自动化制作。`);
+        await loadOpenNewsBatchConfig();
+        await loadOpenNewsBatches();
+      } catch (error) {
+        setOpenNewsBatchStatus(friendlyRequestError(error, '手动批量生产启动失败'), true);
+      } finally {
+        if (els.openNewsBatchStartBtn) {
+          els.openNewsBatchStartBtn.disabled = !(!!state.currentUser && state.currentUser.role === 'admin');
+          els.openNewsBatchStartBtn.textContent = '启动一轮完整发布';
+        }
+      }
     }
 
     async function stopOpenNewsBatchAutomation() {
@@ -4588,7 +4656,7 @@
             target_market: els.openNewsBatchMarketSelect?.value || state.selectedTargetMarket || 'cn',
             voice_preset_id: els.openNewsBatchVoiceSelect?.value || '',
             aspect_ratio: els.openNewsBatchAspectSelect?.value || 'horizontal',
-            youtube_auto_publish: !!els.openNewsBatchYoutubePublish?.checked,
+            youtube_auto_publish: false,
             youtube_privacy_status: 'public',
             youtube_aspects: ['horizontal', 'vertical'],
             notes: els.openNewsNotesInput?.value || '',
@@ -4597,9 +4665,9 @@
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || '批量生产提交失败');
         renderOpenNewsBatchJob(data.job || {});
-        setOpenNewsBatchProduceStatus(els.openNewsBatchYoutubePublish?.checked ? '批量生产已开始，成片完成后会自动发布 YouTube。' : '批量生产已开始，系统会自动生成文案并提交成片任务。');
+        setOpenNewsBatchProduceStatus('批量生产已开始，系统只生成成片文件，不发布 YouTube。');
         await pollOpenNewsBatchJob(data.job_id);
-        setOpenNewsBatchProduceStatus(els.openNewsBatchYoutubePublish?.checked ? '批量生产已完成，YouTube 发布结果已显示在任务卡片中。' : '批量生产已提交完成，可在当前任务和历史记录查看视频。');
+        setOpenNewsBatchProduceStatus('批量生产已完成，可在当前任务和历史记录查看视频。');
       } catch (error) {
         setOpenNewsBatchProduceStatus(friendlyRequestError(error, '批量生产失败'), true);
       } finally {
@@ -6931,6 +6999,7 @@
     els.materialLibraryBatchDeleteBtn?.addEventListener('click', () => batchReviewMaterialLibrary('delete', els.materialLibraryBatchDeleteBtn));
     els.materialLibraryClearSelectionBtn?.addEventListener('click', () => setMaterialLibrarySelection([]));
     els.materialHarvestStartBtn?.addEventListener('click', startMaterialHarvestJob);
+    els.materialHarvestHotspotBtn?.addEventListener('click', startMaterialHotspotHarvest);
     els.materialHarvestRefreshBtn?.addEventListener('click', loadMaterialHarvest);
     els.materialHarvestClearBtn?.addEventListener('click', clearHarvestCandidates);
     els.materialHarvestTopicPreset?.addEventListener('change', applyMaterialHarvestTopicPreset);

@@ -1,5 +1,8 @@
 .env
 output/
+material_harvest/
+material_library/
+.codex_remote_patches/
 __pycache__/
 *.pyc
 .DS_Store

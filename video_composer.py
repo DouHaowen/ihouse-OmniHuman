@@ -140,13 +140,14 @@ def _video_filter() -> str:
 
 
 def _material_motion_filter(duration: float) -> str:
-    drift_x = max(16, int((WIDTH * 0.12) // 2))
-    drift_y = max(20, int((HEIGHT * 0.08) // 2))
+    # Static news visuals read more professionally than Ken Burns motion.
+    # Keep a centered crop without sinusoidal drift so OpenNews Shorts and
+    # collection clips do not appear to shake.
     return (
         f"scale={int(WIDTH * 1.18)}:{int(HEIGHT * 1.18)}:force_original_aspect_ratio=increase,"
         f"crop={WIDTH}:{HEIGHT}:"
-        f"x='(in_w-out_w)/2+{drift_x}*sin(t/({max(duration, 0.1):.3f}/2+0.35))':"
-        f"y='(in_h-out_h)/2+{drift_y}*cos(t/({max(duration, 0.1):.3f}/2+0.55))',"
+        f"x='(in_w-out_w)/2':"
+        f"y='(in_h-out_h)/2',"
         f"setsar=1"
     )
 
@@ -199,8 +200,8 @@ def _portrait_foreground_filter(duration: float) -> str:
     return (
         f"scale={int(WIDTH * 1.06)}:{int(HEIGHT * 1.06)}:force_original_aspect_ratio=increase,"
         f"crop={WIDTH}:{HEIGHT}:"
-        f"x='(in_w-out_w)/2+8*sin(t/({max(duration, 0.1):.3f}/2+0.45))':"
-        f"y='(in_h-out_h)/2+16*cos(t/({max(duration, 0.1):.3f}/2+0.65))',"
+        f"x='(in_w-out_w)/2':"
+        f"y='(in_h-out_h)/2',"
         f"setsar=1"
     )
 
@@ -233,10 +234,7 @@ def _card_overlay_expr(duration: float, intensity: int = 8) -> str:
     # OpenNews Shorts reserve more breathing room for bottom subtitles.
     y_shift = -230 if WIDTH == 1080 and HEIGHT == 1920 else 0
     y_base = f"(H-h)/2{y_shift:+d}"
-    return (
-        f"overlay=(W-w)/2+{intensity}*sin(t/({max(duration, 0.1):.3f}/2+0.55)):"
-        f"{y_base}+{max(10, intensity + 4)}*cos(t/({max(duration, 0.1):.3f}/2+0.75))"
-    )
+    return f"overlay=(W-w)/2:{y_base}"
 
 
 def _subtitle_filter(subtitle_path: Path, template_id: str) -> str:

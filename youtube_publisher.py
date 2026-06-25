@@ -217,25 +217,7 @@ def upload_video_to_youtube(
     if thumbnail_path:
         thumbnail_path = Path(thumbnail_path)
         if thumbnail_path.exists() and thumbnail_path.is_file():
-            content_type = "image/png" if thumbnail_path.suffix.lower() == ".png" else "image/jpeg"
-            with thumbnail_path.open("rb") as image_file:
-                thumb_response = requests.post(
-                    YOUTUBE_THUMBNAIL_URL,
-                    params={"videoId": video_id},
-                    headers={
-                        "Authorization": f"Bearer {access_token}",
-                        "Content-Type": content_type,
-                    },
-                    data=image_file,
-                    timeout=120,
-                )
-            if thumb_response.status_code >= 400:
-                thumbnail_result = {
-                    "ok": False,
-                    "error": f"YouTube 封面上传失败：{thumb_response.status_code} {thumb_response.text[:500]}",
-                }
-            else:
-                thumbnail_result = {"ok": True, "raw": thumb_response.json()}
+            thumbnail_result = set_youtube_thumbnail(token_store_path, video_id, thumbnail_path, access_token=access_token)
     return {
         "video_id": video_id,
         "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
@@ -244,3 +226,38 @@ def upload_video_to_youtube(
         "thumbnail": thumbnail_result,
         "raw": result,
     }
+
+
+def set_youtube_thumbnail(
+    token_store_path: Path,
+    video_id: str,
+    thumbnail_path: Path,
+    *,
+    access_token: str = "",
+) -> dict[str, Any]:
+    video_id = str(video_id or "").strip()
+    thumbnail_path = Path(thumbnail_path)
+    if not video_id:
+        return {"ok": False, "error": "YouTube 封面上传失败：缺少 video_id"}
+    if not thumbnail_path.exists() or not thumbnail_path.is_file():
+        return {"ok": False, "error": f"YouTube 封面上传失败：封面文件不存在 {thumbnail_path}"}
+    access_token = access_token or refresh_youtube_access_token(token_store_path)
+    content_type = "image/png" if thumbnail_path.suffix.lower() == ".png" else "image/jpeg"
+    with thumbnail_path.open("rb") as image_file:
+        thumb_response = requests.post(
+            YOUTUBE_THUMBNAIL_URL,
+            params={"videoId": video_id},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": content_type,
+            },
+            data=image_file,
+            timeout=120,
+        )
+    if thumb_response.status_code >= 400:
+        return {
+            "ok": False,
+            "status_code": thumb_response.status_code,
+            "error": f"YouTube 封面上传失败：{thumb_response.status_code} {thumb_response.text[:500]}",
+        }
+    return {"ok": True, "raw": thumb_response.json()}

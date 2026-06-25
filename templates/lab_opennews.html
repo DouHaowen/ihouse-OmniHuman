@@ -1076,7 +1076,7 @@
                 <div class="eyebrow">Create</div>
                 <h3>新建数字人视频</h3>
               </div>
-              <button class="btn" data-open-tool="tasks">任务</button>
+              <button class="btn" data-open-tool="tasks">任务与成片</button>
             </div>
             <form class="compact-form" id="digitalInlineForm">
               <div class="field">
@@ -1108,7 +1108,7 @@
               </div>
               <div class="actions">
                 <button class="btn primary" type="submit">生成数字人视频</button>
-                <button class="btn" type="button" data-open-tool="tasks">查看任务</button>
+                <button class="btn" type="button" data-open-tool="tasks">任务与成片</button>
               </div>
             </form>
           </div>
@@ -1116,10 +1116,10 @@
           <div class="feature-grid">
             <article class="quick-entry">
               <div>
-                <strong>查看任务与成片</strong>
+                <strong>任务与成片</strong>
                 <span>查看数字人、房源实拍和新闻视频的生成进度与下载地址。</span>
               </div>
-              <button class="btn" data-open-tool="tasks">查看</button>
+              <button class="btn" data-open-tool="tasks">打开</button>
             </article>
           </div>
         </section>
@@ -1138,7 +1138,7 @@
             </div>
             <div class="actions">
               <button class="btn red" type="submit" form="propertyInlineForm">生成房源成片</button>
-              <button class="btn" data-open-tool="tasks">查看任务概览</button>
+              <button class="btn" data-open-tool="tasks">任务与成片</button>
             </div>
           </div>
 
@@ -1148,7 +1148,7 @@
                 <div class="eyebrow">Create</div>
                 <h3>新建房源实拍成片</h3>
               </div>
-              <button class="btn" data-open-tool="tasks">任务</button>
+              <button class="btn" data-open-tool="tasks">任务与成片</button>
             </div>
             <form class="compact-form" id="propertyInlineForm">
               <div class="field">
@@ -1175,7 +1175,7 @@
               </div>
               <div class="actions">
                 <button class="btn red" type="submit">生成房源成片</button>
-                <button class="btn" type="button" data-open-tool="tasks">查看任务</button>
+                <button class="btn" type="button" data-open-tool="tasks">任务与成片</button>
               </div>
             </form>
           </div>
@@ -1218,7 +1218,7 @@
               <div class="stat"><strong>合集</strong><span>横屏发布</span></div>
             </div>
             <div class="actions">
-              <button class="btn primary" id="openNewsStatusBtn">查看任务与成片</button>
+              <button class="btn primary" id="openNewsStatusBtn">任务与成片</button>
               <button class="btn" id="refreshNewsStatusBtn">刷新状态</button>
             </div>
           </div>
@@ -1332,42 +1332,42 @@
     </div>
     <div class="drawer-content">
       <div class="quick-stats">
-        <div class="stat"><strong id="labTaskSummary">0</strong><span>数字人/房源</span></div>
-        <div class="stat"><strong id="openNewsJobSummary">0</strong><span>新闻任务</span></div>
+        <div class="stat"><strong id="labTaskSummary">0</strong><span>数字人/房源任务</span></div>
+        <div class="stat"><strong id="openNewsJobSummary">0</strong><span>新闻自动化任务</span></div>
         <div class="stat"><strong id="videoSummary">0</strong><span>最近成片</span></div>
       </div>
       <div class="notice" id="taskSummaryText" style="margin-top:12px">暂无正在处理的任务。</div>
-      <details class="batch" style="margin-top:14px">
+      <details class="batch" id="labTaskSection" style="margin-top:14px">
         <summary>
           <span>
-            <div class="batch-title">数字人 / 房源任务明细</div>
-            <div class="meta">只在需要排查或下载时展开。</div>
+            <div class="batch-title">数字人 / 房源任务</div>
+            <div class="meta">查看数字人口播和房源实拍成片的生成进度、预览和下载。</div>
           </span>
-          <span class="count-pill">展开</span>
+          <span class="count-pill" id="labTaskCountPill">0</span>
         </summary>
         <div class="card-body" id="labTaskList">
           <div class="empty">暂无数字人或房源任务。</div>
         </div>
       </details>
-      <details class="batch" style="margin-top:12px">
+      <details class="batch" id="newsJobSection" style="margin-top:12px">
         <summary>
           <span>
-            <div class="batch-title">OpenNews 后台任务</div>
-            <div class="meta">自动化新闻生成与发布进度。</div>
+            <div class="batch-title">新闻自动化任务</div>
+            <div class="meta">查看 OpenNews 批量生成、Shorts、合集和 YouTube 发布状态。</div>
           </span>
-          <span class="count-pill">展开</span>
+          <span class="count-pill" id="newsJobCountPill">0</span>
         </summary>
         <div class="card-body" id="jobList">
           <div class="empty">暂无任务。</div>
         </div>
       </details>
-      <details class="batch" style="margin-top:12px">
+      <details class="batch" id="videoSection" style="margin-top:12px">
         <summary>
           <span>
             <div class="batch-title">最近成片</div>
-            <div class="meta">下载视频或打开 YouTube 时展开。</div>
+            <div class="meta">统一查看最近生成好的新闻、数字人和房源成片。</div>
           </span>
-          <span class="count-pill">展开</span>
+          <span class="count-pill" id="videoCountPill">0</span>
         </summary>
         <div class="card-body" id="videoList">
           <div class="empty">暂无成片。</div>
@@ -1687,6 +1687,9 @@
       if ($("digitalTaskSummary")) $("digitalTaskSummary").textContent = labCount;
       if ($("openNewsJobSummary")) $("openNewsJobSummary").textContent = jobCount;
       if ($("videoSummary")) $("videoSummary").textContent = videoCount;
+      if ($("labTaskCountPill")) $("labTaskCountPill").textContent = labCount;
+      if ($("newsJobCountPill")) $("newsJobCountPill").textContent = jobCount;
+      if ($("videoCountPill")) $("videoCountPill").textContent = videoCount;
       const runningLab = state.labTasks.filter((task) => !["done", "completed", "failed", "error"].includes(String(task.status || "").toLowerCase())).length;
       const failedLab = state.labTasks.filter((task) => ["failed", "error"].includes(String(task.status || "").toLowerCase())).length;
       const runningNews = state.jobs.filter((job) => !["done", "completed", "failed", "error"].includes(String(job.status || "").toLowerCase())).length;
@@ -1698,6 +1701,9 @@
       if (!parts.length && videoCount) parts.push(`最近已有 ${videoCount} 条成片可查看`);
       $("taskSummaryText").textContent = parts.join("，") || "暂无正在处理的任务。";
       $("taskSummaryText").className = (failedLab || failedNews) ? "notice error" : "notice";
+      if ($("labTaskSection")) $("labTaskSection").open = Boolean(runningLab || failedLab);
+      if ($("newsJobSection")) $("newsJobSection").open = Boolean(runningNews || failedNews);
+      if ($("videoSection")) $("videoSection").open = Boolean(!runningLab && !failedLab && !runningNews && !failedNews && videoCount);
     }
 
     function renderLabTaskLinks(task) {
@@ -1938,9 +1944,9 @@
             <div class="stat"><strong>${escapeHtml(runningNews)}</strong><span>处理中</span></div>
             <div class="stat"><strong>${escapeHtml(failedNews)}</strong><span>需检查</span></div>
           </div>
-          <div class="notice" style="margin-top:12px">详细历史记录已收起，请到“任务成片”页展开查看。</div>
+          <div class="notice" style="margin-top:12px">详细历史记录已收起，请到“任务与成片”中展开查看。</div>
           <div class="actions" style="margin-top:12px">
-            <button class="btn primary" data-tab-jump="tasks">查看任务成片</button>
+            <button class="btn primary" data-tab-jump="tasks">任务与成片</button>
           </div>
         `;
       }

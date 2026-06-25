@@ -1,0 +1,16 @@
+[Unit]
+Description=iHouse InfiniteTalk local digital-human worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/saita/InfiniteTalk
+Environment=INFINITETALK_AVATAR_BASE_DIR=/home/saita/InfiniteTalk
+Environment=INFINITETALK_AVATAR_CONDA_ENV=infinitetalk5090
+ExecStart=/home/saita/miniforge3/envs/infinitetalk5090/bin/python -m uvicorn infinitetalk_avatar_api_server:app --host 0.0.0.0 --port 8893
+Restart=always
+RestartSec=8
+
+[Install]
+WantedBy=default.target

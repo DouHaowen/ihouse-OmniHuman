@@ -9,6 +9,7 @@ import asyncio
 from collections import deque
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -44,7 +45,9 @@ from ai_material_harvester import (
     import_harvest_candidate_to_material_library,
     list_harvest_candidates,
     list_harvest_jobs,
+    run_harvest_job_and_import_pending_async,
     run_harvest_job_async,
+    suggest_hotspot_material_topics,
     update_harvest_candidate,
 )
 from material_library import (
@@ -91,6 +94,11 @@ from opennews_scheduler import (
     update_auto_candidate_status,
 )
 from opennews_batch import (
+    _candidate_event_key as opennews_candidate_event_key,
+    _candidate_event_tokens as opennews_candidate_event_tokens,
+    _candidate_title_compact as opennews_candidate_title_compact,
+    _candidate_title_similar as opennews_candidate_title_similar,
+    _is_duplicate_event as opennews_is_duplicate_event,
     create_batch_job as create_opennews_batch_job,
     find_batch_items as find_opennews_batch_items,
     list_batch_jobs as list_opennews_batch_jobs,
@@ -135,6 +143,7 @@ from youtube_publisher import (
     exchange_youtube_code_for_tokens,
     get_youtube_channel,
     save_youtube_refresh_token,
+    set_youtube_thumbnail,
     upload_video_to_youtube,
     youtube_env_config,
 )
@@ -248,19 +257,272 @@ OPENNEWS_COLLECTION_DIR = OUTPUT_DIR / "opennews_collections"
 OPENNEWS_LOCALTOK_DIR = OUTPUT_DIR / "opennews_localtok"
 YOUTUBE_AUTH_DIR = OUTPUT_DIR / "youtube_auth"
 YOUTUBE_TOKEN_STORE_PATH = YOUTUBE_AUTH_DIR / "youtube_token.json"
+YOUTUBE_THUMBNAIL_RETRY_DIR = OUTPUT_DIR / "youtube_thumbnail_retries"
+YOUTUBE_THUMBNAIL_COOLDOWN_PATH = YOUTUBE_AUTH_DIR / "thumbnail_cooldown.json"
 FLOORPLAN_NAV_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_AUTO_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_BATCH_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_COLLECTION_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_LOCALTOK_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+YOUTUBE_THUMBNAIL_RETRY_DIR.mkdir(parents=True, exist_ok=True)
+
+MATERIAL_VECTOR_SERVICE_URL = os.getenv("OPENNEWS_MATERIAL_VECTOR_URL", "http://192.168.0.34:8897").strip().rstrip("/")
+MATERIAL_VECTOR_SYNC_ENABLED = (
+    os.getenv("MATERIAL_VECTOR_SYNC_ENABLED", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_STALE_JOB_TIMEOUT_HOURS = max(1, int(os.getenv("OPENNEWS_STALE_JOB_TIMEOUT_HOURS", "3") or "3"))
+OPENNEWS_COLLECTION_RECOVERY_MAX_AGE_HOURS = max(
+    1,
+    int(os.getenv("OPENNEWS_COLLECTION_RECOVERY_MAX_AGE_HOURS", "12") or "12"),
+)
+YOUTUBE_THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS = max(
+    600,
+    int(os.getenv("YOUTUBE_THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS", str(6 * 60 * 60)) or str(6 * 60 * 60)),
+)
+YOUTUBE_THUMBNAIL_RETRY_INTERVAL_SECONDS = max(
+    300,
+    int(os.getenv("YOUTUBE_THUMBNAIL_RETRY_INTERVAL_SECONDS", str(30 * 60)) or str(30 * 60)),
+)
+YOUTUBE_THUMBNAIL_RETRY_MAX_ATTEMPTS = max(
+    1,
+    int(os.getenv("YOUTUBE_THUMBNAIL_RETRY_MAX_ATTEMPTS", "12") or "12"),
+)
+YOUTUBE_THUMBNAIL_RETRY_WORKER_STARTED = False
+YOUTUBE_THUMBNAIL_RETRY_LOCK = threading.Lock()
+
+
+def _youtube_thumbnail_error_is_rate_limited(error: str) -> bool:
+    text = str(error or "").lower()
+    return "uploadratelimitexceeded" in text or "too many thumbnails" in text or " 429" in text or "：429" in text
+
+
+def _youtube_thumbnail_cooldown_until() -> float:
+    try:
+        if not YOUTUBE_THUMBNAIL_COOLDOWN_PATH.exists():
+            return 0.0
+        payload = json.loads(YOUTUBE_THUMBNAIL_COOLDOWN_PATH.read_text(encoding="utf-8"))
+        return float(payload.get("until") or 0)
+    except Exception:
+        return 0.0
+
+
+def _youtube_thumbnail_cooldown_message() -> str:
+    until = _youtube_thumbnail_cooldown_until()
+    if until <= time.time():
+        return ""
+    return f"YouTube 封面上传限流冷却中，预计 {time.strftime('%Y-%m-%d %H:%M:%S JST', time.localtime(until))} 后再试。"
+
+
+def _set_youtube_thumbnail_cooldown(error: str = "") -> float:
+    until = time.time() + YOUTUBE_THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS
+    payload = {
+        "until": until,
+        "reason": "uploadRateLimitExceeded",
+        "error": str(error or "")[:1000],
+        "updated_at": time.time(),
+    }
+    YOUTUBE_THUMBNAIL_COOLDOWN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = YOUTUBE_THUMBNAIL_COOLDOWN_PATH.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(YOUTUBE_THUMBNAIL_COOLDOWN_PATH)
+    return until
+
+
+def _youtube_thumbnail_retry_path(video_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", str(video_id or "").strip())[:80]
+    return YOUTUBE_THUMBNAIL_RETRY_DIR / f"{safe_id or uuid.uuid4().hex}.json"
+
+
+def _remember_youtube_thumbnail_retry(
+    *,
+    video_id: str,
+    thumbnail_path: Path,
+    collection_id: str = "",
+    title: str = "",
+    youtube_url: str = "",
+    error: str = "",
+) -> dict:
+    video_id = str(video_id or "").strip()
+    if not video_id:
+        return {}
+    now = time.time()
+    if _youtube_thumbnail_error_is_rate_limited(error):
+        _set_youtube_thumbnail_cooldown(error)
+    cooldown_until = _youtube_thumbnail_cooldown_until()
+    retry_path = _youtube_thumbnail_retry_path(video_id)
+    existing: dict = {}
+    try:
+        if retry_path.exists():
+            existing = json.loads(retry_path.read_text(encoding="utf-8"))
+    except Exception:
+        existing = {}
+    payload = {
+        **existing,
+        "video_id": video_id,
+        "thumbnail_path": str(thumbnail_path),
+        "collection_id": collection_id,
+        "title": title,
+        "youtube_url": youtube_url,
+        "status": "pending",
+        "attempts": int(existing.get("attempts") or 0),
+        "last_error": str(error or "")[:1500],
+        "next_attempt_at": max(cooldown_until, now + YOUTUBE_THUMBNAIL_RETRY_INTERVAL_SECONDS),
+        "updated_at": now,
+        "created_at": float(existing.get("created_at") or now),
+    }
+    tmp_path = retry_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(retry_path)
+    return payload
+
+
+def _update_collection_youtube_thumbnail_status(collection_id: str, video_id: str, thumbnail_result: dict) -> None:
+    collection_id = str(collection_id or "").strip()
+    video_id = str(video_id or "").strip()
+    if not collection_id or not video_id:
+        return
+    job = load_collection_job(OPENNEWS_COLLECTION_DIR, collection_id)
+    if not job:
+        return
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    for rec in result.get("youtube_publish_records") or []:
+        if isinstance(rec, dict) and str(rec.get("video_id") or "") == video_id:
+            rec["thumbnail"] = thumbnail_result
+            rec["thumbnail_retry_updated_at"] = time.time()
+    latest = result.get("youtube_publish_latest")
+    if isinstance(latest, dict) and str(latest.get("video_id") or "") == video_id:
+        latest["thumbnail"] = thumbnail_result
+        latest["thumbnail_retry_updated_at"] = time.time()
+    update_collection_job(OPENNEWS_COLLECTION_DIR, collection_id, result=result)
+
+
+def _retry_pending_youtube_thumbnails_once() -> int:
+    now = time.time()
+    if _youtube_thumbnail_cooldown_until() > now:
+        return 0
+    retried = 0
+    for retry_path in sorted(YOUTUBE_THUMBNAIL_RETRY_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime):
+        try:
+            payload = json.loads(retry_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(payload.get("status") or "") != "pending":
+            continue
+        if float(payload.get("next_attempt_at") or 0) > now:
+            continue
+        attempts = int(payload.get("attempts") or 0)
+        if attempts >= YOUTUBE_THUMBNAIL_RETRY_MAX_ATTEMPTS:
+            payload["status"] = "failed"
+            payload["updated_at"] = now
+            retry_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            continue
+        video_id = str(payload.get("video_id") or "").strip()
+        thumbnail_path = Path(str(payload.get("thumbnail_path") or ""))
+        result = set_youtube_thumbnail(YOUTUBE_TOKEN_STORE_PATH, video_id, thumbnail_path)
+        attempts += 1
+        payload["attempts"] = attempts
+        payload["last_result"] = result
+        payload["updated_at"] = time.time()
+        if result.get("ok"):
+            payload["status"] = "done"
+            payload["completed_at"] = time.time()
+            _update_collection_youtube_thumbnail_status(
+                str(payload.get("collection_id") or ""),
+                video_id,
+                {"ok": True, "raw": result.get("raw"), "retried": True, "attempts": attempts},
+            )
+            print(f"[YouTube thumbnail retry] success video_id={video_id}", flush=True)
+        else:
+            error = str(result.get("error") or "")
+            payload["last_error"] = error[:1500]
+            if _youtube_thumbnail_error_is_rate_limited(error):
+                cooldown_until = _set_youtube_thumbnail_cooldown(error)
+                payload["next_attempt_at"] = cooldown_until
+            else:
+                payload["next_attempt_at"] = time.time() + YOUTUBE_THUMBNAIL_RETRY_INTERVAL_SECONDS
+            if attempts >= YOUTUBE_THUMBNAIL_RETRY_MAX_ATTEMPTS:
+                payload["status"] = "failed"
+            print(f"[YouTube thumbnail retry] failed video_id={video_id}: {error[:240]}", flush=True)
+        retry_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        retried += 1
+        if retried >= 1:
+            break
+    return retried
+
+
+def _youtube_thumbnail_retry_worker() -> None:
+    time.sleep(30)
+    while True:
+        try:
+            _retry_pending_youtube_thumbnails_once()
+        except Exception as exc:
+            print(f"[YouTube thumbnail retry] worker error: {exc}", flush=True)
+        time.sleep(YOUTUBE_THUMBNAIL_RETRY_INTERVAL_SECONDS)
+
+
+def _start_youtube_thumbnail_retry_worker() -> None:
+    global YOUTUBE_THUMBNAIL_RETRY_WORKER_STARTED
+    with YOUTUBE_THUMBNAIL_RETRY_LOCK:
+        if YOUTUBE_THUMBNAIL_RETRY_WORKER_STARTED:
+            return
+        YOUTUBE_THUMBNAIL_RETRY_WORKER_STARTED = True
+    threading.Thread(target=_youtube_thumbnail_retry_worker, daemon=True, name="youtube-thumbnail-retry").start()
+
+
+def _cleanup_stale_opennews_batch_jobs() -> None:
+    jobs_dir = OPENNEWS_BATCH_DIR / "batch_jobs"
+    if not jobs_dir.exists():
+        return
+    now = time.time()
+    active_statuses = {"queued", "drafting", "producing", "composing", "publishing_youtube", "running"}
+    cleaned = 0
+    for job_path in jobs_dir.glob("opennews_batch_*.json"):
+        try:
+            if (now - job_path.stat().st_mtime) / 3600 < OPENNEWS_STALE_JOB_TIMEOUT_HOURS:
+                continue
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(job.get("status") or "") not in {"running", "queued"}:
+            continue
+        touched = str(job.get("status") or "") == "queued"
+        for item in job.get("items", []) or []:
+            if str(item.get("status") or "") not in active_statuses:
+                continue
+            item["status"] = "failed"
+            item["message"] = f"任务超过 {OPENNEWS_STALE_JOB_TIMEOUT_HOURS} 小时未更新，已自动标记为中断。"
+            item["error"] = "stale_opennews_batch_item_timeout"
+            item["completed_at"] = now
+            item["updated_at"] = now
+            touched = True
+        if not touched:
+            continue
+        counts: dict[str, int] = {}
+        for item in job.get("items", []) or []:
+            status = str(item.get("status") or "")
+            counts[status] = counts.get(status, 0) + 1
+        job["status"] = "partial" if counts.get("completed") else "failed"
+        job["message"] = "存在长时间未更新的任务，已自动清理。"
+        job["updated_at"] = now
+        tmp_path = job_path.with_suffix(job_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(job_path)
+        cleaned += 1
+    if cleaned:
+        print(f"🧹 已清理 OpenNews 历史超时批次：{cleaned} 个")
 
 
 @app.on_event("startup")
 async def _start_opennews_batch_scheduler() -> None:
     ensure_collection_auto_started_at(OPENNEWS_COLLECTION_DIR)
+    _cleanup_stale_opennews_batch_jobs()
+    _start_youtube_thumbnail_retry_worker()
     set_opennews_batch_after_fetch_callback(_handle_opennews_batch_after_fetch)
     start_opennews_batch_scheduler(OPENNEWS_BATCH_DIR, poll_seconds=20)
+    _recover_stuck_opennews_collection_intro_jobs()
+    _recover_pending_opennews_direct_collections()
 
 VOICE_PRESETS = [
     {
@@ -610,6 +872,8 @@ OPENNEWS_QWEN_TTS_ENABLED = (os.getenv("OPENNEWS_QWEN_TTS_ENABLED", "1") or "1")
 OPENNEWS_QWEN_TTS_BASE_URL = (os.getenv("OPENNEWS_QWEN_TTS_BASE_URL") or "http://192.168.0.34:8895").strip().rstrip("/")
 OPENNEWS_QWEN_TTS_TOKEN = os.getenv("OPENNEWS_QWEN_TTS_TOKEN", "local-qwen3-tts-5090").strip()
 OPENNEWS_QWEN_TTS_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_SPEAKER", "serena").strip() or "serena"
+OPENNEWS_QWEN_TTS_FEMALE_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_FEMALE_SPEAKER", "serena").strip() or "serena"
+OPENNEWS_QWEN_TTS_MALE_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_MALE_SPEAKER", "aiden").strip() or "aiden"
 OPENNEWS_QWEN_TTS_LANGUAGE = os.getenv("OPENNEWS_QWEN_TTS_LANGUAGE", "chinese").strip() or "chinese"
 OPENNEWS_QWEN_TTS_TIMEOUT = max(15, int(os.getenv("OPENNEWS_QWEN_TTS_TIMEOUT", "180") or "180"))
 OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX = (os.getenv("OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
@@ -617,11 +881,28 @@ OPENNEWS_QWEN_TTS_INSTRUCT = os.getenv(
     "OPENNEWS_QWEN_TTS_INSTRUCT",
     "用自然、清晰、专业的中文新闻女主播语气朗读，节奏稳定，声音有亲和力。",
 ).strip()
+OPENNEWS_QWEN_TTS_FEMALE_INSTRUCT = os.getenv(
+    "OPENNEWS_QWEN_TTS_FEMALE_INSTRUCT",
+    "用自然、清晰、专业的中文新闻女主播语气朗读，节奏稳定，声音有亲和力。",
+).strip()
+OPENNEWS_QWEN_TTS_MALE_INSTRUCT = os.getenv(
+    "OPENNEWS_QWEN_TTS_MALE_INSTRUCT",
+    "用沉稳、清晰、专业的中文新闻男主播语气朗读，节奏稳定，信息感强。",
+).strip()
 OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID = os.getenv("OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID", "mandarin_female").strip() or "mandarin_female"
-# Default off for now: collection intro digital-human clips are costly/slow.
-# Set OPENNEWS_COLLECTION_INTRO_ENABLED=1 when we want to restore this feature.
-OPENNEWS_COLLECTION_INTRO_ENABLED = (os.getenv("OPENNEWS_COLLECTION_INTRO_ENABLED", "0") or "0").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_MINIMAX_FALLBACK_FEMALE_VOICE_PRESET_ID = os.getenv("OPENNEWS_MINIMAX_FALLBACK_FEMALE_VOICE_PRESET_ID", "mandarin_female").strip() or "mandarin_female"
+OPENNEWS_MINIMAX_FALLBACK_MALE_VOICE_PRESET_ID = os.getenv("OPENNEWS_MINIMAX_FALLBACK_MALE_VOICE_PRESET_ID", "mandarin_male").strip() or "mandarin_male"
+# Collection intro is intentionally short because digital-human generation is slow.
+OPENNEWS_COLLECTION_INTRO_ENABLED = (os.getenv("OPENNEWS_COLLECTION_INTRO_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH = ASSETS_DIR / os.getenv("OPENNEWS_COLLECTION_INTRO_ANCHOR_FILENAME", "opennews_anchor_daily.png").strip()
+OPENNEWS_COLLECTION_INTRO_FEMALE_ANCHOR_PATH = ASSETS_DIR / os.getenv("OPENNEWS_COLLECTION_INTRO_FEMALE_ANCHOR_FILENAME", "opennews_anchor_daily.png").strip()
+OPENNEWS_COLLECTION_INTRO_MALE_ANCHOR_PATH = ASSETS_DIR / os.getenv("OPENNEWS_COLLECTION_INTRO_MALE_ANCHOR_FILENAME", "opennews_anchor_daily_male.png").strip()
+OPENNEWS_PRESENTER_STATE_PATH = OPENNEWS_BATCH_DIR / "presenter_state.json"
+OPENNEWS_PRESENTER_STATE_LOCK = threading.Lock()
+GPU_ORCHESTRATOR_ENABLED = (os.getenv("GPU_ORCHESTRATOR_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+GPU_ORCHESTRATOR_URL = os.getenv("GPU_ORCHESTRATOR_URL", "http://192.168.0.34:8898").strip().rstrip("/")
+GPU_ORCHESTRATOR_TOKEN = os.getenv("GPU_ORCHESTRATOR_TOKEN", "local-gpu-orchestrator-5090").strip()
+GPU_ORCHESTRATOR_TIMEOUT_SECONDS = max(3, int(os.getenv("GPU_ORCHESTRATOR_TIMEOUT_SECONDS", "25") or "25"))
 OPENNEWS_COLLECTION_INTRO_LOCAL_DIGITAL_ENABLED = (
     (os.getenv("OPENNEWS_COLLECTION_INTRO_LOCAL_DIGITAL_ENABLED", "1") or "1").strip().lower()
     not in {"0", "false", "no", "off"}
@@ -631,6 +912,105 @@ OPENNEWS_COLLECTION_INTRO_LOCAL_ENGINES = [
     for part in (os.getenv("OPENNEWS_COLLECTION_INTRO_LOCAL_ENGINES", INFINITETALK_ENGINE_ID) or "").split(",")
     if part.strip()
 ]
+
+
+def _opennews_presenter_config(gender: str = "female") -> dict:
+    gender = str(gender or "female").strip().lower()
+    if gender not in {"female", "male"}:
+        gender = "female"
+    if gender == "male":
+        return {
+            "gender": "male",
+            "label": "男主播",
+            "anchor_filename": OPENNEWS_COLLECTION_INTRO_MALE_ANCHOR_PATH.name,
+            "anchor_path": str(OPENNEWS_COLLECTION_INTRO_MALE_ANCHOR_PATH),
+            "qwen_speaker": OPENNEWS_QWEN_TTS_MALE_SPEAKER,
+            "qwen_instruct": OPENNEWS_QWEN_TTS_MALE_INSTRUCT,
+            "minimax_voice_preset_id": OPENNEWS_MINIMAX_FALLBACK_MALE_VOICE_PRESET_ID,
+            "voice_preset_id": "mandarin_male",
+            "digital_human_prompt": (
+                "专业中文新闻男主播坐在演播桌前，面向镜头播报 OpenNews 每日热点开场。"
+                "表情沉稳可信，口型清晰，轻微点头，动作克制，新闻栏目质感。"
+                "不要改变背景中的 OpenNews 每日热点标识，不要添加额外文字。"
+            ),
+        }
+    return {
+        "gender": "female",
+        "label": "女主播",
+        "anchor_filename": OPENNEWS_COLLECTION_INTRO_FEMALE_ANCHOR_PATH.name,
+        "anchor_path": str(OPENNEWS_COLLECTION_INTRO_FEMALE_ANCHOR_PATH),
+        "qwen_speaker": OPENNEWS_QWEN_TTS_FEMALE_SPEAKER,
+        "qwen_instruct": OPENNEWS_QWEN_TTS_FEMALE_INSTRUCT,
+        "minimax_voice_preset_id": OPENNEWS_MINIMAX_FALLBACK_FEMALE_VOICE_PRESET_ID,
+        "voice_preset_id": "mandarin_female",
+        "digital_human_prompt": (
+            "专业中文新闻女主播坐在演播桌前，面向镜头播报 OpenNews 每日热点开场。"
+            "表情自然可信，口型清晰，轻微点头，动作克制，新闻栏目质感。"
+            "不要改变背景中的 OpenNews 每日热点标识，不要添加额外文字。"
+        ),
+    }
+
+
+def _normalize_opennews_presenter_config(config: Optional[dict]) -> dict:
+    if not isinstance(config, dict):
+        return _opennews_presenter_config("female")
+    gender = str(config.get("gender") or "female").strip().lower()
+    base = _opennews_presenter_config(gender)
+    for key in ("qwen_speaker", "qwen_instruct", "minimax_voice_preset_id", "voice_preset_id", "anchor_path", "anchor_filename"):
+        value = str(config.get(key) or "").strip()
+        if value:
+            base[key] = value
+    return base
+
+
+def _next_opennews_batch_presenter_config() -> dict:
+    with OPENNEWS_PRESENTER_STATE_LOCK:
+        state: dict = {}
+        try:
+            if OPENNEWS_PRESENTER_STATE_PATH.exists():
+                state = json.loads(OPENNEWS_PRESENTER_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+        last_gender = str(state.get("last_gender") or "").strip().lower()
+        next_gender = "male" if last_gender == "female" else "female"
+        next_count = int(state.get("batch_count") or 0) + 1
+        updated = {
+            "last_gender": next_gender,
+            "batch_count": next_count,
+            "updated_at": time.time(),
+        }
+        try:
+            OPENNEWS_PRESENTER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = OPENNEWS_PRESENTER_STATE_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(OPENNEWS_PRESENTER_STATE_PATH)
+        except Exception as exc:
+            print(f"[opennews_presenter] failed to persist presenter state: {exc}", flush=True)
+        config = _opennews_presenter_config(next_gender)
+        config["batch_count"] = next_count
+        return config
+
+
+def _switch_5090_gpu_profile(profile: str, *, reason: str = "") -> dict:
+    profile = str(profile or "").strip().lower()
+    if not GPU_ORCHESTRATOR_ENABLED or not GPU_ORCHESTRATOR_URL or not profile:
+        return {"ok": False, "skipped": True, "reason": "orchestrator_disabled"}
+    try:
+        response = requests.post(
+            f"{GPU_ORCHESTRATOR_URL}/profile",
+            headers={"X-Token": GPU_ORCHESTRATOR_TOKEN, "Content-Type": "application/json"},
+            json={"profile": profile, "reason": reason},
+            timeout=GPU_ORCHESTRATOR_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("ok"):
+            print(f"[gpu_orchestrator] profile={profile} returned non-ok: {payload}", flush=True)
+        return payload
+    except Exception as exc:
+        print(f"[gpu_orchestrator] failed to switch profile={profile}: {exc}", flush=True)
+        return {"ok": False, "error": str(exc), "profile": profile}
+
 
 AVATAR_STYLE_PROMPTS = [
     "人物面向镜头自然讲述，表情亲和，口型清晰，动作克制但真实，轻微点头和手势配合内容节奏",
@@ -807,6 +1187,68 @@ def _harvest_candidate_payload(candidate: dict, current_user: Optional[dict] = N
     payload["can_import"] = bool(current_user and _is_admin(current_user) and payload.get("status") == "pending")
     payload["can_reject"] = bool(current_user and _is_admin(current_user) and payload.get("status") == "pending")
     return payload
+
+
+def _sync_material_item_to_vector_library(item: dict) -> None:
+    if not MATERIAL_VECTOR_SYNC_ENABLED or not MATERIAL_VECTOR_SERVICE_URL:
+        return
+    if str(item.get("kind") or "").lower() != "image":
+        return
+    filename = Path(str(item.get("filename") or "")).name
+    file_path = (MATERIAL_LIBRARY_DIR / filename).resolve()
+    library_root = MATERIAL_LIBRARY_DIR.resolve()
+    if not str(file_path).startswith(str(library_root)) or not file_path.exists():
+        return
+    material_id = f"prod_{item.get('id') or file_path.stem}"
+    title = " | ".join(
+        part
+        for part in [
+            str(item.get("title") or file_path.stem),
+            str(item.get("category") or ""),
+            " ".join(map(str, item.get("tags") or [])),
+            " ".join(map(str, item.get("news_topics") or [])),
+        ]
+        if part.strip()
+    )
+    try:
+        with file_path.open("rb") as handle:
+            response = requests.post(
+                f"{MATERIAL_VECTOR_SERVICE_URL}/analyze-upload",
+                data={"material_id": material_id, "title": title},
+                files={"file": (filename, handle, "application/octet-stream")},
+                timeout=360,
+            )
+        response.raise_for_status()
+        payload = response.json()
+        analysis = payload.get("analysis") if isinstance(payload, dict) else {}
+        if isinstance(analysis, dict):
+            ai_tags = []
+            for key in ("category", "entities", "scenes", "concepts", "visible_text"):
+                value = analysis.get(key)
+                if isinstance(value, list):
+                    ai_tags.extend(str(item or "") for item in value if str(item or "").strip())
+                elif value:
+                    ai_tags.append(str(value))
+            update_material_library_item(
+                str(item.get("id") or ""),
+                {
+                    "ai_provider": "5090-qwen3-vl-bge-m3",
+                    "ai_summary": str(analysis.get("description") or "").strip(),
+                    "ai_tags": ai_tags,
+                    "safety_status": str(analysis.get("safety_status") or item.get("safety_status") or "safe"),
+                },
+            )
+    except Exception as exc:
+        print(f"  ⚠️ 素材向量库同步失败：{item.get('id') or filename}: {exc}")
+
+
+def _sync_material_item_to_vector_library_async(item: dict) -> None:
+    threading.Thread(
+        target=_sync_material_item_to_vector_library,
+        args=(dict(item or {}),),
+        daemon=True,
+        name=f"material-vector-sync-{item.get('id') or uuid.uuid4().hex[:6]}",
+    ).start()
 
 
 class ProgressTracker:
@@ -2279,9 +2721,10 @@ def _should_use_qwen_tts_for_workflow(workflow_config: dict) -> bool:
     )
 
 
-def _generate_opennews_qwen_tts_audio(script_text: str, output_path: str) -> str:
+def _generate_opennews_qwen_tts_audio(script_text: str, output_path: str, presenter_config: Optional[dict] = None) -> str:
     if not OPENNEWS_QWEN_TTS_BASE_URL or not OPENNEWS_QWEN_TTS_TOKEN:
         raise RuntimeError("OpenNews Qwen3-TTS 未配置 base_url 或 token")
+    presenter = _normalize_opennews_presenter_config(presenter_config)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     headers = {
@@ -2291,8 +2734,8 @@ def _generate_opennews_qwen_tts_audio(script_text: str, output_path: str) -> str
     payload = {
         "text": script_text,
         "language": OPENNEWS_QWEN_TTS_LANGUAGE,
-        "speaker": OPENNEWS_QWEN_TTS_SPEAKER,
-        "instruct": OPENNEWS_QWEN_TTS_INSTRUCT,
+        "speaker": presenter.get("qwen_speaker") or OPENNEWS_QWEN_TTS_SPEAKER,
+        "instruct": presenter.get("qwen_instruct") or OPENNEWS_QWEN_TTS_INSTRUCT,
     }
     response = requests.post(
         f"{OPENNEWS_QWEN_TTS_BASE_URL}/tts",
@@ -2342,13 +2785,15 @@ def _generate_opennews_qwen_tts_audio(script_text: str, output_path: str) -> str
     return str(output)
 
 
-def _opennews_minimax_fallback_voice() -> tuple[str, str]:
-    preset = _get_voice_preset(OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID, "cn")
+def _opennews_minimax_fallback_voice(presenter_config: Optional[dict] = None) -> tuple[str, str, str]:
+    presenter = _normalize_opennews_presenter_config(presenter_config)
+    preset_id = str(presenter.get("minimax_voice_preset_id") or OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID).strip()
+    preset = _get_voice_preset(preset_id, "cn")
     voice_id = str(preset.get("voice_id") or "").strip()
     if not voice_id:
-        voice_id = "Chinese (Mandarin)_Warm_Bestie"
+        voice_id = "Chinese (Mandarin)_Gentleman" if presenter.get("gender") == "male" else "Chinese (Mandarin)_Warm_Bestie"
     language = str(preset.get("language") or "zh").strip() or "zh"
-    return voice_id, language
+    return voice_id, language, preset_id
 
 
 def _generate_audio_for_workflow(
@@ -2365,19 +2810,20 @@ def _generate_audio_for_workflow(
 ) -> tuple[str, str]:
     opennews_tts = _should_use_qwen_tts_for_workflow(workflow_config)
     if opennews_tts:
+        presenter_config = _normalize_opennews_presenter_config(workflow_config.get("opennews_presenter"))
         try:
             if log:
-                log(f"OpenNews 使用 5090 Qwen3-TTS 本地配音：{OPENNEWS_QWEN_TTS_SPEAKER}")
-            _generate_opennews_qwen_tts_audio(script_text, audio_path)
+                log(f"OpenNews 使用 5090 Qwen3-TTS 本地配音：{presenter_config.get('qwen_speaker')}")
+            _generate_opennews_qwen_tts_audio(script_text, audio_path, presenter_config=presenter_config)
             return audio_path, "qwen3-tts"
         except Exception as exc:
             if not OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX:
                 raise
             if log:
                 log(f"Qwen3-TTS 配音失败，已回退 MiniMax：{exc}")
-        voice, language = _opennews_minimax_fallback_voice()
+        voice, language, fallback_preset_id = _opennews_minimax_fallback_voice(presenter_config)
         if log:
-            log(f"OpenNews MiniMax 兜底固定女声音色：{OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID}")
+            log(f"OpenNews MiniMax 兜底固定{presenter_config.get('label', '主播')}音色：{fallback_preset_id}")
     generate_audio_fn(
         script_text,
         audio_path,
@@ -3719,6 +4165,7 @@ def _publish_opennews_result_to_youtube(
 def _opennews_material_review_status(result: dict) -> dict:
     segments = result.get("segments") if isinstance(result, dict) else []
     fallback_items: list[dict] = []
+    unsafe_items: list[dict] = []
     source_counts: dict[str, int] = {}
     if not isinstance(segments, list):
         segments = []
@@ -3727,6 +4174,12 @@ def _opennews_material_review_status(result: dict) -> dict:
             continue
         quality = segment.get("material_quality") if isinstance(segment.get("material_quality"), dict) else {}
         if quality.get("strict_source_fallback_used"):
+            if quality.get("source_unreviewed_count"):
+                unsafe_items.append({
+                    "segment_index": segment.get("index") or segment.get("segment_index") or len(unsafe_items) + 1,
+                    "reason": "网络新闻源素材未全部经过 Qwen3-VL 语义/安全审核",
+                    "quality": quality,
+                })
             fallback_items.append({
                 "segment_index": segment.get("index") or segment.get("segment_index") or len(fallback_items) + 1,
                 "reason": "5090 AI图片完全不可用，使用了严格新闻源兜底素材",
@@ -3738,6 +4191,15 @@ def _opennews_material_review_status(result: dict) -> dict:
             source = str(item.get("source") or "unknown")
             source_counts[source] = source_counts.get(source, 0) + 1
             if item.get("strict_fallback") or source == "opennews_source":
+                if source == "opennews_source" and item.get("qwen_review_score") is None:
+                    unsafe_items.append({
+                        "segment_index": segment.get("index") or segment.get("segment_index") or len(unsafe_items) + 1,
+                        "source": source,
+                        "path": item.get("path") or "",
+                        "source_url": item.get("source_url") or "",
+                        "title": item.get("title") or "",
+                        "reason": "网络新闻源素材缺少 Qwen3-VL 审核记录",
+                    })
                 fallback_items.append({
                     "segment_index": segment.get("index") or segment.get("segment_index") or len(fallback_items) + 1,
                     "source": source,
@@ -3746,12 +4208,18 @@ def _opennews_material_review_status(result: dict) -> dict:
                     "title": item.get("title") or "",
                     "reason": item.get("fallback_reason") or "使用了严格新闻源兜底素材",
                 })
+    auto_publish_allowed = not unsafe_items
     return {
-        "requires_human_review": False,
-        "auto_publish_allowed": True,
+        "requires_human_review": bool(unsafe_items),
+        "auto_publish_allowed": auto_publish_allowed,
         "uses_strict_source_fallback": bool(fallback_items),
-        "reason": "5090 AI图片完全不可用，成片使用了严格新闻源兜底素材，已允许自动发布。" if fallback_items else "",
+        "reason": (
+            "网络新闻源素材缺少 Qwen3-VL 审核，已禁止自动发布。"
+            if unsafe_items
+            else ("5090 AI图片完全不可用，成片使用了严格新闻源兜底素材，且已通过 Qwen3-VL 审核。" if fallback_items else "")
+        ),
         "fallback_items": fallback_items[:30],
+        "unsafe_items": unsafe_items[:30],
         "source_counts": source_counts,
     }
 
@@ -3784,22 +4252,32 @@ def _serialize_opennews_collection_job(job: dict, request: Request) -> dict:
 
 def _short_opennews_collection_title(items: list[dict], *, prefix: str = "OpenNews合集") -> str:
     today = time.strftime("%Y-%m-%d")
-    titles = [re.sub(r"\s+", "", str(item.get("title") or "")).strip("｜| -_") for item in items if item.get("title")]
-    title_parts: list[str] = []
-    for title in titles:
-        if not title:
-            continue
-        compact = title[:16]
-        candidate = "、".join(title_parts + [compact])
-        full = f"{prefix}：{candidate}｜{today}"
-        if len(full) > 96:
-            break
-        title_parts.append(compact)
-        if len(title_parts) >= 3:
-            break
-    if not title_parts:
+    titles = [_collection_item_title(item) for item in items if _collection_item_title(item)]
+    if not titles:
         return f"{prefix}｜{today}"
-    return f"{prefix}：{'、'.join(title_parts)}｜{today}"[:100]
+    compact_titles = [_compact_collection_title_part(title, limit=18) for title in titles[:5]]
+    categories = []
+    for item in items:
+        category = _collection_item_category(item)
+        if category not in categories:
+            categories.append(category)
+        if len(categories) >= 3:
+            break
+    seed = int(hashlib.sha256(("|".join(titles[:6]) + today).encode("utf-8")).hexdigest()[:8], 16)
+    lead = compact_titles[0]
+    second = compact_titles[1] if len(compact_titles) > 1 else ""
+    third = compact_titles[2] if len(compact_titles) > 2 else ""
+    topic_line = "、".join([part for part in [lead, second, third] if part])
+    templates = [
+        f"{lead}：全球市场与科技风向突变｜{today}",
+        f"{lead}，{second or '全球热点'}继续发酵｜OpenNews {today}",
+        f"{' · '.join(categories[:2] or ['全球'])}焦点：{topic_line}｜{today}",
+        f"今天最值得看的{categories[0] if categories else '全球'}新闻：{lead}｜{today}",
+        f"{lead}背后，{second or '新一轮全球变化'}正在发生｜{today}",
+        f"OpenNews 每日热点：{topic_line}｜{today}",
+    ]
+    title = templates[seed % len(templates)]
+    return re.sub(r"\s+", " ", title).strip()[:100]
 
 
 def _opennews_collection_description(items: list[dict], aspect_ratio: str) -> str:
@@ -3814,7 +4292,7 @@ def _opennews_collection_description(items: list[dict], aspect_ratio: str) -> st
         published_at = str(item.get("published_at") or "").strip()
         suffix = "｜".join(part for part in [source, published_at] if part)
         lines.append(f"{index}. {title}{'｜' + suffix if suffix else ''}")
-    lines.extend(["", "频道：ihouse AI Lab", "类型：OpenNews 自动新闻合集"])
+    lines.extend(["", "频道：OpenNews 每日热点", "类型：OpenNews 自动新闻合集"])
     return "\n".join(lines)[:5000]
 
 
@@ -3837,6 +4315,145 @@ def _collection_item_category(item: dict) -> str:
     if any(keyword in raw for keyword in ("election", "government", "trump", "policy", "政治", "政府")):
         return "政治"
     return "国际"
+
+
+def _compact_collection_title_part(title: str, *, limit: int = 18) -> str:
+    text = re.sub(r"^OpenNews[:：\s]*", "", str(title or "").strip(), flags=re.I)
+    text = re.sub(r"\s+", "", text).strip("｜| -_")
+    text = re.sub(r"[，。！？；：,.!?;:]+$", "", text)
+    return text[:limit] or "全球热点"
+
+
+def _collection_state_file() -> Path:
+    return OPENNEWS_COLLECTION_DIR / "state.json"
+
+
+def _read_collection_state_for_cover() -> dict:
+    try:
+        path = _collection_state_file()
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                return payload
+    except Exception:
+        pass
+    return {}
+
+
+def _write_collection_state_for_cover(state: dict) -> None:
+    try:
+        path = _collection_state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as exc:
+        print(f"[OpenNews thumbnail] write state failed: {exc}", flush=True)
+
+
+def _image_hash_for_cover(path: Path) -> str:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:
+        return ""
+
+
+def _candidate_collection_cover_images(items: list[dict]) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        try:
+            if not path.exists() or not path.is_file() or path.stat().st_size < 30 * 1024:
+                return
+            if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+                return
+            key = str(path.resolve())
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(path)
+        except Exception:
+            return
+
+    for item in items:
+        history_id = str(item.get("history_id") or "").strip()
+        output_dir = OUTPUT_DIR / history_id if history_id else Path("")
+        if not output_dir.exists():
+            for raw_path in (item.get("horizontal_path"), item.get("vertical_path")):
+                video_path = Path(str(raw_path or ""))
+                if video_path.exists():
+                    output_dir = video_path.parent.parent if video_path.parent.name == "final_edit" else video_path.parent
+                    break
+        result_path = output_dir / "result.json"
+        if not result_path.exists():
+            continue
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for key in ("cover_image_path", "thumbnail_path"):
+            rel = _history_relpath_from_value(str(output_dir), str(result.get(key) or ""))
+            if rel:
+                add(output_dir / rel)
+        variants = result.get("final_video_variants") if isinstance(result.get("final_video_variants"), dict) else {}
+        for variant in variants.values():
+            if not isinstance(variant, dict):
+                continue
+            rel = _history_relpath_from_value(str(output_dir), str(variant.get("cover_image_path") or ""))
+            if rel:
+                add(output_dir / rel)
+        for segment in result.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            for material in segment.get("material_items") or []:
+                if not isinstance(material, dict):
+                    continue
+                rel = _history_relpath_from_value(str(output_dir), str(material.get("path") or ""))
+                if rel:
+                    add(output_dir / rel)
+            for raw_path in segment.get("material_paths") or []:
+                rel = _history_relpath_from_value(str(output_dir), str(raw_path or ""))
+                if rel:
+                    add(output_dir / rel)
+    return candidates
+
+
+def _select_collection_cover_image(items: list[dict], job_id: str) -> tuple[Path | None, str]:
+    candidates = _candidate_collection_cover_images(items)
+    if not candidates:
+        return None, ""
+    state = _read_collection_state_for_cover()
+    used = state.get("used_thumbnail_image_hashes")
+    if not isinstance(used, dict):
+        used = {}
+    cutoff = time.time() - 45 * 86400
+    used = {key: value for key, value in used.items() if float((value or {}).get("used_at") or 0) >= cutoff}
+    seed = int(hashlib.sha256(str(job_id or time.time()).encode("utf-8")).hexdigest()[:8], 16)
+    ordered = candidates[seed % len(candidates):] + candidates[:seed % len(candidates)]
+    fallback: tuple[Path | None, str] = (None, "")
+    for path in ordered:
+        image_hash = _image_hash_for_cover(path)
+        if not image_hash:
+            continue
+        if fallback[0] is None:
+            fallback = (path, image_hash)
+        if image_hash not in used:
+            used[image_hash] = {"used_at": time.time(), "path": str(path), "job_id": job_id}
+            state["used_thumbnail_image_hashes"] = used
+            _write_collection_state_for_cover(state)
+            return path, image_hash
+    # If every candidate has been used recently, still vary layout/color and use
+    # the oldest candidate rather than producing no thumbnail.
+    if fallback[0] is not None and fallback[1]:
+        used[fallback[1]] = {"used_at": time.time(), "path": str(fallback[0]), "job_id": job_id, "reused": True}
+        state["used_thumbnail_image_hashes"] = used
+        _write_collection_state_for_cover(state)
+    return fallback
 
 
 def _font_path_candidates() -> list[str]:
@@ -3900,11 +4517,230 @@ def _draw_wrapped_text(draw, text: str, xy: tuple[int, int], *, font, fill: tupl
     return y
 
 
+def _opennews_collection_thumbnail_relay_key() -> str:
+    return (
+        os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_RELAY_API_KEY")
+        or os.getenv("OPENAI_RELAY_API_KEY")
+        or os.getenv("API_RELAY_OPENAI_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    ).strip()
+
+
+def _opennews_collection_thumbnail_kuaigou_key() -> str:
+    return (
+        os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_KUAIGOU_API_KEY")
+        or os.getenv("KUAIGOU_API_KEY")
+        or os.getenv("KUAIGOUAI_API_KEY")
+        or ""
+    ).strip()
+
+
+def _opennews_collection_thumbnail_openai_key() -> str:
+    return (os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def _opennews_collection_thumbnail_models() -> list[str]:
+    raw = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_IMAGE_MODELS", "gpt-image-2-sale")
+    models = [part.strip() for part in raw.split(",") if part.strip()]
+    return models or ["gpt-image-2-sale"]
+
+
+def _opennews_collection_thumbnail_providers() -> list[str]:
+    raw = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_IMAGE_PROVIDERS", "kuaigou")
+    providers = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    return [provider for provider in providers if provider in {"kuaigou", "relay", "openai"}] or ["kuaigou"]
+
+
+def _opennews_collection_thumbnail_image_endpoint(provider: str) -> str:
+    if provider == "kuaigou":
+        base = (os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_KUAIGOU_BASE_URL") or "https://api.kuaigouai.com/v1").strip().rstrip("/")
+        return f"{base}/images/generations"
+    if provider == "relay":
+        base = (os.getenv("OPENAI_RELAY_BASE_URL") or "https://sub2api.ihousejapan.cn").strip().rstrip("/")
+        return f"{base}/v1/images/generations"
+    return "https://api.openai.com/v1/images/generations"
+
+
+def _build_opennews_collection_ai_cover_prompt(titles: list[str], categories: list[str]) -> str:
+    lead = titles[0] if titles else "global breaking news"
+    secondary_titles = [title for title in titles[1:4] if title]
+    secondary = "；".join(secondary_titles)
+    category_text = "、".join(categories[:4]) if categories else "AI、金融、国际、房产"
+    cover_title = _short_opennews_collection_title([{"title": title} for title in titles[:3]]) if titles else "全球热点突变"
+    return (
+        "请直接生成一张完整的 YouTube 横屏封面图，16:9 构图，面向中文观众。"
+        "这是新闻合集频道 OpenNews 每日热点 的视频封面，不要像模板海报，要像专业新闻频道的爆款封面。"
+        "画面必须包含清晰、醒目的中文大标题，标题尽量大，占画面主要视觉区域，适合 YouTube 缩略图小尺寸观看。"
+        f"封面主标题：{cover_title}。"
+        "左上角或右上角放栏目名：OpenNews 每日热点。"
+        "副标题可以很短，例如：全球热点追踪 或 重点新闻合集。"
+        f"本期核心新闻包括：{lead}。"
+        f"其他新闻线索：{secondary or '全球市场、政策变化、科技与房产动态'}。"
+        f"主题分类：{category_text}。"
+        "视觉风格：高端电视新闻包装，强烈红蓝对比，深色背景，电影级灯光，立体标题，冲击力强，干净利落。"
+        "画面元素要和新闻内容相关，可以使用 AI 芯片、城市天际线、医院安检、油价和通胀、房地产、全球地图、数据屏幕、政策新闻发布会等象征元素。"
+        "不要出现裸露、色情、血腥、惊悚伤口、尸体、低俗人物、品牌侵权水印、二维码、网址。"
+        "不要做成今日几条新闻的土味模板，不要出现 iHouse 字样。"
+        "中文文字必须尽量准确、端正、可读，整体像专业媒体封面。"
+    )
+
+
+def _request_opennews_collection_ai_cover_image(prompt: str, output_path: Path) -> dict:
+    timeout = max(20, int(os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_IMAGE_TIMEOUT", "300") or "300"))
+    size = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_IMAGE_SIZE", "1792x1024").strip() or "1792x1024"
+    quality = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_IMAGE_QUALITY", "medium").strip() or "medium"
+    last_error = ""
+    for provider in _opennews_collection_thumbnail_providers():
+        if provider == "kuaigou":
+            api_key = _opennews_collection_thumbnail_kuaigou_key()
+        elif provider == "relay":
+            api_key = _opennews_collection_thumbnail_relay_key()
+        else:
+            api_key = _opennews_collection_thumbnail_openai_key()
+        if not api_key:
+            last_error = f"{provider} 未配置 API Key"
+            continue
+        endpoint = _opennews_collection_thumbnail_image_endpoint(provider)
+        for model in _opennews_collection_thumbnail_models():
+            payload = {
+                "model": model,
+                "prompt": prompt,
+                "size": size,
+                "quality": quality,
+                "response_format": os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_RESPONSE_FORMAT", "b64_json").strip() or "b64_json",
+                "output_format": os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_OUTPUT_FORMAT", "png").strip() or "png",
+                "n": 1,
+            }
+            try:
+                response = requests.post(
+                    endpoint,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=timeout,
+                )
+                if response.status_code >= 400:
+                    last_error = f"{provider}/{model}: {response.status_code} {response.text[:300]}"
+                    print(f"[OpenNews thumbnail AI] {last_error}", flush=True)
+                    continue
+                body = response.json()
+                data = body.get("data") if isinstance(body, dict) else None
+                if not data or not isinstance(data, list) or not isinstance(data[0], dict):
+                    last_error = f"{provider}/{model}: empty image response"
+                    continue
+                image_bytes: bytes | None = None
+                b64_json = data[0].get("b64_json")
+                if b64_json:
+                    image_bytes = base64.b64decode(str(b64_json))
+                elif data[0].get("url"):
+                    image_response = requests.get(str(data[0].get("url")), timeout=timeout)
+                    image_response.raise_for_status()
+                    image_bytes = image_response.content
+                if not image_bytes:
+                    last_error = f"{provider}/{model}: no image bytes"
+                    continue
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(image_bytes)
+                return {"ok": True, "provider": provider, "model": model, "path": str(output_path)}
+            except Exception as exc:
+                last_error = f"{provider}/{model}: {exc}"
+                print(f"[OpenNews thumbnail AI] {last_error}", flush=True)
+                continue
+    return {"ok": False, "error": last_error or "图片模型未返回封面"}
+
+
+def _prepare_opennews_thumbnail_for_youtube(path: Path) -> Path:
+    """Compress model-generated thumbnail under YouTube's 2MB limit without changing its design."""
+    try:
+        if not path.exists() or path.stat().st_size <= 1_950_000:
+            return path
+        from PIL import Image
+
+        image = Image.open(path).convert("RGB")
+        compressed = path.with_suffix(".youtube.jpg")
+        for quality in (92, 88, 84, 80, 76, 72, 68):
+            image.save(compressed, "JPEG", quality=quality, optimize=True, progressive=True)
+            if compressed.exists() and compressed.stat().st_size <= 1_950_000:
+                return compressed
+        image.thumbnail((1280, 1280))
+        image.save(compressed, "JPEG", quality=82, optimize=True, progressive=True)
+        return compressed if compressed.exists() else path
+    except Exception as exc:
+        print(f"[OpenNews thumbnail AI] compress failed: {exc}", flush=True)
+        return path
+
+
+def _draw_wrapped_text_with_stroke(
+    draw,
+    text: str,
+    xy: tuple[int, int],
+    *,
+    font,
+    fill: tuple[int, int, int],
+    stroke_fill: tuple[int, int, int] = (0, 0, 0),
+    stroke_width: int = 5,
+    max_width: int,
+    line_spacing: int = 14,
+    max_lines: int = 3,
+) -> int:
+    chars = list(str(text or "").strip())
+    lines: list[str] = []
+    current = ""
+    trailing_punctuation = "，。！？、；：,.!?;:"
+    for char in chars:
+        if char in trailing_punctuation and not current and lines:
+            lines[-1] += char
+            continue
+        trial = current + char
+        bbox = draw.textbbox((0, 0), trial, font=font, stroke_width=stroke_width)
+        if bbox[2] - bbox[0] <= max_width or not current:
+            current = trial
+            continue
+        lines.append(current)
+        current = char
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if chars and "".join(lines) != "".join(chars) and lines:
+        lines[-1] = lines[-1].rstrip("，。,. ") + "..."
+    x, y = xy
+    for line in lines[:max_lines]:
+        draw.text((x, y), line, font=font, fill=fill, stroke_width=stroke_width, stroke_fill=stroke_fill)
+        bbox = draw.textbbox((x, y), line, font=font, stroke_width=stroke_width)
+        y = bbox[3] + line_spacing
+    return y
+
+
+def _generate_opennews_collection_ai_thumbnail(job: dict, result: dict, output_dir: Path, cover_path: Path, titles: list[str], categories: list[str]) -> Path | None:
+    if os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_AI_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    try:
+        job_id = str(job.get("job_id") or result.get("job_id") or int(time.time()))
+        raw_path = output_dir / f"youtube_thumbnail_ai_{job_id[-8:]}.png"
+        prompt = _build_opennews_collection_ai_cover_prompt(titles, categories)
+        generation = _request_opennews_collection_ai_cover_image(prompt, raw_path)
+        if not generation.get("ok"):
+            print(f"[OpenNews thumbnail AI] failed, not using local template: {generation.get('error')}", flush=True)
+            return None
+        legacy_path = output_dir / "youtube_thumbnail.jpg"
+        try:
+            shutil.copy2(raw_path, legacy_path)
+        except Exception:
+            pass
+        youtube_ready_path = _prepare_opennews_thumbnail_for_youtube(raw_path)
+        print(f"[OpenNews thumbnail AI] generated via {generation.get('provider')}/{generation.get('model')}: {raw_path}", flush=True)
+        return youtube_ready_path
+    except Exception as exc:
+        print(f"[OpenNews thumbnail AI] failed: {exc}", flush=True)
+        return None
+
+
 def _generate_opennews_collection_thumbnail(job: dict, result: dict) -> Path | None:
     if os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
         return None
     try:
-        from PIL import Image, ImageDraw, ImageFilter
+        from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageEnhance
 
         items = list(result.get("items") or job.get("items") or [])
         if not items:
@@ -3912,46 +4748,14 @@ def _generate_opennews_collection_thumbnail(job: dict, result: dict) -> Path | N
         video_path = Path(str(result.get("video_path") or ""))
         output_dir = video_path.parent if video_path.exists() else (OPENNEWS_COLLECTION_DIR / "collections" / str(job.get("job_id") or "unknown"))
         output_dir.mkdir(parents=True, exist_ok=True)
-        cover_path = output_dir / "youtube_thumbnail.jpg"
+        job_id = str(job.get("job_id") or result.get("job_id") or int(time.time()))
+        cover_path = output_dir / f"youtube_thumbnail_{job_id[-8:]}.jpg"
 
         width, height = 1920, 1080
-        image = Image.new("RGB", (width, height), "#071421")
-        draw = ImageDraw.Draw(image)
-        for y in range(height):
-            draw.line([(0, y), (width, y)], fill=(int(6 + y / height * 16), int(18 + y / height * 24), int(34 + y / height * 40)))
-        for x in range(-height, width, 86):
-            draw.line([(x, 0), (x + height, height)], fill=(24, 72, 102), width=1)
-        for y in range(110, height, 96):
-            draw.line([(0, y), (width, y)], fill=(18, 54, 80), width=1)
-
-        glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        glow_draw = ImageDraw.Draw(glow)
-        glow_draw.ellipse((980, -240, 2200, 860), fill=(0, 154, 180, 70))
-        glow_draw.ellipse((-420, 560, 820, 1380), fill=(220, 63, 43, 58))
-        image = Image.alpha_composite(image.convert("RGBA"), glow.filter(ImageFilter.GaussianBlur(55))).convert("RGB")
-        draw = ImageDraw.Draw(image)
-
-        title_font = _load_cover_font(84)
-        main_font = _load_cover_font(70)
-        sub_font = _load_cover_font(36)
-        small_font = _load_cover_font(30)
-        tag_font = _load_cover_font(28)
-        date_font = _load_cover_font(34)
-
-        draw.rounded_rectangle((96, 82, 610, 152), radius=12, fill=(214, 50, 42))
-        draw.text((124, 98), "OPENNEWS", font=date_font, fill=(255, 255, 255))
-        draw.text((640, 101), "每日热点", font=date_font, fill=(190, 224, 240))
-        draw.text((1500, 98), time.strftime("%Y.%m.%d"), font=date_font, fill=(226, 238, 244))
-        draw.text((96, 210), "今日十大英文热点", font=title_font, fill=(255, 255, 255))
-
-        y = _draw_wrapped_text(draw, _collection_item_title(items[0]), (96, 330), font=main_font, fill=(255, 237, 205), max_width=1120, line_spacing=16, max_lines=3)
-        y = max(y + 24, 620)
-        for index, subtitle in enumerate([_collection_item_title(item) for item in items[1:4]], start=1):
-            draw.rounded_rectangle((112, y + 7, 154, y + 49), radius=21, fill=(22, 118, 142))
-            draw.text((126, y + 10), str(index), font=tag_font, fill=(255, 255, 255))
-            _draw_wrapped_text(draw, subtitle, (174, y), font=sub_font, fill=(226, 238, 244), max_width=940, line_spacing=8, max_lines=1)
-            y += 66
-
+        titles = [_collection_item_title(item) for item in items if _collection_item_title(item)]
+        lead_title = titles[0] if titles else "全球新闻正在变化"
+        second_title = titles[1] if len(titles) > 1 else ""
+        third_title = titles[2] if len(titles) > 2 else ""
         categories: list[str] = []
         for item in items:
             category = _collection_item_category(item)
@@ -3959,20 +4763,141 @@ def _generate_opennews_collection_thumbnail(job: dict, result: dict) -> Path | N
                 categories.append(category)
             if len(categories) >= 5:
                 break
-        draw.rounded_rectangle((96, 934, 1188, 1006), radius=18, fill=(255, 255, 255))
-        draw.text((128, 953), "  ·  ".join(categories or ["AI", "金融", "国际"]), font=tag_font, fill=(10, 35, 48))
+        ai_cover_path = _generate_opennews_collection_ai_thumbnail(job, result, output_dir, cover_path, titles, categories)
+        if ai_cover_path:
+            return ai_cover_path
+        require_ai_thumbnail = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_REQUIRE_AI", "1").strip().lower() not in {"0", "false", "no", "off"}
+        if require_ai_thumbnail:
+            return None
+        seed_source = "|".join(titles[:6]) + job_id + time.strftime("%Y-%m-%d")
+        seed = int(hashlib.sha256(seed_source.encode("utf-8")).hexdigest()[:8], 16)
+        layout = seed % 4
+        palettes = [
+            {"bg": (4, 12, 28), "accent": (255, 55, 48), "accent2": (0, 209, 255), "cream": (255, 242, 208)},
+            {"bg": (10, 20, 18), "accent": (255, 184, 0), "accent2": (0, 180, 120), "cream": (245, 255, 232)},
+            {"bg": (18, 8, 28), "accent": (255, 70, 150), "accent2": (120, 215, 255), "cream": (255, 233, 246)},
+            {"bg": (18, 18, 22), "accent": (255, 88, 38), "accent2": (85, 144, 255), "cream": (248, 250, 255)},
+        ]
+        palette = palettes[(seed // 7) % len(palettes)]
+        cover_image_path, cover_hash = _select_collection_cover_image(items, job_id)
 
-        draw.rounded_rectangle((1300, 238, 1818, 862), radius=34, fill=(239, 246, 248), outline=(90, 180, 196), width=4)
-        draw.text((1350, 292), "每日热点", font=title_font, fill=(8, 32, 46))
-        draw.text((1354, 405), "10条", font=main_font, fill=(214, 50, 42))
-        draw.text((1524, 432), "国际新闻", font=sub_font, fill=(10, 35, 48))
-        draw.text((1358, 540), "中文解读", font=sub_font, fill=(10, 35, 48))
-        draw.text((1358, 604), "快速看懂", font=sub_font, fill=(10, 35, 48))
-        draw.line((1350, 660, 1768, 660), fill=(28, 91, 113), width=3)
-        draw.text((1358, 704), "OpenNews 每日热点", font=small_font, fill=(28, 91, 113))
-        draw.text((1358, 754), "全球资讯 · 中文整理", font=small_font, fill=(28, 91, 113))
+        if cover_image_path:
+            bg = Image.open(cover_image_path).convert("RGB")
+            bg = ImageOps.fit(bg, (width, height), method=Image.LANCZOS, centering=(0.5, 0.45))
+            bg = ImageEnhance.Color(bg).enhance(1.18)
+            bg = ImageEnhance.Contrast(bg).enhance(1.12)
+            blur = bg.filter(ImageFilter.GaussianBlur(10 if layout in {1, 3} else 3))
+            image = blur.convert("RGBA")
+            overlay = Image.new("RGBA", (width, height), (*palette["bg"], 112 if layout in {0, 2} else 150))
+            image = Image.alpha_composite(image, overlay)
+        else:
+            image = Image.new("RGBA", (width, height), (*palette["bg"], 255))
 
-        image.save(cover_path, "JPEG", quality=94, optimize=True)
+        draw = ImageDraw.Draw(image)
+        for y in range(height):
+            alpha = int(65 + y / height * 130)
+            draw.line([(0, y), (width, y)], fill=(0, 0, 0, alpha))
+        pattern = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        pattern_draw = ImageDraw.Draw(pattern)
+        for x in range(-height, width, 92):
+            pattern_draw.line([(x, 0), (x + height, height)], fill=(*palette["accent2"], 34), width=2)
+        for y in range(120, height, 116):
+            pattern_draw.line([(0, y), (width, y)], fill=(255, 255, 255, 18), width=1)
+        image = Image.alpha_composite(image, pattern)
+
+        glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow)
+        glow_draw.ellipse((920, -260, 2260, 860), fill=(*palette["accent2"], 74))
+        glow_draw.ellipse((-520, 520, 860, 1440), fill=(*palette["accent"], 62))
+        image = Image.alpha_composite(image, glow.filter(ImageFilter.GaussianBlur(58)))
+        draw = ImageDraw.Draw(image)
+
+        brand_font = _load_cover_font(42)
+        title_font = _load_cover_font(96 if layout in {1, 2} else 84)
+        main_font = _load_cover_font(74)
+        sub_font = _load_cover_font(36)
+        small_font = _load_cover_font(30)
+        tag_font = _load_cover_font(28)
+        date_font = _load_cover_font(34)
+
+        def draw_shadow_text(text: str, xy: tuple[int, int], font, fill: tuple[int, int, int], shadow=(0, 0, 0)) -> None:
+            x, y = xy
+            for dx, dy in ((4, 4), (0, 5), (5, 0)):
+                draw.text((x + dx, y + dy), text, font=font, fill=(*shadow, 150))
+            draw.text((x, y), text, font=font, fill=fill)
+
+        date_text = time.strftime("%Y.%m.%d")
+        draw.rounded_rectangle((84, 70, 476, 138), radius=18, fill=(*palette["accent"], 235))
+        draw.text((110, 84), "OpenNews 每日热点", font=brand_font, fill=(255, 255, 255))
+        draw.text((1510, 84), date_text, font=date_font, fill=(240, 248, 255))
+
+        title_pool = [_compact_collection_title_part(title, limit=18) for title in titles[:4] if title]
+        main_focus = title_pool[0] if title_pool else "全球热点"
+        secondary_focus = title_pool[1] if len(title_pool) > 1 else (categories[0] if categories else "关键变化")
+        headline_variants = [
+            f"{main_focus}｜局势升级",
+            f"{secondary_focus}背后的信号",
+            f"{main_focus}引爆关注",
+            f"{categories[0] if categories else '全球'}焦点突变",
+        ]
+        headline = headline_variants[layout]
+        if layout == 0:
+            draw.rounded_rectangle((78, 178, 1300, 786), radius=48, fill=(0, 0, 0, 132), outline=(*palette["accent2"], 170), width=5)
+            draw_shadow_text(headline, (118, 218), title_font, (255, 255, 255))
+            y = _draw_wrapped_text(draw, lead_title, (124, 376), font=_load_cover_font(86), fill=palette["cream"], max_width=1080, line_spacing=18, max_lines=3)
+            for index, subtitle in enumerate([second_title, third_title], start=1):
+                if not subtitle:
+                    continue
+                y += 26
+                draw.rounded_rectangle((132, y + 8, 176, y + 52), radius=22, fill=(*palette["accent"], 235))
+                draw.text((146, y + 10), str(index), font=tag_font, fill=(255, 255, 255))
+                _draw_wrapped_text(draw, subtitle, (196, y), font=sub_font, fill=(230, 244, 255), max_width=880, line_spacing=8, max_lines=1)
+                y += 58
+            panel = (1360, 258, 1816, 848)
+        elif layout == 1:
+            draw.rounded_rectangle((88, 174, 1776, 348), radius=34, fill=(*palette["accent"], 238))
+            draw_shadow_text(headline, (126, 204), _load_cover_font(108), (255, 255, 255))
+            _draw_wrapped_text(draw, lead_title, (120, 430), font=_load_cover_font(88), fill=palette["cream"], max_width=1250, line_spacing=18, max_lines=2)
+            _draw_wrapped_text(draw, second_title or third_title, (120, 680), font=_load_cover_font(44), fill=(236, 246, 250), max_width=1260, line_spacing=10, max_lines=2)
+            panel = (1390, 496, 1812, 872)
+        elif layout == 2:
+            draw.rectangle((0, 0, width, height), outline=(*palette["accent"], 255), width=22)
+            draw.line((94, 205, 1460, 205), fill=(*palette["accent"], 255), width=10)
+            draw_shadow_text(headline, (96, 238), _load_cover_font(104), (255, 255, 255))
+            _draw_wrapped_text(draw, lead_title, (102, 414), font=_load_cover_font(90), fill=palette["cream"], max_width=1180, line_spacing=18, max_lines=3)
+            panel = (1320, 176, 1818, 882)
+        else:
+            draw.rounded_rectangle((82, 180, 740, 314), radius=28, fill=(*palette["accent2"], 218))
+            draw_shadow_text("深度焦点", (116, 204), _load_cover_font(100), (255, 255, 255))
+            _draw_wrapped_text(draw, lead_title, (92, 382), font=_load_cover_font(90), fill=palette["cream"], max_width=1130, line_spacing=18, max_lines=3)
+            _draw_wrapped_text(draw, second_title or third_title, (98, 730), font=_load_cover_font(44), fill=(233, 244, 250), max_width=1080, line_spacing=10, max_lines=2)
+            panel = (1290, 220, 1816, 868)
+
+        draw.rounded_rectangle(panel, radius=38, fill=(245, 250, 252, 232), outline=(*palette["accent2"], 230), width=5)
+        px1, py1, px2, py2 = panel
+        panel_heading = (categories[0] if categories else "全球") + "观察"
+        draw.text((px1 + 44, py1 + 48), panel_heading, font=_load_cover_font(58), fill=(7, 30, 43))
+        draw.text((px1 + 48, py1 + 142), "重点追踪", font=_load_cover_font(76), fill=palette["accent"])
+        chip_y = py1 + 270
+        for category in categories[:5] or ["AI", "金融", "国际"]:
+            bbox = draw.textbbox((0, 0), category, font=tag_font)
+            chip_w = bbox[2] - bbox[0] + 42
+            draw.rounded_rectangle((px1 + 48, chip_y, px1 + 48 + chip_w, chip_y + 48), radius=24, fill=(10, 34, 50))
+            draw.text((px1 + 69, chip_y + 8), category, font=tag_font, fill=(255, 255, 255))
+            chip_y += 62
+        draw.line((px1 + 48, py2 - 138, px2 - 48, py2 - 138), fill=(25, 84, 108), width=3)
+        draw.text((px1 + 48, py2 - 102), "OpenNews 每日热点", font=small_font, fill=(25, 84, 108))
+        if cover_hash:
+            draw.text((px1 + 48, py2 - 58), f"视觉ID {cover_hash[:8]}", font=_load_cover_font(18), fill=(94, 118, 130))
+
+        image = image.convert("RGB")
+        image.save(cover_path, "JPEG", quality=95, optimize=True)
+        legacy_path = output_dir / "youtube_thumbnail.jpg"
+        if legacy_path != cover_path:
+            try:
+                shutil.copy2(cover_path, legacy_path)
+            except Exception:
+                pass
         return cover_path
     except Exception as exc:
         print(f"[OpenNews thumbnail] failed: {exc}", flush=True)
@@ -3981,15 +4906,11 @@ def _generate_opennews_collection_thumbnail(job: dict, result: dict) -> Path | N
 
 def _build_opennews_collection_intro_script(items: list[dict]) -> str:
     titles = [_collection_item_title(item) for item in items if _collection_item_title(item)]
-    focus_titles = titles[:4]
+    focus_titles = [title[:18].rstrip("，。！？、 ") for title in titles[:2]]
     if not focus_titles:
-        return "欢迎观看 OpenNews 每日热点。接下来，我们用几分钟带你快速了解今天值得关注的国际新闻。"
+        return "欢迎观看 OpenNews 每日热点。马上进入本期新闻合集。"
     focus_text = "、".join(focus_titles)
-    return (
-        "欢迎观看 OpenNews 每日热点。"
-        f"今天值得关注的重点包括：{focus_text}。"
-        "接下来，我们用几分钟带你快速看懂今天的国际热点。"
-    )
+    return f"欢迎观看 OpenNews 每日热点。本期关注：{focus_text}。马上进入正片。"
 
 
 def _opennews_intro_subtitle_chunks(text: str) -> list[str]:
@@ -4176,8 +5097,10 @@ def _generate_opennews_collection_intro_digital_human(
 def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dict:
     if not OPENNEWS_COLLECTION_INTRO_ENABLED:
         return {"ok": False, "skipped": True, "reason": "intro_disabled"}
-    if not OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH.exists():
-        return {"ok": False, "skipped": True, "reason": "anchor_missing", "anchor_path": str(OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH)}
+    presenter_config = _normalize_opennews_presenter_config(job.get("opennews_presenter"))
+    anchor_path = Path(str(presenter_config.get("anchor_path") or OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH))
+    if not anchor_path.exists():
+        return {"ok": False, "skipped": True, "reason": "anchor_missing", "anchor_path": str(anchor_path)}
     items = list(job.get("items") or [])
     if not items:
         return {"ok": False, "skipped": True, "reason": "no_items"}
@@ -4194,7 +5117,7 @@ def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dic
 
     from generate_audio import generate_audio
 
-    intro_voice_preset = _get_voice_preset("mandarin_female", "cn")
+    intro_voice_preset = _get_voice_preset(str(presenter_config.get("voice_preset_id") or "mandarin_female"), "cn")
     _, intro_tts_provider = _generate_audio_for_workflow(
         script_text=script_text,
         audio_path=str(audio_path),
@@ -4207,27 +5130,28 @@ def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dic
             "opennews_material_only": True,
             "digital_human_engine": "opennews_material_only",
             "source": {"kind": "opennews"},
+            "opennews_presenter": presenter_config,
         },
         generate_audio_fn=generate_audio,
         log=lambda message: print(f"[opennews_collection_intro] {message}"),
     )
-    image_url = upload_file_and_get_url(str(OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH), key_prefix="opennews/collection_intro/image")
+    image_url = upload_file_and_get_url(str(anchor_path), key_prefix="opennews/collection_intro/image")
     audio_url = upload_file_and_get_url(str(audio_path), key_prefix="opennews/collection_intro/audio")
 
-    prompt = (
-        "专业中文新闻女主播坐在演播桌前，面向镜头播报 OpenNews 每日热点开场。"
-        "表情自然可信，口型清晰，轻微点头，动作克制，新闻栏目质感。"
-        "不要改变背景中的 OpenNews 每日热点标识，不要添加额外文字。"
-    )
-    video_result, intro_engine, engine_attempts = _generate_opennews_collection_intro_digital_human(
-        job_id=job_id,
-        image_url=image_url,
-        image_path=str(OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH),
-        audio_url=audio_url,
-        audio_path=str(audio_path),
-        output_path=str(video_path),
-        prompt=prompt,
-    )
+    prompt = str(presenter_config.get("digital_human_prompt") or _opennews_presenter_config("female").get("digital_human_prompt"))
+    digital_profile_result = _switch_5090_gpu_profile("digital_intro", reason=f"opennews collection intro {job_id}")
+    try:
+        video_result, intro_engine, engine_attempts = _generate_opennews_collection_intro_digital_human(
+            job_id=job_id,
+            image_url=image_url,
+            image_path=str(anchor_path),
+            audio_url=audio_url,
+            audio_path=str(audio_path),
+            output_path=str(video_path),
+            prompt=prompt,
+        )
+    finally:
+        _switch_5090_gpu_profile("material", reason=f"opennews collection intro finished {job_id}")
     final_intro_path = _burn_opennews_intro_subtitles(Path(str(video_result)), script_text, subtitled_video_path)
     return {
         "ok": True,
@@ -4236,7 +5160,9 @@ def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dic
         "intro_video_path": str(final_intro_path),
         "intro_raw_video_path": str(video_result),
         "intro_subtitle_path": str(subtitled_video_path.with_suffix(".srt")),
-        "anchor_path": str(OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH),
+        "anchor_path": str(anchor_path),
+        "presenter": presenter_config,
+        "gpu_profile": digital_profile_result,
         "engine": intro_engine,
         "engine_attempts": engine_attempts,
         "tts_provider": intro_tts_provider,
@@ -4297,12 +5223,18 @@ def _publish_opennews_collection_to_youtube(job_id: str, *, privacy_status: str 
     title = _short_opennews_collection_title(items)
     description = _opennews_collection_description(items, aspect_ratio)
     thumbnail_path = _generate_opennews_collection_thumbnail(job, result)
+    require_ai_thumbnail = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_REQUIRE_AI", "1").strip().lower() not in {"0", "false", "no", "off"}
+    if require_ai_thumbnail and not thumbnail_path:
+        raise YouTubePublishError("gpt-image-2 封面尚未生成成功，已停止发布 YouTube。")
+    cooldown_message = _youtube_thumbnail_cooldown_message()
+    if require_ai_thumbnail and cooldown_message:
+        raise YouTubePublishError(f"{cooldown_message} 为避免公开视频缺少封面，本次合集暂不发布。")
     upload_result = upload_video_to_youtube(
         YOUTUBE_TOKEN_STORE_PATH,
         video_path,
         title=title,
         description=description,
-        tags=["OpenNews", "iHouse", "新闻合集"],
+        tags=["OpenNews", "每日热点", "新闻合集"],
         privacy_status=privacy_status,
         category_id="25",
         made_for_kids=False,
@@ -4318,6 +5250,21 @@ def _publish_opennews_collection_to_youtube(job_id: str, *, privacy_status: str 
         "created_at": time.time(),
         **upload_result,
     }
+    thumbnail_result = upload_result.get("thumbnail") if isinstance(upload_result.get("thumbnail"), dict) else {}
+    if thumbnail_path and thumbnail_result and not thumbnail_result.get("ok"):
+        retry_payload = _remember_youtube_thumbnail_retry(
+            video_id=str(upload_result.get("video_id") or ""),
+            thumbnail_path=Path(str(thumbnail_path)),
+            collection_id=job_id,
+            title=title,
+            youtube_url=str(upload_result.get("youtube_url") or ""),
+            error=str(thumbnail_result.get("error") or ""),
+        )
+        record["thumbnail_retry"] = {
+            "status": retry_payload.get("status"),
+            "next_attempt_at": retry_payload.get("next_attempt_at"),
+            "attempts": retry_payload.get("attempts"),
+        }
     records = result.get("youtube_publish_records")
     if not isinstance(records, list):
         records = []
@@ -4357,6 +5304,7 @@ def _auto_build_opennews_collections_if_ready(reason: str = "") -> None:
             base_title = _short_opennews_collection_title(selected)
             jobs = []
             for aspect_ratio in ("horizontal",):
+                presenter_config = _next_opennews_batch_presenter_config()
                 job = create_collection_job(
                     OPENNEWS_COLLECTION_DIR,
                     OUTPUT_DIR,
@@ -4370,6 +5318,7 @@ def _auto_build_opennews_collections_if_ready(reason: str = "") -> None:
                     str(job.get("job_id") or ""),
                     auto_created=True,
                     auto_reason=reason,
+                    opennews_presenter=presenter_config,
                     message="自动合集任务已创建，等待生成...",
                 )
                 jobs.append(job)
@@ -4403,7 +5352,14 @@ def _trigger_opennews_collection_auto_check(reason: str = "") -> None:
     thread.start()
 
 
-def _build_and_publish_opennews_collection(history_ids: list[str], *, reason: str = "", privacy_status: str = "public") -> dict:
+def _build_and_publish_opennews_collection(
+    history_ids: list[str],
+    *,
+    reason: str = "",
+    privacy_status: str = "public",
+    presenter_config: Optional[dict] = None,
+) -> dict:
+    presenter_config = _normalize_opennews_presenter_config(presenter_config)
     clean_ids = [str(history_id or "").strip() for history_id in history_ids if str(history_id or "").strip()]
     if not clean_ids:
         raise RuntimeError("自动合集没有可用短片，等待更多短片完成。")
@@ -4435,6 +5391,7 @@ def _build_and_publish_opennews_collection(history_ids: list[str], *, reason: st
         job_id,
         auto_created=True,
         auto_reason=reason,
+        opennews_presenter=presenter_config,
         skipped_input_history_ids=skipped_before_build,
         message="自动合集任务已创建，正在生成横屏合集...",
     )
@@ -4454,6 +5411,323 @@ def _build_and_publish_opennews_collection(history_ids: list[str], *, reason: st
     )
     updated = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id) or job
     return {"job_id": job_id, "job": updated, "youtube_record": record}
+
+
+def _completed_history_ids_for_opennews_batch_collection(job: dict) -> list[str]:
+    options = dict(job.get("options") or {})
+    auto_collection_item_ids = {
+        str(item_id or "").strip()
+        for item_id in (options.get("auto_collection_item_ids") or [])
+        if str(item_id or "").strip()
+    }
+    history_ids: list[str] = []
+    for item in job.get("items", []) or []:
+        if item.get("status") != "completed":
+            continue
+        history_id = str(item.get("history_id") or "").strip()
+        if not history_id:
+            continue
+        if auto_collection_item_ids and str(item.get("batch_item_id") or "").strip() not in auto_collection_item_ids:
+            continue
+        history_ids.append(history_id)
+    return history_ids
+
+
+def _find_latest_opennews_collection_job_for_reason(reason: str) -> Optional[dict]:
+    reason = str(reason or "").strip()
+    if not reason:
+        return None
+    jobs_dir = OPENNEWS_COLLECTION_DIR / "jobs"
+    if not jobs_dir.exists():
+        return None
+    for job_path in sorted(jobs_dir.glob("opennews_collection_*.json"), key=lambda path: path.stat().st_mtime, reverse=True):
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(job.get("auto_reason") or "") == reason:
+            return job
+    return None
+
+
+def _run_opennews_direct_collection_for_batch_job(job_id: str, *, reason: str = "") -> None:
+    job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id) or {}
+    if not job:
+        return
+    options = dict(job.get("options") or {})
+    if not options.get("auto_collection_direct"):
+        return
+    youtube_publish_disabled = os.getenv("OPENNEWS_YOUTUBE_AUTO_PUBLISH_DISABLED", "0").strip().lower() not in {"0", "false", "no", "off"}
+    if youtube_publish_disabled:
+        update_opennews_batch_job(
+            OPENNEWS_BATCH_DIR,
+            job_id,
+            lambda payload: payload.update({
+                "collection_status": "skipped",
+                "collection_message": "YouTube 自动发布已禁用，已跳过自动合集。",
+            }),
+        )
+        return
+    history_ids = _completed_history_ids_for_opennews_batch_collection(job)
+    if not history_ids:
+        update_opennews_batch_job(
+            OPENNEWS_BATCH_DIR,
+            job_id,
+            lambda payload: payload.update({
+                "collection_status": "failed",
+                "collection_error": "没有可用于合集的已完成短片。",
+                "collection_message": "自动合集失败：没有可用于合集的已完成短片。",
+            }),
+        )
+        return
+    presenter_config = _normalize_opennews_presenter_config(options.get("opennews_presenter"))
+    privacy_status = str(options.get("youtube_privacy_status") or "public")
+    update_opennews_batch_job(
+        OPENNEWS_BATCH_DIR,
+        job_id,
+        lambda payload: payload.update({
+            "collection_status": "running",
+            "collection_message": "检测到批次短片已完成，正在补生成横屏合集...",
+        }),
+    )
+    try:
+        collection_result = _build_and_publish_opennews_collection(
+            history_ids,
+            reason=reason or f"batch_job:{job_id}",
+            privacy_status=privacy_status,
+            presenter_config=presenter_config,
+        )
+        collection_job = collection_result.get("job") or {}
+        collection_payload = collection_job.get("result") or {}
+        included_count = len(collection_payload.get("items") or [])
+        skipped_count = len(collection_payload.get("skipped_items") or [])
+        update_opennews_batch_job(
+            OPENNEWS_BATCH_DIR,
+            job_id,
+            lambda payload, collection_count=included_count, skipped=skipped_count: payload.update({
+                "collection_status": "done",
+                "collection_job_id": collection_result.get("job_id") or "",
+                "collection_message": "自动合集已生成并发布 YouTube。",
+                "collection_youtube_record": collection_result.get("youtube_record") or {},
+                "message": f"自动流程已完成：横屏合集收录 {collection_count} 条，跳过 {skipped} 条问题短片并发布 YouTube。",
+            }),
+        )
+    except Exception as collection_exc:
+        latest_collection_job = load_collection_job(OPENNEWS_COLLECTION_DIR, str((locals().get("collection_result") or {}).get("job_id") or "")) if "collection_result" in locals() else None
+        if not latest_collection_job:
+            latest_collection_job = _find_latest_opennews_collection_job_for_reason(f"batch_job:{job_id}")
+        result = latest_collection_job.get("result") if isinstance(latest_collection_job, dict) else {}
+        video_path = Path(str((result or {}).get("video_path") or ""))
+        if video_path.exists():
+            collection_job_id = str((latest_collection_job or {}).get("job_id") or "")
+            update_collection_job(
+                OPENNEWS_COLLECTION_DIR,
+                collection_job_id,
+                status="youtube_failed",
+                message=f"合集成片已生成，但 YouTube 发布失败：{collection_exc}",
+                error=str(collection_exc),
+            )
+            update_opennews_batch_job(
+                OPENNEWS_BATCH_DIR,
+                job_id,
+                lambda payload, cid=collection_job_id: payload.update({
+                    "collection_status": "youtube_failed",
+                    "collection_job_id": cid,
+                    "collection_error": str(collection_exc),
+                    "collection_message": f"合集成片已生成，但 YouTube 发布失败：{collection_exc}",
+                    "message": f"横屏合集已生成，但 YouTube 发布失败：{collection_exc}",
+                }),
+            )
+            return
+        update_opennews_batch_job(
+            OPENNEWS_BATCH_DIR,
+            job_id,
+            lambda payload: payload.update({
+                "collection_status": "failed",
+                "collection_error": str(collection_exc),
+                "collection_message": f"自动合集失败：{collection_exc}",
+                "message": f"短片已完成 {len(history_ids)} 条，但自动合集失败：{collection_exc}",
+            }),
+        )
+
+
+def _recover_pending_opennews_direct_collections() -> None:
+    jobs_dir = OPENNEWS_BATCH_DIR / "batch_jobs"
+    if not jobs_dir.exists():
+        return
+    recovered = 0
+    now = time.time()
+    for job_path in sorted(jobs_dir.glob("opennews_batch_*.json"), key=lambda path: path.stat().st_mtime, reverse=True)[:30]:
+        try:
+            if (now - job_path.stat().st_mtime) / 3600 > OPENNEWS_COLLECTION_RECOVERY_MAX_AGE_HOURS:
+                continue
+        except Exception:
+            continue
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        options = dict(job.get("options") or {})
+        if not options.get("auto_collection_direct"):
+            continue
+        collection_status = str(job.get("collection_status") or "").strip().lower()
+        if job.get("collection_job_id") or collection_status not in {"", "pending", "queued"}:
+            continue
+        if str(job.get("status") or "") not in {"done", "partial"}:
+            continue
+        if not _completed_history_ids_for_opennews_batch_collection(job):
+            continue
+        job_id = str(job.get("job_id") or job_path.stem)
+        update_opennews_batch_job(
+            OPENNEWS_BATCH_DIR,
+            job_id,
+            lambda payload: payload.update({
+                "collection_status": "recovering",
+                "collection_message": "服务启动恢复：检测到合集未生成，已重新排队。",
+            }),
+        )
+        threading.Thread(
+            target=_run_opennews_direct_collection_for_batch_job,
+            kwargs={"job_id": job_id, "reason": f"startup_recovery:{job_id}"},
+            daemon=True,
+        ).start()
+        recovered += 1
+        if recovered >= 3:
+            break
+    if recovered:
+        print(f"🔁 已恢复 OpenNews 未完成自动合集任务：{recovered} 个")
+
+
+def _update_opennews_batch_for_collection_job(collection_job: dict, *, status: str, message: str, error: str = "") -> None:
+    reason = str(collection_job.get("auto_reason") or "")
+    match = re.search(r"opennews_batch_[A-Za-z0-9_-]+", reason)
+    if not match:
+        return
+    batch_job_id = match.group(0)
+    collection_job_id = str(collection_job.get("job_id") or "")
+
+    def updater(payload: dict) -> None:
+        payload["collection_status"] = status
+        payload["collection_job_id"] = collection_job_id
+        payload["collection_message"] = message
+        if error:
+            payload["collection_error"] = error
+            if status == "youtube_failed":
+                payload["message"] = message
+            else:
+                payload["message"] = f"自动合集失败：{error}"
+        else:
+            payload.pop("collection_error", None)
+            payload["message"] = message
+
+    update_opennews_batch_job(OPENNEWS_BATCH_DIR, batch_job_id, updater)
+
+
+def _recover_stuck_opennews_collection_intro_jobs() -> None:
+    jobs_dir = OPENNEWS_COLLECTION_DIR / "jobs"
+    if not jobs_dir.exists():
+        return
+    recovered = 0
+    now = time.time()
+    for job_path in sorted(jobs_dir.glob("opennews_collection_*.json"), key=lambda path: path.stat().st_mtime, reverse=True)[:20]:
+        try:
+            if (now - job_path.stat().st_mtime) / 3600 > OPENNEWS_COLLECTION_RECOVERY_MAX_AGE_HOURS:
+                continue
+        except Exception:
+            continue
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        status = str(job.get("status") or "").strip().lower()
+        message = str(job.get("message") or "")
+        auto_reason = str(job.get("auto_reason") or "")
+        if status not in {"queued", "running"}:
+            continue
+        if "数字人开场" not in message:
+            continue
+        if "batch_job:" not in auto_reason and "startup_recovery:" not in auto_reason:
+            continue
+        job_id = str(job.get("job_id") or job_path.stem)
+        recovery_attempted = bool(job.get("intro_recovery_attempted"))
+        update_collection_job(
+            OPENNEWS_COLLECTION_DIR,
+            job_id,
+            intro_recovery_attempted=True,
+            message=(
+                "服务启动恢复：正在重新生成数字人开场片头..."
+                if OPENNEWS_COLLECTION_INTRO_ENABLED and not recovery_attempted
+                else "服务启动恢复：数字人开场已重试过，已跳过片头并继续生成合集..."
+            ),
+        )
+
+        def runner(collection_job_id: str = job_id) -> None:
+            try:
+                latest_job = load_collection_job(OPENNEWS_COLLECTION_DIR, collection_job_id) or {}
+                if OPENNEWS_COLLECTION_INTRO_ENABLED and not recovery_attempted and not latest_job.get("intro_video_path"):
+                    _attach_opennews_collection_intro(collection_job_id, message_suffix="正在恢复生成横屏合集...")
+                else:
+                    update_collection_job(
+                        OPENNEWS_COLLECTION_DIR,
+                        collection_job_id,
+                        intro_result={"ok": False, "skipped": True, "reason": "startup_recovered_intro_timeout_after_retry"},
+                        message="服务启动恢复：数字人开场未完成，已跳过片头并继续生成合集...",
+                    )
+                build_collection_video(OPENNEWS_COLLECTION_DIR, OUTPUT_DIR, collection_job_id)
+                update_collection_job(OPENNEWS_COLLECTION_DIR, collection_job_id, status="publishing_youtube", message="合集已生成，正在自动发布 YouTube...")
+                record = _publish_opennews_collection_to_youtube(collection_job_id, privacy_status="public")
+                final_job = load_collection_job(OPENNEWS_COLLECTION_DIR, collection_job_id) or {}
+                update_collection_job(
+                    OPENNEWS_COLLECTION_DIR,
+                    collection_job_id,
+                    status="done",
+                    message="自动合集已恢复生成并发布 YouTube。",
+                    youtube_latest=record,
+                )
+                _update_opennews_batch_for_collection_job(
+                    final_job or {"job_id": collection_job_id, "auto_reason": auto_reason},
+                    status="done",
+                    message="自动合集已恢复生成并发布 YouTube。",
+                )
+            except Exception as exc:
+                final_job = load_collection_job(OPENNEWS_COLLECTION_DIR, collection_job_id) or {"job_id": collection_job_id, "auto_reason": auto_reason}
+                result = final_job.get("result") if isinstance(final_job.get("result"), dict) else {}
+                video_path = Path(str(result.get("video_path") or ""))
+                if video_path.exists():
+                    update_collection_job(
+                        OPENNEWS_COLLECTION_DIR,
+                        collection_job_id,
+                        status="youtube_failed",
+                        message=f"合集已恢复生成，但 YouTube 发布失败：{exc}",
+                        error=str(exc),
+                    )
+                    _update_opennews_batch_for_collection_job(
+                        final_job,
+                        status="youtube_failed",
+                        message=f"合集已恢复生成，但 YouTube 发布失败：{exc}",
+                        error=str(exc),
+                    )
+                    return
+                update_collection_job(
+                    OPENNEWS_COLLECTION_DIR,
+                    collection_job_id,
+                    status="failed",
+                    message=f"自动合集恢复失败：{exc}",
+                    error=str(exc),
+                )
+                _update_opennews_batch_for_collection_job(
+                    final_job,
+                    status="failed",
+                    message=f"自动合集恢复失败：{exc}",
+                    error=str(exc),
+                )
+
+        threading.Thread(target=runner, daemon=True).start()
+        recovered += 1
+        if recovered >= 2:
+            break
+    if recovered:
+        print(f"🔁 已恢复卡在数字人片头的 OpenNews 合集：{recovered} 个")
 
 
 def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bool = False) -> list[dict]:
@@ -5332,6 +6606,127 @@ async def opennews_batches_run_now(request: Request):
     )
     status_code = 202 if result.get("running") else 200
     return JSONResponse(result, status_code=status_code)
+
+
+@app.post("/api/opennews/batches/run-manual-production")
+async def opennews_batches_run_manual_production(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    # One-click full OpenNews run: fetch one batch, produce the selected 10
+    # clips, publish the top story as Shorts, then build/publish one horizontal
+    # collection from the same batch.
+    save_opennews_batch_config(
+        OPENNEWS_BATCH_DIR,
+        {
+            "enabled": False,
+            "interval_minutes": 180,
+            "category": payload.get("category") or "all",
+            "time_range": payload.get("time_range") or "6h",
+            "limit": 20,
+        },
+    )
+    result = run_opennews_batch_fetch_once(
+        OPENNEWS_BATCH_DIR,
+        triggered_by=f"manual_production:{user.get('username') or 'admin'}",
+        override={
+            "category": payload.get("category") or "all",
+            "time_range": payload.get("time_range") or "6h",
+            "limit": 20,
+        },
+    )
+    if result.get("running"):
+        return JSONResponse(result, status_code=202)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=500)
+
+    items = [item for item in (result.get("items") or []) if isinstance(item, dict)]
+    selected = _select_opennews_auto_collection_items(
+        items,
+        time_range=str(result.get("time_range") or payload.get("time_range") or "6h"),
+    )
+    if not selected:
+        selected = sorted(items, key=_opennews_batch_item_score, reverse=True)[:10]
+    selected = selected[:10]
+    if not selected:
+        return JSONResponse({
+            **result,
+            "ok": False,
+            "error": "本轮没有可制作的新新闻，可能全部被重复过滤。",
+        }, status_code=400)
+
+    target_market = str(payload.get("target_market") or user.get("target_market") or "cn")
+    presenter_config = _next_opennews_batch_presenter_config()
+    _switch_5090_gpu_profile("material", reason="manual opennews full batch start")
+    voice_preset_id = str(payload.get("voice_preset_id") or presenter_config.get("voice_preset_id") or "")
+    aspect_ratio = str(payload.get("aspect_ratio") or "horizontal")
+    selected_ids = [
+        str(item.get("batch_item_id") or item.get("id") or "").strip()
+        for item in selected
+        if str(item.get("batch_item_id") or item.get("id") or "").strip()
+    ]
+    top_item = _select_opennews_batch_top_item(selected)
+    top_item_id = str((top_item or {}).get("batch_item_id") or (top_item or {}).get("id") or "").strip()
+    job = create_opennews_batch_job(
+        OPENNEWS_BATCH_DIR,
+        username=user.get("username") or "admin",
+        items=selected,
+        options={
+            "target_market": target_market,
+            "department_id": user.get("department_id") or "real_estate",
+            "voice_preset_id": voice_preset_id,
+            "aspect_ratio": aspect_ratio,
+            "notes": str(payload.get("notes") or "手动启动一轮完整 OpenNews 自动化：最高热度新闻发布竖屏 Shorts，同时生成横屏合集并发布 YouTube。"),
+            "youtube_auto_publish": False,
+            "youtube_privacy_status": "public",
+            "youtube_aspects": ["vertical"],
+            "opennews_presenter": presenter_config,
+            "auto_collection_direct": True,
+            "auto_collection_item_ids": selected_ids,
+            "auto_single_shorts_item_ids": [top_item_id] if top_item_id else [],
+            "auto_collection_mix_counts": _opennews_auto_collection_mix_counts(),
+            "manual_batch_production": True,
+            "manual_batch_id": result.get("batch_id") or "",
+        },
+    )
+    if selected_ids:
+        mark_opennews_batch_items(
+            OPENNEWS_BATCH_DIR,
+            selected_ids,
+            {
+                "status": "manual_producing",
+                "auto_produce_job_id": job.get("job_id") or "",
+                "auto_produce_selected_at": time.time(),
+                "auto_produce_reason": "manual_batch_full_youtube",
+                "message": "已进入手动完整自动化：最高热度 Shorts + 横屏合集将自动发布 YouTube。",
+            },
+        )
+    thread = threading.Thread(
+        target=_run_opennews_external_produce_job,
+        kwargs={
+            "job_id": job.get("job_id"),
+            "user": dict(user),
+            "public_base_url": _get_public_base_url(request),
+        },
+        daemon=True,
+    )
+    thread.start()
+    return {
+        **result,
+        "ok": True,
+        "selected_count": len(selected),
+        "selected_item_ids": selected_ids,
+        "job": job,
+        "job_id": job.get("job_id"),
+        "message": f"已抓取新批次并启动 {len(selected)} 条新闻完整自动化：最高热度 Shorts + 横屏合集将自动发布 YouTube。",
+    }
 
 
 @app.get("/api/opennews/batches")
@@ -6632,6 +8027,103 @@ def _opennews_auto_collection_item_key(item: dict) -> str:
     return url or title or item_id
 
 
+def _opennews_item_event_identity(item: dict) -> dict:
+    """Return the cross-source event identity used by auto production selection."""
+    article = dict(item.get("article") or item)
+    return {
+        "event_key": opennews_candidate_event_key(article),
+        "event_tokens": opennews_candidate_event_tokens(article),
+        "title_compact": opennews_candidate_title_compact(article),
+    }
+
+
+def _opennews_is_duplicate_auto_event(item: dict, selected_identities: list[dict]) -> bool:
+    identity = _opennews_item_event_identity(item)
+    event_key = str(identity.get("event_key") or "")
+    event_tokens = list(identity.get("event_tokens") or [])
+    title_compact = str(identity.get("title_compact") or "")
+    for existing in selected_identities:
+        if event_key and event_key == str(existing.get("event_key") or ""):
+            return True
+        if title_compact and opennews_candidate_title_similar(title_compact, str(existing.get("title_compact") or "")):
+            return True
+        if event_tokens and opennews_is_duplicate_event(event_tokens, list(existing.get("event_tokens") or [])):
+            return True
+    return False
+
+
+def _opennews_event_identity_dedupe_key(identity: dict) -> str:
+    event_key = str(identity.get("event_key") or "").strip()
+    if event_key:
+        return f"event:{event_key}"
+    title_compact = str(identity.get("title_compact") or "").strip()
+    if title_compact:
+        return f"title:{title_compact}"
+    tokens = [str(token or "").strip() for token in (identity.get("event_tokens") or []) if str(token or "").strip()]
+    return f"tokens:{' '.join(tokens[:10])}" if tokens else ""
+
+
+def _opennews_recent_completed_event_identities(*, limit: int = 800, exclude_job_id: str = "") -> list[dict]:
+    identities: list[dict] = []
+    seen_keys: set[str] = set()
+
+    def add_item(item: dict) -> None:
+        if len(identities) >= limit or not isinstance(item, dict):
+            return
+        identity = _opennews_item_event_identity(item)
+        identity_key = _opennews_event_identity_dedupe_key(identity)
+        if not identity_key or identity_key in seen_keys:
+            return
+        seen_keys.add(identity_key)
+        identities.append(identity)
+
+    jobs_dir = OPENNEWS_BATCH_DIR / "batch_jobs"
+    if jobs_dir.exists():
+        for job_path in sorted(jobs_dir.glob("opennews_batch_*.json"), key=lambda path: path.stat().st_mtime, reverse=True):
+            if len(identities) >= limit:
+                break
+            if exclude_job_id and job_path.stem == exclude_job_id:
+                continue
+            try:
+                job_data = json.loads(job_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            for item in job_data.get("items", []) or []:
+                if str(item.get("status") or "") != "completed":
+                    continue
+                if not str(item.get("history_id") or "").strip():
+                    continue
+                add_item(item)
+                if len(identities) >= limit:
+                    break
+
+    if len(identities) < limit and OUTPUT_DIR.exists():
+        output_dirs = [path for path in OUTPUT_DIR.iterdir() if path.is_dir()]
+        for output_dir in sorted(output_dirs, key=lambda path: path.stat().st_mtime, reverse=True):
+            if len(identities) >= limit:
+                break
+            result_path = output_dir / "result.json"
+            if not result_path.exists():
+                continue
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not _is_opennews_result(result):
+                continue
+            source_article = (
+                ((result.get("workflow_config") or {}).get("source") or {}).get("article")
+                or ((result.get("source") or {}).get("article") if isinstance(result.get("source"), dict) else {})
+                or {}
+            )
+            if isinstance(source_article, dict) and source_article:
+                add_item({"article": source_article, "history_id": output_dir.name, "status": "completed"})
+            else:
+                add_item(result)
+
+    return identities
+
+
 def _opennews_collection_bucket_counts(items: list[dict]) -> dict[str, int]:
     counts = {"ai": 0, "robotics": 0, "other": 0}
     for item in items:
@@ -6671,6 +8163,7 @@ def _supplement_opennews_auto_collection_items(
 ) -> list[dict]:
     expanded = [dict(item) for item in base_items if isinstance(item, dict)]
     seen = {_opennews_auto_collection_item_key(item) for item in expanded if _opennews_auto_collection_item_key(item)}
+    seen_identities = [_opennews_item_event_identity(item) for item in expanded]
 
     for bucket_name in ("ai", "robotics", "other"):
         current_counts = _opennews_collection_bucket_counts(expanded)
@@ -6703,6 +8196,8 @@ def _supplement_opennews_auto_collection_items(
                 key = _opennews_auto_collection_item_key(item)
                 if not key or key in seen:
                     continue
+                if _opennews_is_duplicate_auto_event(item, seen_identities):
+                    continue
                 natural_bucket = _opennews_auto_collection_bucket(item)
                 if bucket_name == "other" and natural_bucket != "other":
                     continue
@@ -6722,6 +8217,7 @@ def _supplement_opennews_auto_collection_items(
                     item["batch_category"] = f"supplement_{bucket_name}"
                 expanded.append(item)
                 seen.add(key)
+                seen_identities.append(_opennews_item_event_identity(item))
                 missing -= 1
     return expanded
 
@@ -6744,6 +8240,7 @@ def _select_opennews_auto_collection_items(items: list[dict], *, time_range: str
 
     selected: list[dict] = []
     selected_keys: set[str] = set()
+    selected_identities: list[dict] = []
 
     def item_key(item: dict) -> str:
         return str(item.get("batch_item_id") or item.get("id") or _opennews_article_title(item)).strip()
@@ -6755,8 +8252,11 @@ def _select_opennews_auto_collection_items(items: list[dict], *, time_range: str
             key = item_key(item)
             if not key or key in selected_keys:
                 continue
+            if _opennews_is_duplicate_auto_event(item, selected_identities):
+                continue
             selected.append(item)
             selected_keys.add(key)
+            selected_identities.append(_opennews_item_event_identity(item))
             if len([existing for existing in selected if _opennews_auto_collection_bucket(existing) == bucket_name]) >= count:
                 break
 
@@ -6775,9 +8275,10 @@ def _select_opennews_auto_collection_items(items: list[dict], *, time_range: str
                 fallback_item = None
                 for item in ranked:
                     key = item_key(item)
-                    if key and key not in selected_keys:
+                    if key and key not in selected_keys and not _opennews_is_duplicate_auto_event(item, selected_identities):
                         fallback_item = dict(item)
                         selected_keys.add(key)
+                        selected_identities.append(_opennews_item_event_identity(item))
                         break
                 if not fallback_item:
                     break
@@ -6822,6 +8323,13 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
     if triggered_by != "scheduler" and not config.get("enabled"):
         return
     items = [item for item in (payload.get("items") or []) if isinstance(item, dict)]
+    if not items:
+        print(
+            "[OpenNews auto collection] skip production: current batch has no fresh unique items "
+            f"batch_id={payload.get('batch_id') or ''} duplicate_count={payload.get('duplicate_count') or 0}",
+            flush=True,
+        )
+        return
     selected = _select_opennews_auto_collection_items(
         items,
         time_range=str(payload.get("time_range") or config.get("time_range") or "6h"),
@@ -6829,16 +8337,62 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
     top_item = _select_opennews_batch_top_item(items) or _select_opennews_batch_top_item(selected)
     if not selected:
         return
-    job_items = list(selected)
+    completed_history = _opennews_recent_completed_event_identities()
+    job_items: list[dict] = []
+    skipped_history_ids: list[str] = []
+    for item in selected:
+        item_id = str(item.get("batch_item_id") or item.get("id") or "").strip()
+        if _opennews_is_duplicate_auto_event(item, completed_history):
+            if item_id:
+                skipped_history_ids.append(item_id)
+            continue
+        job_items.append(item)
+        completed_history.append(_opennews_item_event_identity(item))
+    if skipped_history_ids:
+        mark_opennews_batch_items(
+            root,
+            skipped_history_ids,
+            {
+                "status": "skipped_duplicate",
+                "auto_produce_skipped_at": time.time(),
+                "auto_produce_reason": "already_completed_event",
+                "message": "同一新闻事件已在历史成片中制作过，本批次自动跳过。",
+            },
+        )
+        print(
+            f"[OpenNews auto collection] skipped {len(skipped_history_ids)} already-completed duplicate events "
+            f"batch_id={payload.get('batch_id') or ''}",
+            flush=True,
+        )
+    if not job_items:
+        print(
+            "[OpenNews auto collection] skip production: selected items were all already completed duplicate events "
+            f"batch_id={payload.get('batch_id') or ''}",
+            flush=True,
+        )
+        return
+    selected = job_items
     selected_ids = [str(item.get("batch_item_id") or item.get("id") or "").strip() for item in selected]
     selected_ids = [item_id for item_id in selected_ids if item_id]
     top_item_id = str((top_item or {}).get("batch_item_id") or (top_item or {}).get("id") or "").strip()
-    if top_item and top_item_id and top_item_id not in selected_ids:
+    if (
+        top_item
+        and top_item_id
+        and top_item_id not in selected_ids
+        and not _opennews_is_duplicate_auto_event(top_item, completed_history)
+    ):
         job_items.insert(0, top_item)
+        completed_history.append(_opennews_item_event_identity(top_item))
+        selected_ids.insert(0, top_item_id)
+    else:
+        top_item = _select_opennews_batch_top_item(job_items)
+        top_item_id = str((top_item or {}).get("batch_item_id") or (top_item or {}).get("id") or "").strip()
     if not selected_ids or not OPENNEWS_BATCH_AUTO_PRODUCE_LOCK.acquire(blocking=False):
         return
     try:
         user = _external_news_user()
+        presenter_config = _next_opennews_batch_presenter_config()
+        _switch_5090_gpu_profile("material", reason="auto opennews batch start")
         job = create_opennews_batch_job(
             root,
             username="auto_opennews_collection",
@@ -6846,12 +8400,13 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
             options={
                 "target_market": os.getenv("OPENNEWS_BATCH_AUTO_TARGET_MARKET", "cn"),
                 "department_id": user.get("department_id") or "real_estate",
-                "voice_preset_id": os.getenv("OPENNEWS_BATCH_AUTO_VOICE_PRESET_ID", ""),
+                "voice_preset_id": presenter_config.get("voice_preset_id") or os.getenv("OPENNEWS_BATCH_AUTO_VOICE_PRESET_ID", ""),
                 "aspect_ratio": os.getenv("OPENNEWS_BATCH_AUTO_PREVIEW_ASPECT", "vertical"),
                 "notes": "自动抓取批次：最高热度单条发布竖屏 Shorts；同时按 AI 4、机器人 1、其他热点 5 的比例生成横屏新闻合集。",
                 "youtube_auto_publish": False,
                 "youtube_privacy_status": os.getenv("OPENNEWS_BATCH_AUTO_YOUTUBE_PRIVACY", "public"),
                 "youtube_aspects": ["vertical"],
+                "opennews_presenter": presenter_config,
                 "auto_collection_batch_id": payload.get("batch_id") or "",
                 "auto_collection_item_ids": selected_ids,
                 "auto_single_shorts_item_ids": [top_item_id] if top_item_id else [],
@@ -6924,7 +8479,40 @@ def _external_ready_video_titles() -> list[str]:
     return list(dict.fromkeys(titles))
 
 
-def _wait_for_opennews_task_done(task_id: str, *, timeout_seconds: int = 5400) -> dict:
+def _recover_opennews_task_from_output(task_id: str, expected_title: str = "") -> dict:
+    expected_key = _make_safe_name(expected_title or "", fallback="").lower()
+    candidates: list[Path] = []
+    if OUTPUT_DIR.exists():
+        candidates = sorted(
+            [path for path in OUTPUT_DIR.iterdir() if path.is_dir() and (path / "result.json").exists()],
+            key=lambda path: (path / "result.json").stat().st_mtime,
+            reverse=True,
+        )[:80]
+    for output_dir in candidates:
+        result_path = output_dir / "result.json"
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not _is_opennews_result(result):
+            continue
+        result_title = str(result.get("title") or ((result.get("script") or {}).get("title")) or "").strip()
+        result_key = _make_safe_name(result_title, fallback="").lower()
+        dir_key = output_dir.name.lower()
+        if expected_key and expected_key not in result_key and expected_key not in dir_key:
+            continue
+        if _opennews_result_has_material_assets(result, output_dir):
+            return {
+                "id": task_id,
+                "output_dir": str(output_dir),
+                "result": result,
+                "tracker": None,
+                "recovered_from_output": True,
+            }
+    return {}
+
+
+def _wait_for_opennews_task_done(task_id: str, *, timeout_seconds: int = 5400, expected_title: str = "") -> dict:
     deadline = time.time() + max(60, timeout_seconds)
     while time.time() < deadline:
         task = tasks.get(task_id) or {}
@@ -6939,6 +8527,10 @@ def _wait_for_opennews_task_done(task_id: str, *, timeout_seconds: int = 5400) -
                     tasks[task_id] = task
                 except Exception:
                     pass
+        if not task:
+            recovered_task = _recover_opennews_task_from_output(task_id, expected_title=expected_title)
+            if recovered_task:
+                return recovered_task
         if tracker_status == "done" and task.get("result") and task.get("output_dir"):
             return task
         # Some long OpenNews jobs can finish writing result.json before the
@@ -6983,9 +8575,13 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
     voice_preset_id = str(options.get("voice_preset_id") or "")
     preferred_aspect_ratio = str(options.get("aspect_ratio") or "vertical")
     notes = str(options.get("notes") or "")
+    presenter_config = _normalize_opennews_presenter_config(options.get("opennews_presenter"))
     external_request = dict(options.get("external_request") or {})
     callback_url = str(external_request.get("callback_url") or options.get("callback_url") or "").strip()
     youtube_auto_publish = bool(options.get("youtube_auto_publish") or external_request.get("youtube_auto_publish"))
+    youtube_publish_disabled = os.getenv("OPENNEWS_YOUTUBE_AUTO_PUBLISH_DISABLED", "0").strip().lower() not in {"0", "false", "no", "off"}
+    if youtube_publish_disabled:
+        youtube_auto_publish = False
     youtube_privacy_status = str(options.get("youtube_privacy_status") or external_request.get("youtube_privacy_status") or "public")
     youtube_aspects_raw = options.get("youtube_aspects") or external_request.get("youtube_aspects") or ["horizontal", "vertical"]
     if isinstance(youtube_aspects_raw, str):
@@ -7002,6 +8598,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
         for item_id in (options.get("auto_single_shorts_item_ids") or [])
         if str(item_id or "").strip()
     }
+    if youtube_publish_disabled:
+        auto_single_shorts_ids = set()
     auto_collection_item_ids = {
         str(item_id or "").strip()
         for item_id in (options.get("auto_collection_item_ids") or [])
@@ -7010,9 +8608,27 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
     set_job_status("running", "外部审核已确认，正在一站式生成新闻视频成片...")
 
     total_items = len(job.get("items") or [])
+    completed_event_identities: list[dict] = _opennews_recent_completed_event_identities(exclude_job_id=job_id)
     for index, item in enumerate(job.get("items") or []):
         item_id = str(item.get("batch_item_id") or "")
+        if _opennews_is_duplicate_auto_event(item, completed_event_identities):
+            duplicate_message = "同一新闻事件已在历史成片或本批次中制作过，已跳过重复项。"
+            def mark_duplicate(payload: dict, idx=index) -> None:
+                for existing in payload.get("items", []) or []:
+                    if str(existing.get("batch_item_id") or "") == item_id:
+                        existing.update({
+                            "status": "skipped_duplicate",
+                            "message": duplicate_message,
+                            "error": "",
+                            "completed_at": time.time(),
+                        })
+                        break
+                payload["message"] = f"外部审核视频生产进度：{idx + 1}/{total_items}"
+            update_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id, mark_duplicate)
+            sync_batch_item(item_id, status="skipped_duplicate", message=duplicate_message, error="", completed_at=time.time())
+            continue
         if item.get("status") == "completed":
+            completed_event_identities.append(_opennews_item_event_identity(item))
             update_opennews_batch_job(
                 OPENNEWS_BATCH_DIR,
                 job_id,
@@ -7042,10 +8658,14 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                 department_id=department_id,
                 voice_preset_id=voice_preset_id,
                 aspect_ratio=preferred_aspect_ratio,
+                presenter_config=presenter_config,
             )
             task_id = str(task_result.get("task_id") or "")
             mark_item(task_id=task_id, message=f"视频生产任务已提交：{task_id}，等待中间产物完成...")
-            task = _wait_for_opennews_task_done(task_id)
+            task = _wait_for_opennews_task_done(
+                task_id,
+                expected_title=str(draft.get("video_title") or article.get("title") or ""),
+            )
             mark_item(status="composing", message="中间产物完成，正在自动合成横屏和竖屏成片...")
             composed_result = _compose_opennews_task_video(task_id, preferred_aspect_ratio=preferred_aspect_ratio)
             material_review = _opennews_material_review_status(composed_result)
@@ -7057,6 +8677,10 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             youtube_records: list[dict] = []
             youtube_error = ""
             publish_this_item = youtube_auto_publish or item_id in auto_single_shorts_ids
+            if publish_this_item and not material_review.get("auto_publish_allowed", True):
+                publish_this_item = False
+                youtube_error = material_review.get("reason") or "素材审查未通过，已跳过 YouTube 自动发布"
+                mark_item(status="completed", message=f"成片已完成，但 YouTube 自动发布已跳过：{youtube_error}", material_review=material_review)
             item_youtube_aspects = ["vertical"] if item_id in auto_single_shorts_ids else youtube_aspects
             if publish_this_item:
                 try:
@@ -7076,7 +8700,7 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                     youtube_error = str(youtube_exc)
             final_status = "completed"
             final_message = (
-                "成片已完成，可直接下载。"
+                (f"成片已完成，但 YouTube 自动发布已跳过：{youtube_error}" if youtube_error else "成片已完成，可直接下载。")
                 if not publish_this_item
                 else ("成片已完成，YouTube 已发布。" if not youtube_error else f"成片已完成，但 YouTube 发布失败：{youtube_error}")
             )
@@ -7106,6 +8730,7 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                 error="",
                 completed_at=time.time(),
             )
+            completed_event_identities.append(_opennews_item_event_identity(item))
         except Exception as exc:
             mark_item(status="failed", message=f"生成失败：{exc}", error=str(exc))
             sync_batch_item(item_id, status="failed", message=f"生成失败：{exc}", error=str(exc), completed_at=time.time())
@@ -7120,49 +8745,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
     completed = sum(1 for item in final_job.get("items", []) or [] if item.get("status") == "completed")
     set_job_status("done" if failed == 0 else "partial", f"外部审核视频已完成：{completed} 条成功，{failed} 条失败。")
     if completed and options.get("auto_collection_direct"):
-        history_ids = [
-            str(item.get("history_id") or "").strip()
-            for item in final_job.get("items", []) or []
-            if item.get("status") == "completed"
-            and str(item.get("history_id") or "").strip()
-            and (
-                not auto_collection_item_ids
-                or str(item.get("batch_item_id") or "").strip() in auto_collection_item_ids
-            )
-        ]
-        try:
-            collection_result = _build_and_publish_opennews_collection(
-                history_ids,
-                reason=f"batch_job:{job_id}",
-                privacy_status=youtube_privacy_status,
-            )
-            collection_job = collection_result.get("job") or {}
-            collection_payload = collection_job.get("result") or {}
-            included_count = len(collection_payload.get("items") or [])
-            skipped_count = len(collection_payload.get("skipped_items") or [])
-            update_opennews_batch_job(
-                OPENNEWS_BATCH_DIR,
-                job_id,
-                lambda job, collection_count=included_count, skipped=skipped_count: job.update({
-                    "collection_status": "done",
-                    "collection_job_id": collection_result.get("job_id") or "",
-                    "collection_message": "自动合集已生成并发布 YouTube。",
-                    "collection_youtube_record": collection_result.get("youtube_record") or {},
-                    "message": f"自动流程已完成：最高热度 Shorts 已处理，横屏合集收录 {collection_count} 条，跳过 {skipped} 条问题短片并发布 YouTube。",
-                }),
-            )
-        except Exception as collection_exc:
-            update_opennews_batch_job(
-                OPENNEWS_BATCH_DIR,
-                job_id,
-                lambda job: job.update({
-                    "collection_status": "failed",
-                    "collection_error": str(collection_exc),
-                    "collection_message": f"自动合集失败：{collection_exc}",
-                    "message": f"短片已完成 {completed} 条，但自动合集失败：{collection_exc}",
-                }),
-            )
-    elif completed:
+        _run_opennews_direct_collection_for_batch_job(job_id, reason=f"batch_job:{job_id}")
+    elif completed and not youtube_publish_disabled:
         _trigger_opennews_collection_auto_check(f"batch_job:{job_id}")
     if callback_url:
         latest_job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id) or final_job
@@ -7191,7 +8775,8 @@ async def external_opennews_health(request: Request):
         },
         "youtube": {
             "configured": bool(youtube_config.get("client_id") and youtube_config.get("client_secret") and (youtube_config.get("refresh_token") or YOUTUBE_TOKEN_STORE_PATH.exists())),
-            "default_auto_publish": True,
+            "auto_publish_disabled": os.getenv("OPENNEWS_YOUTUBE_AUTO_PUBLISH_DISABLED", "0").strip().lower() not in {"0", "false", "no", "off"},
+            "default_auto_publish": False,
             "default_privacy_status": "public",
             "default_aspects": ["horizontal", "vertical"],
         },
@@ -7287,9 +8872,11 @@ async def external_opennews_produce_selected(request: Request):
     callback_url = str(payload.get("callback_url") or "").strip()
     youtube_auto_publish = payload.get("youtube_auto_publish")
     if youtube_auto_publish is None:
-        youtube_auto_publish = True
+        youtube_auto_publish = False
     else:
         youtube_auto_publish = bool(youtube_auto_publish)
+    if os.getenv("OPENNEWS_YOUTUBE_AUTO_PUBLISH_DISABLED", "0").strip().lower() not in {"0", "false", "no", "off"}:
+        youtube_auto_publish = False
     youtube_aspects = payload.get("youtube_aspects") or ["horizontal", "vertical"]
     if isinstance(youtube_aspects, str):
         youtube_aspects = ["horizontal", "vertical"] if youtube_aspects == "both" else [part.strip() for part in youtube_aspects.split(",") if part.strip()]
@@ -7782,12 +9369,19 @@ def _create_opennews_material_task(
     department_id: str,
     voice_preset_id: str,
     aspect_ratio: str,
+    presenter_config: Optional[dict] = None,
 ) -> dict:
+    presenter_config = _normalize_opennews_presenter_config(presenter_config)
     target_market = str(target_market or user.get("target_market") or "cn").strip() or "cn"
     if target_market not in {item["id"] for item in TARGET_MARKETS}:
         target_market = "cn"
     department_id = str(department_id or user.get("department_id") or "real_estate").strip() or "real_estate"
-    voice_preset_id = str(voice_preset_id or _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female").strip()
+    voice_preset_id = str(
+        voice_preset_id
+        or presenter_config.get("voice_preset_id")
+        or _get_target_market(target_market).get("default_voice_preset_id")
+        or "mandarin_female"
+    ).strip()
     if voice_preset_id not in _get_visible_voice_preset_ids(target_market):
         voice_preset_id = _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female"
     voice_preset = _get_voice_preset(voice_preset_id, target_market)
@@ -7851,6 +9445,7 @@ def _create_opennews_material_task(
             "digital_human_engine": "opennews_material_only",
             "opennews": True,
             "opennews_material_only": True,
+            "opennews_presenter": presenter_config,
         },
         "cost_entries": [],
         "cost_summary": _empty_cost_summary(),
@@ -7882,6 +9477,7 @@ def _run_opennews_batch_produce_job(job_id: str, *, user: dict, public_base_url:
     voice_preset_id = str(options.get("voice_preset_id") or "")
     aspect_ratio = str(options.get("aspect_ratio") or "horizontal")
     notes = str(options.get("notes") or "")
+    presenter_config = _normalize_opennews_presenter_config(options.get("opennews_presenter"))
     set_job_status("running", "正在批量生成新闻稿并提交成片任务...")
     for index, item in enumerate(job.get("items") or []):
         item_id = str(item.get("batch_item_id") or "")
@@ -7908,6 +9504,7 @@ def _run_opennews_batch_produce_job(job_id: str, *, user: dict, public_base_url:
                 department_id=department_id,
                 voice_preset_id=voice_preset_id,
                 aspect_ratio=aspect_ratio,
+                presenter_config=presenter_config,
             )
             mark_item(
                 status="submitted",
@@ -9123,6 +10720,8 @@ async def review_material_library_item(
         )
     except FileNotFoundError:
         return JSONResponse({"error": "素材不存在"}, status_code=404)
+    if normalized_status == "approved":
+        _sync_material_item_to_vector_library_async(updated)
     return {"ok": True, "item": _material_library_item_payload(updated, user)}
 
 
@@ -9156,6 +10755,9 @@ async def review_material_library_items_batch(
     if category.strip():
         updates["category"] = category.strip()
     updated = batch_update_material_library_items(selected_ids, updates)
+    if normalized_action == "approved":
+        for item in updated:
+            _sync_material_item_to_vector_library_async(item)
     return {"ok": True, "updated_count": len(updated), "items": [_material_library_item_payload(item, user) for item in updated]}
 
 
@@ -9202,6 +10804,60 @@ async def create_material_harvest_job(
     )
     run_harvest_job_async(job["id"])
     return {"ok": True, "job": _harvest_job_payload(job)}
+
+
+@app.post("/api/material-library/harvest/hotspots")
+async def create_material_hotspot_harvest_jobs(
+    request: Request,
+    days: int = Form(7),
+    max_topics: int = Form(10),
+    per_topic: int = Form(8),
+):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以发起热点补库")
+    max_batches = max(3, min(int(days or 7) * 12, 120))
+    news_items: list[dict] = []
+    for batch in list_opennews_batches(OPENNEWS_BATCH_DIR, limit=max_batches):
+        for item in batch.get("items") or []:
+            if isinstance(item, dict):
+                news_items.append(item)
+    topics = suggest_hotspot_material_topics(news_items, limit=max(1, min(int(max_topics or 10), 20)))
+    created_jobs = []
+    for topic in topics:
+        job = create_harvest_job(
+            topic=str(topic.get("topic") or topic.get("name") or ""),
+            category=str(topic.get("category") or ""),
+            source_text="",
+            search_notes=str(topic.get("notes") or ""),
+            created_by_username=user.get("username", ""),
+            created_by_display_name=user.get("display_name", ""),
+        )
+        created_jobs.append(_harvest_job_payload(job))
+        run_harvest_job_and_import_pending_async(
+            job["id"],
+            uploader_username=user.get("username", ""),
+            uploader_display_name=user.get("display_name", ""),
+            max_import=max(1, min(int(per_topic or 8), 20)),
+        )
+    return {
+        "ok": True,
+        "topic_count": len(topics),
+        "news_item_count": len(news_items),
+        "topics": [
+            {
+                "id": topic.get("id", ""),
+                "name": topic.get("name", ""),
+                "category": topic.get("category", ""),
+                "topic": topic.get("topic", ""),
+            }
+            for topic in topics
+        ],
+        "jobs": created_jobs,
+        "message": f"已根据近期 {len(news_items)} 条新闻创建 {len(created_jobs)} 个热点补库采集任务，候选图会自动进入素材库待审核区。",
+    }
 
 
 @app.post("/api/material-library/harvest/candidates/{candidate_id}/import")
