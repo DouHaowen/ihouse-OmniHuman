@@ -4468,11 +4468,251 @@ def _opennews_material_review_status(result: dict, output_dir: Path | None = Non
     }
 
 
+def _opennews_publish_records_have_aspect(records: Any, aspect_ratio: str) -> bool:
+    aspect_key = str(aspect_ratio or "").strip().lower()
+    if not aspect_key:
+        return False
+    return any(
+        isinstance(record, dict) and str(record.get("aspect_ratio") or "").strip().lower() == aspect_key
+        for record in (records or [])
+    )
+
+
+def _load_opennews_history_result_for_publish(history_id: str) -> tuple[Path, dict]:
+    output_dir = _resolve_history_output_dir(history_id)
+    if not output_dir:
+        raise RuntimeError(f"历史记录不存在：{history_id}")
+    result = _load_result_from_output_dir(output_dir)
+    if not result or not _is_opennews_result(result):
+        raise RuntimeError(f"历史记录不是可发布的 OpenNews 成片：{history_id}")
+    return output_dir, result
+
+
+def _publish_opennews_collection_selected_items(
+    job_id: str,
+    *,
+    publish_top_shorts: bool = False,
+    publish_all_x: bool = False,
+    privacy_status: str = "public",
+) -> dict:
+    job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id)
+    if not job:
+        raise RuntimeError("合集任务不存在")
+    loaded_items: list[dict] = []
+    load_errors: list[dict] = []
+    for raw_item in (job.get("items") or []):
+        item = dict(raw_item or {})
+        history_id = str(item.get("history_id") or "").strip()
+        if not history_id:
+            continue
+        try:
+            output_dir, result = _load_opennews_history_result_for_publish(history_id)
+            source_article = ((result.get("workflow_config") or {}).get("source") or {}).get("article") or {}
+            if not item.get("trend_score"):
+                item["trend_score"] = source_article.get("trend_score") or 0
+            if not item.get("published_ts"):
+                item["published_ts"] = source_article.get("published_ts") or source_article.get("batch_fetched_at") or 0
+            loaded_items.append(
+                {
+                    "item": item,
+                    "output_dir": output_dir,
+                    "result": result,
+                }
+            )
+        except Exception as exc:
+            load_errors.append(
+                {
+                    "history_id": history_id,
+                    "title": str(item.get("title") or history_id),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+    loaded_items.sort(key=lambda entry: _opennews_batch_item_score(entry.get("item") or {}), reverse=True)
+    distribution_result: dict[str, Any] = {
+        "top_shorts": {},
+        "x_items": [],
+        "load_errors": load_errors,
+        "requested_at": time.time(),
+    }
+    if publish_top_shorts and loaded_items:
+        top_entry = loaded_items[0]
+        top_item = dict(top_entry.get("item") or {})
+        top_output_dir = Path(top_entry.get("output_dir") or "")
+        top_result = dict(top_entry.get("result") or {})
+        top_payload: dict[str, Any] = {
+            "history_id": str(top_item.get("history_id") or ""),
+            "title": str(top_item.get("title") or top_result.get("title") or "OpenNews 新闻"),
+            "trend_score": top_item.get("trend_score") or 0,
+        }
+        try:
+            if _opennews_publish_records_have_aspect(top_result.get("youtube_publish_records"), "vertical"):
+                top_payload.update(
+                    {
+                        "status": "skipped",
+                        "reason": "这条新闻的竖屏 Shorts 已发布过，本次跳过重复发布。",
+                    }
+                )
+            else:
+                records = _publish_opennews_result_to_youtube(
+                    top_output_dir,
+                    top_result,
+                    aspects=["vertical"],
+                    privacy_status=privacy_status,
+                )
+                top_payload.update(
+                    {
+                        "status": "published",
+                        "records": records,
+                        "youtube_urls": [
+                            record.get("youtube_url")
+                            for record in records
+                            if isinstance(record, dict) and record.get("youtube_url")
+                        ],
+                    }
+                )
+        except Exception as exc:
+            top_payload.update({"status": "failed", "error": str(exc)})
+        distribution_result["top_shorts"] = top_payload
+    elif publish_top_shorts:
+        distribution_result["top_shorts"] = {
+            "status": "failed",
+            "error": "未找到可用于 Shorts 的已成片新闻。",
+        }
+    if publish_all_x:
+        x_items: list[dict] = []
+        for entry in loaded_items:
+            item = dict(entry.get("item") or {})
+            output_dir = Path(entry.get("output_dir") or "")
+            result = dict(entry.get("result") or {})
+            payload: dict[str, Any] = {
+                "history_id": str(item.get("history_id") or ""),
+                "title": str(item.get("title") or result.get("title") or "OpenNews 新闻"),
+            }
+            try:
+                if _opennews_publish_records_have_aspect(result.get("x_publish_records"), "vertical"):
+                    payload.update(
+                        {
+                            "status": "skipped",
+                            "reason": "这条新闻已发布过 X，本次跳过重复发布。",
+                        }
+                    )
+                else:
+                    records = _publish_opennews_result_to_x(
+                        output_dir,
+                        result,
+                        aspects=["vertical"],
+                    )
+                    payload.update(
+                        {
+                            "status": "published",
+                            "records": records,
+                            "x_urls": [
+                                record.get("x_url")
+                                for record in records
+                                if isinstance(record, dict) and record.get("x_url")
+                            ],
+                        }
+                    )
+            except Exception as exc:
+                payload.update({"status": "failed", "error": str(exc)})
+            x_items.append(payload)
+        x_items.extend(load_errors)
+        distribution_result["x_items"] = x_items
+        distribution_result["x_summary"] = {
+            "published": sum(1 for item in x_items if item.get("status") == "published"),
+            "skipped": sum(1 for item in x_items if item.get("status") == "skipped"),
+            "failed": sum(1 for item in x_items if item.get("status") == "failed"),
+        }
+    update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, distribution_result=distribution_result)
+    return distribution_result
+
+
 def _run_opennews_collection_job(job_id: str) -> None:
     try:
+        job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id) or {}
+        distribution = dict(job.get("distribution") or {})
+        publish_collection_youtube = bool(distribution.get("publish_collection_youtube"))
+        publish_top_shorts = bool(distribution.get("publish_top_shorts"))
+        publish_all_x = bool(distribution.get("publish_all_x"))
+        privacy_status = str(distribution.get("privacy_status") or "public")
         _ensure_opennews_collection_ai_thumbnail(job_id)
         _attach_opennews_collection_intro(job_id, message_suffix="正在生成合集...")
         build_collection_video(OPENNEWS_COLLECTION_DIR, OUTPUT_DIR, job_id)
+        youtube_error = ""
+        if publish_collection_youtube:
+            try:
+                update_collection_job(
+                    OPENNEWS_COLLECTION_DIR,
+                    job_id,
+                    status="publishing_youtube",
+                    message="合集已生成，正在发布 YouTube...",
+                )
+                _publish_opennews_collection_to_youtube(job_id, privacy_status=privacy_status)
+            except Exception as exc:
+                youtube_error = str(exc)
+                update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, youtube_error=youtube_error)
+        distribution_result: dict[str, Any] = {}
+        distribution_failures: list[str] = []
+        if publish_top_shorts or publish_all_x:
+            try:
+                message = "合集已生成，正在同步单条分发..."
+                if publish_collection_youtube and not youtube_error:
+                    message = "合集已发布 YouTube，正在同步单条分发..."
+                update_collection_job(
+                    OPENNEWS_COLLECTION_DIR,
+                    job_id,
+                    status="publishing_distribution",
+                    message=message,
+                )
+                distribution_result = _publish_opennews_collection_selected_items(
+                    job_id,
+                    publish_top_shorts=publish_top_shorts,
+                    publish_all_x=publish_all_x,
+                    privacy_status=privacy_status,
+                )
+            except Exception as exc:
+                distribution_failures.append(str(exc))
+        if publish_top_shorts:
+            top_shorts = distribution_result.get("top_shorts") if isinstance(distribution_result, dict) else {}
+            if isinstance(top_shorts, dict) and top_shorts.get("status") == "failed" and top_shorts.get("error"):
+                distribution_failures.append(str(top_shorts.get("error")))
+        if publish_all_x:
+            x_items = distribution_result.get("x_items") if isinstance(distribution_result, dict) else []
+            if isinstance(x_items, list):
+                distribution_failures.extend(
+                    str(item.get("error"))
+                    for item in x_items
+                    if isinstance(item, dict) and item.get("status") == "failed" and item.get("error")
+                )
+        final_parts = ["合集视频已生成"]
+        if publish_collection_youtube:
+            final_parts.append("合集已发布 YouTube" if not youtube_error else f"合集 YouTube 发布失败：{youtube_error}")
+        if publish_top_shorts:
+            top_shorts = distribution_result.get("top_shorts") if isinstance(distribution_result, dict) else {}
+            if isinstance(top_shorts, dict):
+                status = str(top_shorts.get("status") or "")
+                if status == "published":
+                    final_parts.append("最热点 Shorts 已发布")
+                elif status == "skipped":
+                    final_parts.append(str(top_shorts.get("reason") or "最热点 Shorts 已跳过"))
+                elif status == "failed":
+                    final_parts.append(f"最热点 Shorts 发布失败：{top_shorts.get('error') or '未知错误'}")
+        if publish_all_x:
+            x_summary = distribution_result.get("x_summary") if isinstance(distribution_result, dict) else {}
+            if isinstance(x_summary, dict):
+                published = int(x_summary.get("published") or 0)
+                skipped = int(x_summary.get("skipped") or 0)
+                failed = int(x_summary.get("failed") or 0)
+                final_parts.append(f"单条 X：已发布 {published} 条，跳过 {skipped} 条，失败 {failed} 条")
+        final_error = "；".join([part for part in [youtube_error, *distribution_failures] if part])
+        update_collection_job(
+            OPENNEWS_COLLECTION_DIR,
+            job_id,
+            status="done",
+            message="；".join(part for part in final_parts if part),
+            error=final_error,
+        )
     except Exception as exc:
         update_collection_job(
             OPENNEWS_COLLECTION_DIR,
@@ -8514,6 +8754,13 @@ async def opennews_collections_build(request: Request):
         history_ids = [part.strip() for part in history_ids.split(",") if part.strip()]
     if not isinstance(history_ids, list) or not history_ids:
         return JSONResponse({"error": "请先选择要加入合集的成片视频。"}, status_code=400)
+    allow_reuse = _parse_bool_form(payload.get("allow_reuse")) if "allow_reuse" in payload else True
+    distribution = {
+        "publish_collection_youtube": _parse_bool_form(payload.get("publish_collection_youtube")) if "publish_collection_youtube" in payload else False,
+        "publish_top_shorts": _parse_bool_form(payload.get("publish_top_shorts")) if "publish_top_shorts" in payload else False,
+        "publish_all_x": _parse_bool_form(payload.get("publish_all_x")) if "publish_all_x" in payload else False,
+        "privacy_status": str(payload.get("privacy_status") or "public"),
+    }
     try:
         job = create_collection_job(
             OPENNEWS_COLLECTION_DIR,
@@ -8522,9 +8769,16 @@ async def opennews_collections_build(request: Request):
             aspect_ratio=str(payload.get("aspect_ratio") or "horizontal"),
             title=str(payload.get("title") or ""),
             username=str(user.get("username") or ""),
+            allow_reuse=allow_reuse,
         )
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    if any(bool(distribution.get(key)) for key in ("publish_collection_youtube", "publish_top_shorts", "publish_all_x")):
+        job = update_collection_job(
+            OPENNEWS_COLLECTION_DIR,
+            str(job.get("job_id") or ""),
+            distribution=distribution,
+        )
     thread = threading.Thread(target=_run_opennews_collection_job, args=(str(job.get("job_id") or ""),), daemon=True)
     thread.start()
     return {"job": _serialize_opennews_collection_job(job, request), "job_id": job.get("job_id")}

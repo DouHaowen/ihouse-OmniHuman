@@ -398,6 +398,14 @@ def list_collection_pool(root: Path, output_root: Path, *, limit: int = 80, incl
         if not _result_has_complete_material_assets(result, output_dir):
             continue
         source = ((result.get("workflow_config") or {}).get("source") or {}).get("article") or {}
+        try:
+            trend_score = float(source.get("trend_score") or 0)
+        except Exception:
+            trend_score = 0.0
+        try:
+            published_ts = float(source.get("published_ts") or source.get("batch_fetched_at") or 0)
+        except Exception:
+            published_ts = 0.0
         image_audit = audit_result_image_duplicates(result, output_dir)
         tts_providers = []
         for segment in result.get("segments") or []:
@@ -417,6 +425,8 @@ def list_collection_pool(root: Path, output_root: Path, *, limit: int = 80, incl
                 "source_name": source.get("source_name") or "",
                 "source_url": source.get("url") or "",
                 "published_at": source.get("published_at") or "",
+                "trend_score": trend_score,
+                "published_ts": published_ts,
                 "horizontal_path": str(horizontal) if horizontal else "",
                 "vertical_path": str(vertical) if vertical else "",
                 "used_in_collection": used.get(history_id) or "",
@@ -429,9 +439,21 @@ def list_collection_pool(root: Path, output_root: Path, *, limit: int = 80, incl
     return items
 
 
-def create_collection_job(root: Path, output_root: Path, *, history_ids: list[str], aspect_ratio: str = "horizontal", title: str = "", username: str = "") -> dict:
+def create_collection_job(
+    root: Path,
+    output_root: Path,
+    *,
+    history_ids: list[str],
+    aspect_ratio: str = "horizontal",
+    title: str = "",
+    username: str = "",
+    allow_reuse: bool = False,
+) -> dict:
     _ensure_root(root)
-    pool = {item["history_id"]: item for item in list_collection_pool(root, output_root, limit=300, include_used=False)}
+    pool = {
+        item["history_id"]: item
+        for item in list_collection_pool(root, output_root, limit=300, include_used=allow_reuse)
+    }
     selected = []
     missing = []
     for history_id in history_ids:
@@ -456,6 +478,7 @@ def create_collection_job(root: Path, output_root: Path, *, history_ids: list[st
         "created_at": time.time(),
         "updated_at": time.time(),
         "username": username,
+        "allow_reuse": bool(allow_reuse),
         "aspect_ratio": aspect_ratio,
         "title": title or f"OpenNews 新闻合集 {time.strftime('%Y-%m-%d')}",
         "items": selected,
