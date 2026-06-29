@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus, urljoin, urlparse
 import requests
 from dotenv import load_dotenv
-from PIL import Image, ImageStat
+from PIL import Image, ImageDraw, ImageFont, ImageStat
 from material_library import (
     MATERIAL_LIBRARY_DIR,
     copy_material_to_output,
@@ -71,6 +71,14 @@ OPENNEWS_PEXELS_STRICT_MATCH_ENABLED = (
 OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE = max(
     8,
     min(80, int(os.getenv("OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE", "28") or "28")),
+)
+OPENNEWS_PEXELS_EXACT_ENTITY_REQUIRED = (
+    os.getenv("OPENNEWS_PEXELS_EXACT_ENTITY_REQUIRED", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_NEWS_CARD_FALLBACK_ENABLED = (
+    os.getenv("OPENNEWS_NEWS_CARD_FALLBACK_ENABLED", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
 )
 OPENNEWS_PEXELS_BATCH_REGISTRY_DIR = os.getenv(
     "OPENNEWS_PEXELS_BATCH_REGISTRY_DIR",
@@ -1149,6 +1157,13 @@ OPENNEWS_ENTITY_DISPLAY_TERMS = {
     "white_house": ["White House", "白宫"],
     "fed_powell": ["Federal Reserve", "Jerome Powell", "Alan Greenspan", "美联储"],
     "iran_israel": ["Iran", "Israel", "Hormuz", "伊朗", "以色列"],
+}
+
+OPENNEWS_PEXELS_HARD_ENTITY_GROUPS = {
+    "openai", "anthropic", "google", "microsoft", "meta", "deepseek", "copilot",
+    "nvidia_huang", "xai_grok", "amazon_aws", "apple", "tesla_spacex",
+    "qualcomm", "broadcom", "marvell", "oracle", "smartphone",
+    "trump", "white_house", "fed_powell", "iran_israel",
 }
 
 
@@ -2629,6 +2644,174 @@ def _opennews_focus_event_terms(relevance_tokens: set[str], visual_domain: str) 
     return terms[:4]
 
 
+def _opennews_pexels_requires_exact_entity(seg: dict, relevance_tokens: set[str], visual_domain: str) -> bool:
+    if not OPENNEWS_PEXELS_EXACT_ENTITY_REQUIRED:
+        return False
+    query_entities = _opennews_primary_named_entities(seg) | _opennews_query_named_entities(seg, relevance_tokens)
+    hard_entities = query_entities & OPENNEWS_PEXELS_HARD_ENTITY_GROUPS
+    if not hard_entities:
+        return False
+    if visual_domain in {"finance", "politics", "military"}:
+        return True
+    if hard_entities & (
+        OPENNEWS_AI_COMPANY_ENTITY_GROUPS | {"trump", "white_house", "fed_powell", "iran_israel"}
+    ):
+        return True
+    return False
+
+
+def _opennews_pexels_query_candidates(seg: dict, relevance_tokens: set[str], visual_domain: str) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    query_entities = _opennews_primary_named_entities(seg) | _opennews_query_named_entities(seg, relevance_tokens)
+    focus_entities = [entity for entity in query_entities if entity in OPENNEWS_ENTITY_DISPLAY_TERMS]
+    event_terms = _opennews_focus_event_terms(relevance_tokens, visual_domain)
+    raw_keyword = str(seg.get("material_search_keyword") or seg.get("material_keyword") or "").strip()
+
+    def add(query: str, *, tier: str, exact_entity: bool = False, exact_scene: bool = False) -> None:
+        clean = re.sub(r"\s+", " ", str(query or "")).strip()
+        key = clean.lower()
+        if not clean or key in seen:
+            return
+        seen.add(key)
+        candidates.append({
+            "query": clean,
+            "tier": tier,
+            "exact_entity": bool(exact_entity),
+            "exact_scene": bool(exact_scene),
+        })
+
+    for entity in focus_entities:
+        display_terms = OPENNEWS_ENTITY_DISPLAY_TERMS.get(entity) or [entity.replace("_", " ")]
+        for term in display_terms[:3]:
+            base = re.sub(r"\s+", " ", str(term or "")).strip()
+            if not base:
+                continue
+            add(base, tier="entity", exact_entity=True)
+            if visual_domain == "finance":
+                add(f"{base} stock market", tier="entity_context", exact_entity=True, exact_scene=True)
+                add(f"{base} earnings trading screen", tier="entity_context", exact_entity=True, exact_scene=True)
+            elif visual_domain == "technology":
+                add(f"{base} data center", tier="entity_context", exact_entity=True, exact_scene=True)
+                add(f"{base} semiconductor chip", tier="entity_context", exact_entity=True, exact_scene=True)
+                add(f"{base} software product", tier="entity_context", exact_entity=True, exact_scene=True)
+            elif visual_domain == "politics":
+                add(f"{base} press briefing", tier="entity_context", exact_entity=True, exact_scene=True)
+                add(f"{base} government building", tier="entity_context", exact_entity=True, exact_scene=True)
+            elif visual_domain == "military":
+                add(f"{base} military conflict", tier="entity_context", exact_entity=True, exact_scene=True)
+            elif visual_domain == "cybersecurity":
+                add(f"{base} cybersecurity", tier="entity_context", exact_entity=True, exact_scene=True)
+
+    for term in event_terms:
+        add(term, tier="scene", exact_scene=True)
+
+    for query in _opennews_theme_queries(seg):
+        query_lower = query.lower()
+        if any(noisy in query_lower for noisy in ("news photo", "official image", "related article image")):
+            query = re.sub(r"\b(news photo|official image|related article image)\b", " ", query, flags=re.I)
+        add(query, tier="theme", exact_scene=True)
+
+    if raw_keyword:
+        add(raw_keyword, tier="keyword", exact_scene=not bool(focus_entities))
+
+    return candidates[:12]
+
+
+def _opennews_card_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    candidates = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc" if bold else "/System/Library/Fonts/STHeiti Light.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            try:
+                return ImageFont.truetype(candidate, size=size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _opennews_card_wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int, max_lines: int) -> list[str]:
+    source = re.sub(r"\s+", " ", str(text or "").strip())
+    if not source:
+        return []
+    lines: list[str] = []
+    current = ""
+    for char in source:
+        trial = current + char
+        bbox = draw.textbbox((0, 0), trial, font=font)
+        if bbox[2] - bbox[0] <= max_width:
+            current = trial
+            continue
+        if current:
+            lines.append(current)
+        current = char
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if len(lines) == max_lines and "".join(lines) != source:
+        lines[-1] = lines[-1].rstrip("，。,. ") + "..."
+    return lines
+
+
+def _opennews_generate_verified_news_card(seg: dict, output_dir: str, segment_index: int, item_index: int, *, visual_domain: str) -> str:
+    title = str(seg.get("material_keyword") or seg.get("title_zh") or seg.get("title") or "OpenNews 新闻").strip() or "OpenNews 新闻"
+    summary = re.sub(r"\s+", " ", str(seg.get("script") or seg.get("material_desc") or "").strip())
+    if len(summary) > 140:
+        summary = summary[:140].rstrip("，。,. ") + "..."
+    category = _opennews_category_from_domain(visual_domain)
+    size = (1600, 900)
+    bg_map = {
+        "科技": ("#0B1020", "#2563EB", "#BFDBFE"),
+        "AI": ("#071827", "#0E7490", "#A5F3FC"),
+        "金融": ("#111827", "#B45309", "#FCD34D"),
+        "政治": ("#111827", "#1D4ED8", "#BFDBFE"),
+        "军事": ("#101513", "#166534", "#86EFAC"),
+        "房产": ("#102018", "#047857", "#6EE7B7"),
+        "移民": ("#1E1B4B", "#7C3AED", "#C4B5FD"),
+    }
+    bg, primary, accent = bg_map.get(category, ("#111827", "#0F766E", "#99F6E4"))
+    card = Image.new("RGB", size, bg)
+    draw = ImageDraw.Draw(card)
+    width, height = size
+    for i in range(7):
+        x0 = int(width * (0.6 + i * 0.05))
+        draw.line((x0, -50, x0 - int(width * 0.23), height + 50), fill=primary, width=2)
+    panel = (90, 90, width - 90, height - 90)
+    draw.rounded_rectangle(panel, radius=36, fill="#FFFFFF", outline=accent, width=3)
+    tag_font = _opennews_card_font(32, bold=True)
+    title_font = _opennews_card_font(62, bold=True)
+    body_font = _opennews_card_font(32, bold=False)
+    foot_font = _opennews_card_font(26, bold=False)
+    x = 150
+    y = 150
+    pill = f"{category} | OpenNews"
+    pill_box = draw.textbbox((0, 0), pill, font=tag_font)
+    draw.rounded_rectangle((x, y, x + pill_box[2] + 44, y + 56), radius=26, fill=primary)
+    draw.text((x + 22, y + 10), pill, font=tag_font, fill="#FFFFFF")
+    y += 100
+    for line in _opennews_card_wrap_text(draw, title, title_font, width - 300, 3):
+        draw.text((x, y), line, font=title_font, fill="#111827")
+        y += 82
+    if summary:
+        y += 18
+        for line in _opennews_card_wrap_text(draw, summary, body_font, width - 300, 4):
+            draw.text((x, y), line, font=body_font, fill="#334155")
+            y += 48
+    footer = "准确新闻图卡 | 按新闻标题与文案生成，避免跑题素材"
+    draw.line((x, height - 180, width - 150, height - 180), fill="#CBD5E1", width=2)
+    draw.text((x, height - 145), footer, font=foot_font, fill="#64748B")
+    output_path = os.path.join(output_dir, "materials", f"material_{segment_index:02d}_news_card_{item_index:02d}.jpg")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    card.save(output_path, "JPEG", quality=94, optimize=True)
+    return output_path
+
+
 def _opennews_vector_entity_constraints(seg: dict, relevance_tokens: set[str], visual_domain: str) -> tuple[list[str], list[str]]:
     query_entities = _opennews_query_named_entities(seg, relevance_tokens)
     primary_entities = _opennews_primary_named_entities(seg)
@@ -3642,6 +3825,8 @@ def _opennews_pexels_candidate_decision(
     visual_domain: str,
     query: str,
     score: int,
+    exact_entity_required: bool = False,
+    exact_scene_required: bool = False,
 ) -> tuple[bool, str, int]:
     if not OPENNEWS_PEXELS_STRICT_MATCH_ENABLED:
         return True, "Pexels 严格相关性二审已关闭", score
@@ -3680,6 +3865,12 @@ def _opennews_pexels_candidate_decision(
             "Pexels 图片实体与新闻实体不一致："
             f"news={', '.join(sorted(query_entities))}; image={', '.join(sorted(item_entities))}"
         ), score - 100
+    if exact_entity_required and query_entities:
+        if not entity_overlap:
+            return False, (
+                "Pexels 强实体新闻必须命中主角实体："
+                f"news={', '.join(sorted(query_entities))}; image={', '.join(sorted(item_entities)) or 'none'}"
+            ), score - 140
 
     concrete_hit = bool(entity_overlap or phrase_hits or len(overlap) >= 2 or domain_hits or has_scene or event_hits)
     if strong_entities and not entity_overlap:
@@ -3697,6 +3888,8 @@ def _opennews_pexels_candidate_decision(
         return False, "Pexels 网络安全图片缺少安全、黑客、认证或网络语义", score - 90
     if visual_domain == "technology" and not (domain_hits or has_scene or event_hits or entity_overlap or phrase_hits):
         return False, "Pexels 科技新闻图片缺少 AI、芯片、软件、智能眼镜或同类技术语义", score - 80
+    if exact_scene_required and not (has_scene or event_hits or phrase_hits or len(overlap) >= 2 or entity_overlap):
+        return False, "Pexels 图片没有命中新闻要求的具体场景", score - 90
     if not concrete_hit:
         return False, "Pexels 图片只命中泛搜索词，未命中文案核心对象或具体场景", score - 70
 
@@ -3729,26 +3922,16 @@ def _append_opennews_free_material_items(
     visual_domain = _opennews_visual_domain(seg, relevance_tokens) if relevance_tokens else "general"
     ranked_candidates: list[tuple[int, dict]] = []
     seen_urls: set[str] = set()
-    candidate_queries: list[str] = []
+    query_candidates = _opennews_pexels_query_candidates(seg, relevance_tokens, visual_domain)
+    exact_entity_required = _opennews_pexels_requires_exact_entity(seg, relevance_tokens, visual_domain)
+    if not query_candidates:
+        fallback_query = str(seg.get("material_search_keyword") or seg.get("material_keyword") or "news").strip() or "news"
+        query_candidates = [{"query": fallback_query, "tier": "fallback", "exact_entity": exact_entity_required, "exact_scene": True}]
 
-    def add_candidate_query(value: str) -> None:
-        query = re.sub(r"\s+", " ", str(value or "")).strip()
-        if query and query.lower() not in {item.lower() for item in candidate_queries}:
-            candidate_queries.append(query)
-
-    for anchor in _opennews_anchor_queries(seg, relevance_tokens, visual_domain):
-        if not isinstance(anchor, dict):
+    for query_row in query_candidates[:10]:
+        query = str(query_row.get("query") or "").strip()
+        if not query:
             continue
-        for query in anchor.get("queries") or []:
-            add_candidate_query(query)
-    for query in _opennews_theme_queries(seg):
-        add_candidate_query(query)
-    keyword = str(seg.get("material_search_keyword") or seg.get("material_keyword") or "").strip()
-    add_candidate_query(keyword)
-    if not candidate_queries:
-        candidate_queries = [str(seg.get("material_keyword") or "news").strip() or "news"]
-
-    for query in candidate_queries[:10]:
         try:
             photos = search_photos(query, count=6)
         except Exception as exc:
@@ -3775,6 +3958,8 @@ def _append_opennews_free_material_items(
                 visual_domain=visual_domain,
                 query=query,
                 score=score,
+                exact_entity_required=bool(query_row.get("exact_entity")) or exact_entity_required,
+                exact_scene_required=bool(query_row.get("exact_scene")),
             )
             if not keep:
                 rejection_log.append({
@@ -3783,9 +3968,11 @@ def _append_opennews_free_material_items(
                     "alt": str(candidate.get("alt") or ""),
                     "score": int(score),
                     "reason": reason,
+                    "tier": str(query_row.get("tier") or ""),
                 })
                 continue
             candidate["pexels_relevance_reason"] = reason
+            candidate["pexels_query_tier"] = str(query_row.get("tier") or "")
             ranked_candidates.append((score, candidate))
 
     ranked_candidates.sort(key=lambda item: item[0], reverse=True)
@@ -3864,8 +4051,30 @@ def _append_opennews_free_material_items(
             "alt": str(item.get("alt") or ""),
             "score": int(score),
             "reason": str(item.get("pexels_relevance_reason") or ""),
+            "tier": str(item.get("pexels_query_tier") or ""),
         })
         print(f"  ✅ 已命中免费素材库：{os.path.basename(output_path)}｜{item.get('related_query') or item.get('alt') or ''}")
+
+    if image_count == current_image_count and OPENNEWS_NEWS_CARD_FALLBACK_ENABLED and image_count < max_source_images and len(material_items) < max_total_materials:
+        try:
+            card_path = _opennews_generate_verified_news_card(seg, output_dir, segment_index, len(material_items), visual_domain=visual_domain)
+            entry = _material_entry(card_path, kind="image", source="opennews_news_card")
+            entry["title"] = str(seg.get("material_keyword") or seg.get("title_zh") or seg.get("title") or "OpenNews 新闻")
+            entry["pexels_relevance_reason"] = "免费图库严格匹配不足，已回退准确新闻图卡"
+            material_items.append(entry)
+            material_paths.append(card_path)
+            image_count += 1
+            selected_debug.append({
+                "url": "",
+                "query": "",
+                "alt": entry["title"],
+                "score": 999,
+                "reason": "generated_verified_news_card",
+                "tier": "news_card_fallback",
+            })
+            print(f"  ✅ 免费素材严格匹配未命中，已生成准确新闻图卡：{os.path.basename(card_path)}")
+        except Exception as exc:
+            rejection_log.append({"query": "", "reason": f"准确新闻图卡生成失败：{exc}"})
 
     return image_count, rejection_log, selected_debug
 

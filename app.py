@@ -5032,7 +5032,7 @@ def _opennews_collection_thumbnail_models() -> list[str]:
 
 
 def _opennews_collection_thumbnail_providers() -> list[str]:
-    raw = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_IMAGE_PROVIDERS", "kuaigou")
+    raw = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_IMAGE_PROVIDERS", "kuaigou,relay,openai")
     providers = [part.strip().lower() for part in raw.split(",") if part.strip()]
     return [provider for provider in providers if provider in {"kuaigou", "relay", "openai"}] or ["kuaigou"]
 
@@ -5236,10 +5236,9 @@ def _existing_opennews_collection_ai_thumbnail_path(job: dict, result: dict) -> 
             raw = str(payload.get(key) or "").strip()
             if raw:
                 candidates.append(raw)
-        if str(payload.get("thumbnail_source") or "").strip().lower() == "ai":
-            raw = str(payload.get("thumbnail_path") or "").strip()
-            if raw:
-                candidates.append(raw)
+        raw_thumbnail = str(payload.get("thumbnail_path") or "").strip()
+        if raw_thumbnail:
+            candidates.append(raw_thumbnail)
         for candidate in candidates:
             path = Path(candidate)
             paths = [path] if path.is_absolute() else []
@@ -5471,7 +5470,30 @@ def _ensure_opennews_collection_ai_thumbnail(job_id: str) -> Path | None:
     thumbnail_path = _generate_opennews_collection_thumbnail(job, result)
     if thumbnail_path:
         return Path(str(thumbnail_path))
-    error = "AI 封面尚未生成成功，已停止合集生成和 YouTube 发布。"
+    fallback_thumbnail = None
+    original_flag = os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_REQUIRE_AI", "1")
+    try:
+        os.environ["OPENNEWS_COLLECTION_THUMBNAIL_REQUIRE_AI"] = "0"
+        fallback_thumbnail = _generate_opennews_collection_thumbnail(job, result)
+    except Exception:
+        fallback_thumbnail = None
+    finally:
+        os.environ["OPENNEWS_COLLECTION_THUMBNAIL_REQUIRE_AI"] = original_flag
+    if fallback_thumbnail:
+        fallback_text = "AI 封面生成失败，已自动回退本地封面，继续合集生成和发布。"
+        result["thumbnail_path"] = str(fallback_thumbnail)
+        result["thumbnail_source"] = "fallback_local"
+        update_collection_job(
+            OPENNEWS_COLLECTION_DIR,
+            job_id,
+            message=fallback_text,
+            thumbnail_path=str(fallback_thumbnail),
+            thumbnail_source="fallback_local",
+            result=result,
+            error="",
+        )
+        return Path(str(fallback_thumbnail))
+    error = "AI 封面尚未生成成功，且本地封面回退失败，已停止合集生成和 YouTube 发布。"
     update_collection_job(
         OPENNEWS_COLLECTION_DIR,
         job_id,
