@@ -5225,6 +5225,23 @@ def _opennews_collection_ai_thumbnail_required() -> bool:
     return os.getenv("OPENNEWS_COLLECTION_THUMBNAIL_REQUIRE_AI", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _set_opennews_collection_thumbnail_warning(job_id: str, result: dict, warning: str, *, source: str = "") -> None:
+    warning_text = str(warning or "").strip()
+    if not job_id:
+        return
+    if warning_text:
+        result["thumbnail_warning"] = warning_text
+    if source:
+        result["thumbnail_source"] = source
+    update_collection_job(
+        OPENNEWS_COLLECTION_DIR,
+        job_id,
+        thumbnail_warning=warning_text,
+        thumbnail_source=source or result.get("thumbnail_source", ""),
+        result=result,
+    )
+
+
 def _existing_opennews_collection_ai_thumbnail_path(job: dict, result: dict) -> Path | None:
     job_id = str((job or {}).get("job_id") or (result or {}).get("job_id") or "").strip()
     collection_dir = OPENNEWS_COLLECTION_DIR / "collections" / job_id if job_id else None
@@ -5272,6 +5289,7 @@ def _remember_opennews_collection_ai_thumbnail(job: dict, result: dict, thumbnai
     result["ai_thumbnail_path"] = thumbnail_text
     result["thumbnail_source"] = "ai"
     result["thumbnail_generated_at"] = now
+    result["thumbnail_warning"] = ""
     update_collection_job(
         OPENNEWS_COLLECTION_DIR,
         job_id,
@@ -5279,6 +5297,7 @@ def _remember_opennews_collection_ai_thumbnail(job: dict, result: dict, thumbnai
         ai_thumbnail_path=thumbnail_text,
         thumbnail_source="ai",
         thumbnail_generated_at=now,
+        thumbnail_warning="",
         result=result,
     )
 
@@ -5457,8 +5476,6 @@ def _generate_opennews_collection_thumbnail(job: dict, result: dict) -> Path | N
 
 
 def _ensure_opennews_collection_ai_thumbnail(job_id: str) -> Path | None:
-    if not _opennews_collection_ai_thumbnail_required():
-        return None
     job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id)
     if not job:
         raise RuntimeError("合集任务不存在，无法生成 AI 封面。")
@@ -5466,7 +5483,9 @@ def _ensure_opennews_collection_ai_thumbnail(job_id: str) -> Path | None:
     existing = _existing_opennews_collection_ai_thumbnail_path(job, result)
     if existing:
         return existing
-    update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, message="正在生成 AI 封面，封面成功后才会制作合集...")
+    require_ai_thumbnail = _opennews_collection_ai_thumbnail_required()
+    if require_ai_thumbnail:
+        update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, message="正在生成 AI 封面，封面成功后继续制作合集...")
     thumbnail_path = _generate_opennews_collection_thumbnail(job, result)
     if thumbnail_path:
         return Path(str(thumbnail_path))
@@ -5483,25 +5502,25 @@ def _ensure_opennews_collection_ai_thumbnail(job_id: str) -> Path | None:
         fallback_text = "AI 封面生成失败，已自动回退本地封面，继续合集生成和发布。"
         result["thumbnail_path"] = str(fallback_thumbnail)
         result["thumbnail_source"] = "fallback_local"
+        result["thumbnail_warning"] = fallback_text
         update_collection_job(
             OPENNEWS_COLLECTION_DIR,
             job_id,
             message=fallback_text,
             thumbnail_path=str(fallback_thumbnail),
             thumbnail_source="fallback_local",
+            thumbnail_warning=fallback_text,
             result=result,
             error="",
         )
         return Path(str(fallback_thumbnail))
-    error = "AI 封面尚未生成成功，且本地封面回退失败，已停止合集生成和 YouTube 发布。"
-    update_collection_job(
-        OPENNEWS_COLLECTION_DIR,
-        job_id,
-        status="failed",
-        message=error,
-        error=error,
+    warning = (
+        "AI 封面尚未生成成功，且本地封面回退失败；本次将继续生成合集与发布，但不附带合集封面。"
+        if require_ai_thumbnail
+        else "合集封面未生成成功；本次将继续生成合集与发布。"
     )
-    raise RuntimeError(error)
+    _set_opennews_collection_thumbnail_warning(job_id, result, warning, source="missing")
+    return None
 
 
 def _prepend_opennews_collection_cover_frame(
@@ -5915,10 +5934,7 @@ def _publish_opennews_collection_to_youtube(job_id: str, *, privacy_status: str 
     aspect_ratio = str(result.get("aspect_ratio") or job.get("aspect_ratio") or "")
     title = _short_opennews_collection_title(items)
     description = _opennews_collection_description(items, aspect_ratio)
-    require_ai_thumbnail = _opennews_collection_ai_thumbnail_required()
-    thumbnail_path = _ensure_opennews_collection_ai_thumbnail(job_id) if require_ai_thumbnail else _generate_opennews_collection_thumbnail(job, result)
-    if require_ai_thumbnail and not thumbnail_path:
-        raise YouTubePublishError("gpt-image-2 封面尚未生成成功，已停止发布 YouTube。")
+    thumbnail_path = _ensure_opennews_collection_ai_thumbnail(job_id)
     if thumbnail_path:
         video_path = _prepend_opennews_collection_cover_frame(
             job_id=job_id,
@@ -5928,10 +5944,10 @@ def _publish_opennews_collection_to_youtube(job_id: str, *, privacy_status: str 
         )
     cooldown_message = _youtube_thumbnail_cooldown_message()
     thumbnail_path_for_upload = thumbnail_path
-    if require_ai_thumbnail and cooldown_message:
+    if thumbnail_path and cooldown_message:
         print(f"[OpenNews thumbnail] {cooldown_message} 已将封面写入合集首帧，本次跳过封面接口上传。", flush=True)
         thumbnail_path_for_upload = None
-    elif cooldown_message:
+    elif cooldown_message and thumbnail_path_for_upload:
         print(f"[OpenNews thumbnail] {cooldown_message} 本次跳过封面接口上传。", flush=True)
         thumbnail_path_for_upload = None
     upload_result = upload_video_to_youtube(
@@ -5997,10 +6013,7 @@ def _publish_opennews_collection_to_x(job_id: str) -> dict:
         raise XPublishError("合集成片尚未生成完成，不能发布 X")
     items = list(result.get("items") or job.get("items") or [])
     aspect_ratio = str(result.get("aspect_ratio") or job.get("aspect_ratio") or "")
-    require_ai_thumbnail = _opennews_collection_ai_thumbnail_required()
-    thumbnail_path = _ensure_opennews_collection_ai_thumbnail(job_id) if require_ai_thumbnail else _generate_opennews_collection_thumbnail(job, result)
-    if require_ai_thumbnail and not thumbnail_path:
-        raise XPublishError("gpt-image-2 封面尚未生成成功，已停止发布 X。")
+    thumbnail_path = _ensure_opennews_collection_ai_thumbnail(job_id)
     if thumbnail_path:
         video_path = _prepend_opennews_collection_cover_frame(
             job_id=job_id,
