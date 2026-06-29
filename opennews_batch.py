@@ -265,11 +265,22 @@ def load_batch_config(root: Path) -> dict:
 
 def save_batch_config(root: Path, config: dict) -> dict:
     _ensure_root(root)
-    current = load_batch_config(root)
+    previous = load_batch_config(root)
+    current = dict(previous)
     current.update(config or {})
     clean = _normalize_config(current)
     now = time.time()
-    if clean.get("enabled") and not clean.get("next_run_at"):
+    was_enabled = bool(previous.get("enabled"))
+    schedule_changed = any(
+        clean.get(key) != previous.get(key)
+        for key in ("interval_minutes", "category", "time_range", "limit")
+    )
+    if clean.get("enabled") and (not was_enabled or schedule_changed):
+        # When an admin enables or retunes the scheduler from the UI, run a
+        # fresh fetch immediately instead of making them wait for the next
+        # 2-hour window.
+        clean["next_run_at"] = now
+    elif clean.get("enabled") and not clean.get("next_run_at"):
         clean["next_run_at"] = now + clean["interval_minutes"] * 60
     if not clean.get("enabled"):
         clean["next_run_at"] = 0

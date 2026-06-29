@@ -405,7 +405,7 @@
 
     .status.done, .status.completed { background: var(--soft); color: var(--brand); }
     .status.failed, .status.error { background: var(--soft-red); color: #be123c; }
-    .status.running, .status.partial, .status.publishing_youtube { background: #fff7ed; color: #9a3412; }
+    .status.running, .status.partial, .status.publishing_youtube, .status.publishing_x { background: #fff7ed; color: #9a3412; }
 
     .news-item {
       display: grid;
@@ -1210,7 +1210,7 @@
             <div>
               <div class="hero-label">OpenNews</div>
               <h2>新闻视频自动化</h2>
-              <p>后台按规则抓取热点、制作 Shorts 和合集视频，并自动发布到 YouTube。</p>
+              <p>后台按规则抓取热点、制作 Shorts 和合集视频，并自动发布到 YouTube / X。</p>
             </div>
             <div class="quick-stats">
               <div class="stat"><strong>2h</strong><span>自动批次</span></div>
@@ -1399,6 +1399,10 @@
           <input type="checkbox" id="youtubeAuto" checked>
         </label>
         <label class="switch-row">
+          <div>自动发布 X<br><span>需要先完成 X OAuth 授权</span></div>
+          <input type="checkbox" id="xAuto">
+        </label>
+        <label class="switch-row">
           <div>生成横屏<br><span>适合 YouTube 正片</span></div>
           <input type="checkbox" id="makeHorizontal" checked>
         </label>
@@ -1501,7 +1505,7 @@
           });
         });
       });
-      ["youtubeAuto", "makeHorizontal", "makeVertical"].forEach((id) => {
+      ["youtubeAuto", "xAuto", "makeHorizontal", "makeVertical"].forEach((id) => {
         document.querySelectorAll(`#${id}`).forEach((el) => {
           el.addEventListener("change", () => {
             document.querySelectorAll(`#${id}`).forEach((peer) => {
@@ -1793,7 +1797,10 @@
       const aspects = [];
       if (readSetting("makeHorizontal")) aspects.push("横屏");
       if (readSetting("makeVertical")) aspects.push("竖屏");
-      const publish = readSetting("youtubeAuto") ? "自动发布" : "不发布";
+      const publishTargets = [];
+      if (readSetting("youtubeAuto")) publishTargets.push("YouTube");
+      if (readSetting("xAuto")) publishTargets.push("X");
+      const publish = publishTargets.length ? `自动发布 ${publishTargets.join("/")}` : "不发布";
       const summary = `${marketLabel} · ${aspects.join("+") || "仅主画幅"} · ${publish}`;
       $("settingMini").textContent = summary;
     }
@@ -1907,11 +1914,12 @@
       if (item.horizontal_url) links.push(`<button class="link-btn" data-download-url="${escapeHtml(item.horizontal_url)}" data-name="${escapeHtml(item.title || "horizontal")}_horizontal.mp4">下载横屏</button>`);
       if (item.vertical_url) links.push(`<button class="link-btn" data-download-url="${escapeHtml(item.vertical_url)}" data-name="${escapeHtml(item.title || "vertical")}_vertical.mp4">下载竖屏</button>`);
       (item.youtube_urls || []).forEach((url, index) => links.push(`<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`));
+      (item.x_urls || []).forEach((url, index) => links.push(`<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">X ${index + 1}</a>`));
       const dotClass = item.status === "completed" ? "done" : item.status === "failed" ? "failed" : "running";
       return `
         <div class="progress-item">
           <span class="dot ${dotClass}"></span>
-          <span><strong>${escapeHtml(item.title || "新闻")}</strong><br>${escapeHtml(item.status || "")}${item.youtube_error ? ` · ${escapeHtml(item.youtube_error)}` : ""}</span>
+          <span><strong>${escapeHtml(item.title || "新闻")}</strong><br>${escapeHtml(item.status || "")}${item.youtube_error ? ` · ${escapeHtml(item.youtube_error)}` : ""}${item.x_error ? ` · ${escapeHtml(item.x_error)}` : ""}</span>
         </div>
         <div class="links">${links.join("")}</div>
       `;
@@ -1961,6 +1969,7 @@
       }
       $("videoList").innerHTML = state.videos.map((video) => {
         const youtubeLinks = (video.youtube_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`);
+        const xLinks = (video.x_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">X ${index + 1}</a>`);
         return `
           <article class="video">
             <div class="video-head">
@@ -1975,6 +1984,7 @@
               ${video.horizontal_url ? `<button class="link-btn" data-download-url="${escapeHtml(video.horizontal_url)}" data-name="${escapeHtml(video.title || "opennews")}_horizontal.mp4">下载横屏</button>` : ""}
               ${video.vertical_url ? `<button class="link-btn" data-download-url="${escapeHtml(video.vertical_url)}" data-name="${escapeHtml(video.title || "opennews")}_vertical.mp4">下载竖屏</button>` : ""}
               ${youtubeLinks.join("")}
+              ${xLinks.join("")}
             </div>
           </article>
         `;
@@ -2033,6 +2043,8 @@
             notes: readSetting("notes") || "",
             youtube_auto_publish: readSetting("youtubeAuto"),
             youtube_aspects: youtubeAspects.length ? youtubeAspects : ["horizontal", "vertical"],
+            x_auto_publish: readSetting("xAuto"),
+            x_aspects: ["vertical"],
           }),
         });
         toast(data.message || "任务已提交");
@@ -2294,6 +2306,7 @@
               ${item.message ? `<br>说明：${escapeHtml(item.message)}` : ""}
               ${item.error ? `<br>错误：${escapeHtml(item.error)}` : ""}
               ${item.youtube_error ? `<br>YouTube：${escapeHtml(item.youtube_error)}` : ""}
+              ${item.x_error ? `<br>X：${escapeHtml(item.x_error)}` : ""}
             </div>
             <div class="links">
               ${item.horizontal_url ? `<button class="link-btn" data-preview-url="${escapeHtml(item.horizontal_url)}" data-preview-title="${escapeHtml(item.title || "OpenNews 成片")}">预览横屏</button>` : ""}
@@ -2301,6 +2314,7 @@
               ${item.horizontal_url ? `<button class="link-btn" data-download-url="${escapeHtml(item.horizontal_url)}" data-name="${escapeHtml(item.title || "horizontal")}_horizontal.mp4">下载横屏</button>` : ""}
               ${item.vertical_url ? `<button class="link-btn" data-download-url="${escapeHtml(item.vertical_url)}" data-name="${escapeHtml(item.title || "vertical")}_vertical.mp4">下载竖屏</button>` : ""}
               ${(item.youtube_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`).join("")}
+              ${(item.x_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">X ${index + 1}</a>`).join("")}
             </div>
           </div>
         `).join("") || '<div class="empty">这个任务暂无条目。</div>'}

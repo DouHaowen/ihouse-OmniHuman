@@ -1537,11 +1537,11 @@
               <div class="panel-header" style="margin-bottom:0;">
                 <div>
                   <div class="section-kicker">Auto Radar</div>
-                  <h3 class="section-title" style="font-size:22px;">手动批量生产 OpenNews</h3>
-                  <p class="section-desc">系统每 3 小时自动抓取一批热点，并按 AI 4 条、机器人 1 条、其他热点 5 条的规则自动制作 10 条新闻短片；本批最高热度新闻会发布竖屏 Shorts，同时生成横屏合集并发布 YouTube。合集封面必须由 gpt-image-2 生成成功后才会发布。</p>
+                  <h3 class="section-title" style="font-size:22px;">2小时自动化 OpenNews</h3>
+                  <p class="section-desc">手动开启后，系统每 2 小时抓取 20 条热点，按 AI 3 条、机器人 1 条、其他热点 2 条制作 6 条新闻短片；YouTube 保持合集和最热 Shorts 规则，X 同步发布本批 6 条竖屏视频。男女配音按批次交替并持久记录，关闭后再开启会继续切换。</p>
                 </div>
               </div>
-              <div class="field-grid" style="grid-template-columns: 150px 150px minmax(0,1fr);">
+              <div class="field-grid" style="grid-template-columns: repeat(2, minmax(0,1fr));">
                 <label class="check-card" style="min-height:auto; padding:14px; display:none;">
                   <span>
                     <strong>自动化状态</strong>
@@ -1560,7 +1560,7 @@
                     <option value="180">每3小时</option>
                   </select>
                 </div>
-                <div class="field">
+                <div class="field" style="display:none;">
                   <label for="openNewsBatchLimitSelect">每次数量</label>
                   <select id="openNewsBatchLimitSelect" class="select-input">
                     <option value="10">10条</option>
@@ -1575,18 +1575,18 @@
                 </div>
                 <div class="field">
                   <label>&nbsp;</label>
-                  <button class="btn btn-primary" id="openNewsBatchStartBtn" type="button" style="width:100%;">启动一轮完整发布</button>
+                  <button class="btn btn-primary" id="openNewsBatchStartBtn" type="button" style="width:100%;">开启2小时定时任务</button>
                 </div>
-                <div class="field" style="display:none;">
+                <div class="field">
                   <label>&nbsp;</label>
-                  <button class="btn btn-ghost" id="openNewsBatchStopBtn" type="button" style="width:100%;">关闭自动化</button>
+                  <button class="btn btn-ghost" id="openNewsBatchStopBtn" type="button" style="width:100%;">关闭2小时定时任务</button>
                 </div>
-                <div class="field" style="display:none;">
+                <div class="field">
                   <label>&nbsp;</label>
-                  <button class="btn btn-primary" id="openNewsBatchRunBtn" type="button" style="width:100%;">立即抓取一批</button>
+                  <button class="btn btn-primary" id="openNewsBatchRunBtn" type="button" style="width:100%;">第1步：手动开启新批次</button>
                 </div>
               </div>
-              <div class="topbar-status" id="openNewsBatchStatus">自动化将每 3 小时制作一批：最高热度 Shorts + 横屏合集发布 YouTube。</div>
+              <div class="topbar-status" id="openNewsBatchStatus">2小时自动化已关闭；开启后会按批次制作 6 条，并保持男女配音交替。</div>
             </div>
 
             <div class="field-grid" style="grid-template-columns: 180px minmax(0,1fr) 190px;">
@@ -1623,7 +1623,7 @@
                 <div>
                   <div class="section-kicker">Batches</div>
                   <h3 class="section-title" style="font-size:22px;">热点抓取批次</h3>
-                  <p class="section-desc">不同批次会自动去重。可查看抓取结果，也可以手动勾选新闻进入后续制作流程。</p>
+                  <p class="section-desc">不同批次会自动去重。关闭 2 小时自动化后，手动流程就是：抓一批热点，勾选你要做的新闻，先审核素材，再继续生成单条成片、合集和发布。</p>
                 </div>
               </div>
               <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr));">
@@ -1652,14 +1652,18 @@
                 <input type="checkbox" id="openNewsBatchYoutubePublish">
               </label>
               <div class="actions">
-                <button class="btn btn-primary" id="openNewsBatchProduceBtn" type="button">一键制作选中新闻视频</button>
+                <button class="btn btn-primary" id="openNewsBatchProduceBtn" type="button">跳过审核直接制作</button>
+                <button class="btn btn-secondary" id="openNewsBatchPrepareReviewBtn" type="button">第2步：准备素材审核</button>
+                <button class="btn btn-secondary" id="openNewsBatchContinueReviewBtn" type="button" style="display:none;">第3步：审核后继续生产</button>
                 <button class="btn btn-secondary" id="openNewsLocalTokProposeBtn" type="button">提交 LocalTok 审核</button>
                 <button class="btn btn-secondary" id="openNewsLocalTokRefreshBtn" type="button">刷新 LocalTok 状态</button>
                 <button class="btn btn-secondary" id="openNewsBatchRefreshBtn" type="button">刷新批次</button>
               </div>
-              <div class="topbar-status" id="openNewsBatchProduceStatus">请选择批次里的新闻。</div>
+              <div class="helper">建议手动审核 6 条，也可以少量增减。每个素材段至少保留 1 个素材；审核通过后系统会继续做单条成片、合集和发布。</div>
+              <div class="topbar-status" id="openNewsBatchProduceStatus">先点“第1步：手动开启新批次”，再勾选新闻。</div>
               <div class="file-board" id="openNewsBatchList"></div>
               <div class="file-board" id="openNewsBatchJobList" style="display:none;"></div>
+              <div class="file-board" id="openNewsBatchReviewList" style="display:none;"></div>
               <div class="file-board" id="openNewsLocalTokList" style="display:none;"></div>
             </div>
 
@@ -2097,6 +2101,7 @@
       openNewsBatches: [],
       openNewsBatchConfig: null,
       openNewsBatchJobId: '',
+      openNewsReviewJobId: '',
       openNewsLocalTokProposals: [],
       openNewsCollectionPool: [],
       openNewsCollectionJobs: [],
@@ -2219,12 +2224,15 @@
       openNewsBatchAspectSelect: document.getElementById('openNewsBatchAspectSelect'),
       openNewsBatchYoutubePublish: document.getElementById('openNewsBatchYoutubePublish'),
       openNewsBatchProduceBtn: document.getElementById('openNewsBatchProduceBtn'),
+      openNewsBatchPrepareReviewBtn: document.getElementById('openNewsBatchPrepareReviewBtn'),
+      openNewsBatchContinueReviewBtn: document.getElementById('openNewsBatchContinueReviewBtn'),
       openNewsLocalTokProposeBtn: document.getElementById('openNewsLocalTokProposeBtn'),
       openNewsLocalTokRefreshBtn: document.getElementById('openNewsLocalTokRefreshBtn'),
       openNewsBatchRefreshBtn: document.getElementById('openNewsBatchRefreshBtn'),
       openNewsBatchProduceStatus: document.getElementById('openNewsBatchProduceStatus'),
       openNewsBatchList: document.getElementById('openNewsBatchList'),
       openNewsBatchJobList: document.getElementById('openNewsBatchJobList'),
+      openNewsBatchReviewList: document.getElementById('openNewsBatchReviewList'),
       openNewsLocalTokList: document.getElementById('openNewsLocalTokList'),
       openNewsCollectionPanel: document.getElementById('openNewsCollectionPanel'),
       openNewsCollectionTitleInput: document.getElementById('openNewsCollectionTitleInput'),
@@ -4283,14 +4291,14 @@
 
     function updateOpenNewsBatchSelectionStatus() {
       const count = selectedOpenNewsBatchItemIds().length;
-      setOpenNewsBatchProduceStatus(count ? `已勾选 ${count} 条新闻，可一键批量生产。` : '请选择批次里的新闻。');
+      setOpenNewsBatchProduceStatus(count ? `已勾选 ${count} 条新闻。下一步可点“第2步：准备素材审核”，或直接跳过审核制作。` : '请选择批次里的新闻。');
     }
 
     function renderOpenNewsBatches(batches = []) {
       if (!els.openNewsBatchList) return;
       state.openNewsBatches = Array.isArray(batches) ? batches : [];
       if (!state.openNewsBatches.length) {
-        els.openNewsBatchList.innerHTML = '<div class="empty-box">还没有热点抓取批次。可以点击“立即抓取一批”，或开启自动抓取。</div>';
+        els.openNewsBatchList.innerHTML = '<div class="empty-box">还没有热点抓取批次。可以点击“第1步：手动开启新批次”，或开启 2 小时自动抓取。</div>';
         return;
       }
       els.openNewsBatchList.innerHTML = state.openNewsBatches.map((batch, batchIndex) => {
@@ -4304,20 +4312,31 @@
           const displayTitle = item.title_zh || item.translated_title || item.title || '未命名新闻';
           const displaySummary = item.summary_zh || item.translated_summary || item.summary || '';
           const originalTitle = item.title_zh || item.translated_title ? item.title : '';
-          const isAutoProducing = item.status === 'auto_producing';
+          const itemStatus = String(item.status || '');
+          const isBusy = ['auto_producing', 'manual_review_preparing', 'manual_review_ready', 'manual_review_approved'].includes(itemStatus);
+          const statusLabel = {
+            auto_producing: '自动制作中',
+            manual_review_preparing: '准备审核中',
+            manual_review_ready: '等待人工审核',
+            manual_review_approved: '审核后生产中',
+            manual_review_skipped: '已跳过',
+            manual_review_failed: '审核准备失败',
+            failed: '处理失败',
+          }[itemStatus] || '';
           return `
-            <label class="history-card" style="${isAutoProducing ? 'opacity:.72;' : 'cursor:pointer;'}">
+            <label class="history-card" style="${isBusy ? 'opacity:.72;' : 'cursor:pointer;'}">
               <div class="history-top">
                 <div style="display:flex; gap:10px; align-items:flex-start;">
-                  <input class="opennews-batch-check" type="checkbox" value="${escapeHtml(itemId)}" style="margin-top:5px;" ${isAutoProducing ? 'disabled' : ''}>
+                  <input class="opennews-batch-check" type="checkbox" value="${escapeHtml(itemId)}" style="margin-top:5px;" ${isBusy ? 'disabled' : ''}>
                   <div>
                     <div class="history-title">${escapeHtml(displayTitle)}</div>
                     ${originalTitle ? `<div class="history-topic">英文原题：${escapeHtml(originalTitle)}</div>` : ''}
                     <div class="history-topic">${escapeHtml(item.source_name || item.trend_domain || '')} · ${escapeHtml(item.category_name || '')}</div>
-                    ${isAutoProducing ? `<div class="history-topic">已进入自动合集生产任务：${escapeHtml(item.auto_produce_job_id || '')}</div>` : ''}
+                    ${item.auto_produce_job_id ? `<div class="history-topic">当前任务：${escapeHtml(item.auto_produce_job_id || '')}</div>` : ''}
+                    ${item.message ? `<div class="history-topic">${escapeHtml(item.message)}</div>` : ''}
                   </div>
                 </div>
-                <span class="badge">${isAutoProducing ? '自动制作中' : `热度 ${escapeHtml(item.trend_score || '-')}`}</span>
+                <span class="badge">${statusLabel || `热度 ${escapeHtml(item.trend_score || '-')}`}</span>
               </div>
               <div class="history-topic">新闻时间：${escapeHtml(item.published_at || '来源页面未标注明确发布时间')}</div>
               ${displaySummary ? `<div class="social-card">${escapeHtml(displaySummary)}</div>` : ''}
@@ -4382,26 +4401,51 @@
       });
     }
 
-    function applyOpenNewsBatchConfig(config = {}, isAdmin = false) {
+    const OPENNEWS_BATCH_AUTO_INTERVAL_MINUTES = 120;
+    const OPENNEWS_BATCH_AUTO_LIMIT = 20;
+
+    function openNewsBatchIntervalText(minutes) {
+      const value = Number(minutes || OPENNEWS_BATCH_AUTO_INTERVAL_MINUTES);
+      if (value > 0 && value % 60 === 0) return `每 ${value / 60} 小时`;
+      return `每 ${value || OPENNEWS_BATCH_AUTO_INTERVAL_MINUTES} 分钟`;
+    }
+
+    function openNewsBatchAutomationReady(config = {}) {
+      return !!config.enabled
+        && Number(config.interval_minutes || 0) === OPENNEWS_BATCH_AUTO_INTERVAL_MINUTES
+        && Number(config.limit || OPENNEWS_BATCH_AUTO_LIMIT) === OPENNEWS_BATCH_AUTO_LIMIT;
+    }
+
+    function applyOpenNewsBatchConfig(config = {}, isAdmin = false, presenterState = {}) {
       state.openNewsBatchConfig = config || {};
+      state.openNewsPresenterState = presenterState || {};
+      const enabled = !!config.enabled;
+      const ready = openNewsBatchAutomationReady(config);
       if (els.openNewsBatchEnabled) {
-        els.openNewsBatchEnabled.checked = !!config.enabled;
+        els.openNewsBatchEnabled.checked = enabled;
         els.openNewsBatchEnabled.disabled = !isAdmin;
       }
-      if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(config.interval_minutes || 180);
-      if (els.openNewsBatchLimitSelect) els.openNewsBatchLimitSelect.value = '10';
+      if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(config.interval_minutes || OPENNEWS_BATCH_AUTO_INTERVAL_MINUTES);
+      if (els.openNewsBatchLimitSelect) els.openNewsBatchLimitSelect.value = String(config.limit || OPENNEWS_BATCH_AUTO_LIMIT);
       if (els.openNewsBatchSaveBtn) els.openNewsBatchSaveBtn.disabled = !isAdmin;
       if (els.openNewsBatchStartBtn) {
-        els.openNewsBatchStartBtn.disabled = !isAdmin;
-        els.openNewsBatchStartBtn.textContent = '启动一轮 10 条成片';
+        els.openNewsBatchStartBtn.disabled = !isAdmin || ready;
+        els.openNewsBatchStartBtn.textContent = ready
+          ? '2小时定时任务运行中'
+          : (enabled ? '切换为2小时定时任务' : '开启2小时定时任务');
       }
       if (els.openNewsBatchStopBtn) {
-        els.openNewsBatchStopBtn.disabled = !isAdmin || !config.enabled;
-        els.openNewsBatchStopBtn.textContent = config.enabled ? '关闭自动化' : '自动化已关闭';
+        els.openNewsBatchStopBtn.disabled = !isAdmin || !enabled;
+        els.openNewsBatchStopBtn.textContent = enabled ? '关闭2小时定时任务' : '定时任务已关闭';
       }
-      const intervalText = config.interval_minutes ? `每 ${Number(config.interval_minutes) / 60} 小时` : '每 3 小时';
+      const intervalText = openNewsBatchIntervalText(config.interval_minutes);
       const nextRun = config.next_run_at ? `｜下次自动启动：${formatHistoryTime(config.next_run_at)}` : '';
-      setOpenNewsBatchStatus(`${config.last_run_message || '自动化等待下一轮。'}｜${config.enabled ? `${intervalText}自动制作：最高热度 Shorts + 横屏合集发布 YouTube，封面必须 gpt-image-2 成功。${nextRun}` : '自动化已关闭，可手动启动一轮完整发布。'}`);
+      const nextPresenter = presenterState.next_label ? `｜下一批主播：${presenterState.next_label}` : '';
+      const ruleText = '抓取20条热点，按 AI 3、机器人 1、其他热点 2 制作6条；YouTube发布合集和最热Shorts，X发布6条竖屏。';
+      const baseMessage = config.last_run_message || '自动化等待下一轮。';
+      const enabledStatus = `${intervalText}自动执行：${ruleText}${nextPresenter}${nextRun}`;
+      const disabledStatus = `2小时自动化已关闭；现在可以手动开启新批次并逐条审核素材。开启后${ruleText}${nextPresenter}`;
+      setOpenNewsBatchStatus(`${baseMessage}｜${enabled ? enabledStatus : disabledStatus}`);
     }
 
     async function loadOpenNewsBatchConfig() {
@@ -4410,16 +4454,20 @@
         const res = await fetch('/api/opennews/batches/config');
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || '自动抓取设置加载失败');
-        applyOpenNewsBatchConfig(data.config || {}, !!data.is_admin);
+        applyOpenNewsBatchConfig(data.config || {}, !!data.is_admin, data.presenter_state || {});
       } catch (error) {
         setOpenNewsBatchStatus(friendlyRequestError(error, '自动抓取设置加载失败'), true);
       }
     }
 
-    async function saveOpenNewsBatchConfig(forceEnabled = null) {
+    async function saveOpenNewsBatchConfig(forceEnabled = null, overrides = {}) {
       if (forceEnabled !== null && els.openNewsBatchEnabled) {
         els.openNewsBatchEnabled.checked = !!forceEnabled;
       }
+      const intervalMinutes = Number(overrides.interval_minutes || els.openNewsBatchIntervalSelect?.value || OPENNEWS_BATCH_AUTO_INTERVAL_MINUTES);
+      const limit = Number(overrides.limit || els.openNewsBatchLimitSelect?.value || OPENNEWS_BATCH_AUTO_LIMIT);
+      if (els.openNewsBatchIntervalSelect) els.openNewsBatchIntervalSelect.value = String(intervalMinutes);
+      if (els.openNewsBatchLimitSelect) els.openNewsBatchLimitSelect.value = String(limit);
       setOpenNewsBatchStatus('正在保存自动抓取设置...');
       const actionButtons = [els.openNewsBatchSaveBtn, els.openNewsBatchStartBtn, els.openNewsBatchStopBtn].filter(Boolean);
       actionButtons.forEach(btn => { btn.disabled = true; });
@@ -4429,15 +4477,15 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             enabled: !!els.openNewsBatchEnabled?.checked,
-            interval_minutes: Number(els.openNewsBatchIntervalSelect?.value || 180),
+            interval_minutes: intervalMinutes,
             category: els.openNewsCategorySelect?.value || 'all',
             time_range: els.openNewsTrendRangeSelect?.value || '6h',
-            limit: Number(els.openNewsBatchLimitSelect?.value || 20),
+            limit,
           }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || '保存失败');
-        applyOpenNewsBatchConfig(data.config || {}, true);
+        applyOpenNewsBatchConfig(data.config || {}, true, data.presenter_state || state.openNewsPresenterState || {});
         return true;
       } catch (error) {
         setOpenNewsBatchStatus(friendlyRequestError(error, '自动抓取设置保存失败'), true);
@@ -4445,8 +4493,14 @@
       } finally {
         const config = state.openNewsBatchConfig || {};
         const isAdmin = !!state.currentUser && state.currentUser.role === 'admin';
+        const ready = openNewsBatchAutomationReady(config);
         if (els.openNewsBatchSaveBtn) els.openNewsBatchSaveBtn.disabled = !isAdmin;
-        if (els.openNewsBatchStartBtn) els.openNewsBatchStartBtn.disabled = !isAdmin || !!config.enabled;
+        if (els.openNewsBatchStartBtn) {
+          els.openNewsBatchStartBtn.disabled = !isAdmin || ready;
+          els.openNewsBatchStartBtn.textContent = ready
+            ? '2小时定时任务运行中'
+            : (config.enabled ? '切换为2小时定时任务' : '开启2小时定时任务');
+        }
         if (els.openNewsBatchStopBtn) els.openNewsBatchStopBtn.disabled = !isAdmin || !config.enabled;
       }
     }
@@ -4454,40 +4508,24 @@
     async function startOpenNewsBatchAutomation() {
       if (els.openNewsBatchStartBtn) {
         els.openNewsBatchStartBtn.disabled = true;
-        els.openNewsBatchStartBtn.textContent = '启动中...';
+        els.openNewsBatchStartBtn.textContent = '开启中...';
       }
-      setOpenNewsBatchStatus('正在手动启动一轮完整自动化：抓取热点、制作 10 条成片、发布最高热度 Shorts，并生成横屏合集发布 YouTube...');
-      try {
-        const res = await fetch('/api/opennews/batches/run-manual-production', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            category: els.openNewsCategorySelect?.value || 'all',
-            time_range: els.openNewsTrendRangeSelect?.value || '6h',
-            target_market: els.openNewsBatchMarketSelect?.value || state.selectedTargetMarket || 'cn',
-            voice_preset_id: els.openNewsBatchVoiceSelect?.value || '',
-            aspect_ratio: els.openNewsBatchAspectSelect?.value || 'horizontal',
-            notes: els.openNewsNotesInput?.value || '',
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || data.message || '手动批量生产启动失败');
-        if (data.job) renderOpenNewsBatchJob(data.job);
-        setOpenNewsBatchStatus(data.message || `已启动 ${Number(data.selected_count || 0)} 条新闻完整自动化制作。`);
+      setOpenNewsBatchStatus('正在开启 2 小时 OpenNews 自动化...');
+      const ok = await saveOpenNewsBatchConfig(true, {
+        interval_minutes: OPENNEWS_BATCH_AUTO_INTERVAL_MINUTES,
+        limit: OPENNEWS_BATCH_AUTO_LIMIT,
+      });
+      if (ok) {
         await loadOpenNewsBatchConfig();
-        await loadOpenNewsBatches();
-      } catch (error) {
-        setOpenNewsBatchStatus(friendlyRequestError(error, '手动批量生产启动失败'), true);
-      } finally {
-        if (els.openNewsBatchStartBtn) {
-          els.openNewsBatchStartBtn.disabled = !(!!state.currentUser && state.currentUser.role === 'admin');
-          els.openNewsBatchStartBtn.textContent = '启动一轮完整发布';
-        }
       }
     }
 
     async function stopOpenNewsBatchAutomation() {
-      await saveOpenNewsBatchConfig(false);
+      setOpenNewsBatchStatus('正在关闭 2 小时 OpenNews 自动化...');
+      await saveOpenNewsBatchConfig(false, {
+        interval_minutes: OPENNEWS_BATCH_AUTO_INTERVAL_MINUTES,
+        limit: OPENNEWS_BATCH_AUTO_LIMIT,
+      });
     }
 
     async function loadOpenNewsBatches() {
@@ -4522,7 +4560,7 @@
         els.openNewsBatchRunBtn.disabled = true;
         els.openNewsBatchRunBtn.textContent = '抓取中...';
       }
-      setOpenNewsBatchStatus('正在抓取一个新的热点批次...');
+      setOpenNewsBatchStatus('正在手动抓取一个新的热点批次...');
       try {
         const res = await fetch('/api/opennews/batches/run-now', {
           method: 'POST',
@@ -4535,7 +4573,7 @@
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || data.message || '抓取失败');
-        setOpenNewsBatchStatus(data.message || '新批次抓取完成');
+        setOpenNewsBatchStatus(`${data.message || '新批次抓取完成'}｜现在可以在下方勾选新闻，再点“第2步：准备素材审核”。`);
         await loadOpenNewsBatchConfig();
         await loadOpenNewsBatches();
       } catch (error) {
@@ -4543,7 +4581,7 @@
       } finally {
         if (els.openNewsBatchRunBtn) {
           els.openNewsBatchRunBtn.disabled = false;
-          els.openNewsBatchRunBtn.textContent = '立即抓取一批';
+          els.openNewsBatchRunBtn.textContent = '第1步：手动开启新批次';
         }
       }
     }
@@ -4551,18 +4589,114 @@
     function openNewsBatchItemStatusLabel(item = {}) {
       const status = item.status || 'queued';
       const youtubeRecords = Array.isArray(item.youtube_records) ? item.youtube_records : [];
+      const xRecords = Array.isArray(item.x_records) ? item.x_records : [];
+      if (status === 'completed' && youtubeRecords.length && xRecords.length) return 'YouTube / X 已发布';
       if (status === 'completed' && youtubeRecords.length) return 'YouTube 已发布';
-      if (status === 'completed' && item.youtube_error) return '成片完成 / YouTube 失败';
+      if (status === 'completed' && xRecords.length) return 'X 已发布';
+      if (status === 'completed' && (item.youtube_error || item.x_error)) return '成片完成 / 发布异常';
       if (status === 'completed') return '成片完成';
       const labels = {
         queued: '等待生成',
         drafting: '生成文案中',
         producing: '生成配音素材中',
         composing: '合成成片中',
+        review_preparing: '准备审核中',
+        review_pending: '等待人工审核',
+        review_approved: '审核通过',
+        review_rejected: '审核拒绝',
+        review_skipped: '审核跳过',
+        review_failed: '预审失败',
+        skipped_duplicate: '重复已跳过',
         publishing_youtube: '发布 YouTube 中',
+        publishing_x: '发布 X 中',
         failed: '失败',
       };
       return labels[status] || status;
+    }
+
+    function renderOpenNewsBatchReview(job = {}) {
+      if (!els.openNewsBatchReviewList) return;
+      const items = Array.isArray(job.items) ? job.items : [];
+      const reviewItems = items.filter(item => item.review_result || item.review_history_id || String(item.status || '').startsWith('review'));
+      const canContinue = reviewItems.some(item => ['review_pending', 'review_approved'].includes(String(item.status || '')));
+      if (els.openNewsBatchContinueReviewBtn) {
+        els.openNewsBatchContinueReviewBtn.style.display = canContinue ? '' : 'none';
+      }
+      if (!reviewItems.length) {
+        els.openNewsBatchReviewList.style.display = 'none';
+        els.openNewsBatchReviewList.innerHTML = '';
+        return;
+      }
+      state.openNewsReviewJobId = job.job_id || '';
+      els.openNewsBatchReviewList.style.display = 'grid';
+      els.openNewsBatchReviewList.innerHTML = `
+        <div class="history-card">
+          <div class="history-top">
+            <div>
+              <div class="history-title">人工审核批次：${escapeHtml(job.job_id || '-')}</div>
+              <div class="history-topic">${escapeHtml(job.message || '')}</div>
+              <div class="history-topic">请逐条删掉不相关素材。每个素材段至少保留 1 个素材，否则这条新闻不会继续成片。</div>
+            </div>
+            <span class="badge">${escapeHtml(job.status || '-')}</span>
+          </div>
+          <div class="file-board" style="margin-top:12px;">
+            ${reviewItems.map(item => {
+              const review = item.review_result || {};
+              const segments = Array.isArray(review.segments) ? review.segments.filter(seg => seg.type === 'material') : [];
+              const checked = ['review_pending', 'review_approved', 'completed'].includes(String(item.status || '')) ? 'checked' : '';
+              const disabled = ['review_rejected', 'review_skipped'].includes(String(item.status || '')) ? 'disabled' : '';
+              return `
+                <div class="history-card">
+                  <div class="history-top">
+                    <div>
+                      <div class="history-title">${escapeHtml(item.title || 'OpenNews 新闻')}</div>
+                      <div class="history-topic">${escapeHtml(item.message || '')}</div>
+                      ${item.review_history_id ? `<div class="history-topic">审核历史：${escapeHtml(item.review_history_id)}</div>` : ''}
+                    </div>
+                    <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
+                      <span class="badge">${escapeHtml(openNewsBatchItemStatusLabel(item))}</span>
+                      <label style="display:flex; align-items:center; gap:8px; font-size:13px;">
+                        <input class="opennews-review-approve-check" type="checkbox" data-item-id="${escapeHtml(item.batch_item_id || '')}" ${checked} ${disabled}>
+                        继续生产
+                      </label>
+                    </div>
+                  </div>
+                  ${item.material_review?.reason ? `<div class="social-card">${escapeHtml(item.material_review.reason)}</div>` : ''}
+                  ${segments.map(segment => `
+                    <div class="history-card" style="margin-top:10px;">
+                      <div class="history-top">
+                        <div>
+                          <div class="history-title">素材段 ${escapeHtml(String(segment.index || ''))}</div>
+                          <div class="history-topic">${escapeHtml(segment.script || '')}</div>
+                        </div>
+                        <span class="badge">${escapeHtml(String((segment.materials || []).length))} 个素材</span>
+                      </div>
+                      <div class="file-board" style="margin-top:10px;">
+                        ${(segment.materials || []).map(material => `
+                          <label class="history-card" style="cursor:pointer;">
+                            <div class="history-top">
+                              <div>
+                                <div class="history-title">${escapeHtml(material.name || '素材')}</div>
+                                <div class="history-topic">${escapeHtml(material.kind || 'image')}</div>
+                              </div>
+                              <input class="opennews-review-material-check" type="checkbox" data-item-id="${escapeHtml(item.batch_item_id || '')}" data-segment-index="${escapeHtml(String(segment.index || ''))}" value="${escapeHtml(material.name || material.url || '')}" checked>
+                            </div>
+                            ${material.kind === 'video'
+                              ? `<video src="${escapeHtml(material.url || '')}" controls style="width:100%; max-height:220px; margin-top:10px;"></video>`
+                              : `<img src="${escapeHtml(material.url || '')}" alt="${escapeHtml(material.name || '素材')}" style="width:100%; max-height:220px; object-fit:cover; margin-top:10px; border-radius:8px;">`
+                            }
+                          </label>
+                        `).join('') || '<div class="empty-box">这个素材段当前没有可用素材。</div>'}
+                      </div>
+                    </div>
+                  `).join('') || '<div class="empty-box" style="margin-top:10px;">当前审核结果还没有素材段可展示。</div>'}
+                  ${item.error ? `<div class="topbar-status error" style="margin-top:10px;">${escapeHtml(item.error)}</div>` : ''}
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
     }
 
     function renderOpenNewsBatchJob(job = {}) {
@@ -4571,10 +4705,14 @@
       const items = Array.isArray(job.items) ? job.items : [];
       const completedCount = items.filter(item => item.status === 'completed').length;
       const publishedCount = items.filter(item => Array.isArray(item.youtube_records) && item.youtube_records.length).length;
-      const failedCount = items.filter(item => item.status === 'failed' || item.error || item.youtube_error).length;
+      const xPublishedCount = items.filter(item => Array.isArray(item.x_records) && item.x_records.length).length;
+      const failedCount = items.filter(item => item.status === 'failed' || item.error || item.youtube_error || item.x_error).length;
+      const reviewPendingCount = items.filter(item => item.status === 'review_pending').length;
       const summary = [
         `${completedCount}/${items.length || 0} 条成片完成`,
+        reviewPendingCount ? `${reviewPendingCount} 条待人工审核` : '',
         publishedCount ? `${publishedCount} 条已发布 YouTube` : '',
+        xPublishedCount ? `${xPublishedCount} 条已发布 X` : '',
         failedCount ? `${failedCount} 条有异常` : '',
       ].filter(Boolean).join('｜');
       els.openNewsBatchJobList.innerHTML = `
@@ -4603,13 +4741,16 @@
                   ${item.vertical_url ? `<a class="btn btn-secondary" href="${escapeHtml(item.vertical_url)}" target="_blank" rel="noopener">下载竖屏</a>` : ''}
                 </div>` : ''}
                 ${Array.isArray(item.youtube_records) && item.youtube_records.length ? `<div class="social-card" style="margin-top:10px;"><strong>YouTube 已发布</strong>${item.youtube_records.map(record => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>${escapeHtml(record.aspect_ratio || '')}｜${escapeHtml(record.privacy_status || '')}</span><a href="${escapeHtml(record.youtube_url || '#')}" target="_blank" rel="noopener">打开 YouTube</a></div>`).join('')}</div>` : ''}
+                ${Array.isArray(item.x_records) && item.x_records.length ? `<div class="social-card" style="margin-top:10px;"><strong>X 已发布</strong>${item.x_records.map(record => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>${escapeHtml(record.aspect_ratio || '')}</span><a href="${escapeHtml(record.x_url || '#')}" target="_blank" rel="noopener">打开 X</a></div>`).join('')}</div>` : ''}
                 ${item.youtube_error ? `<div class="topbar-status error">${escapeHtml(item.youtube_error)}</div>` : ''}
+                ${item.x_error ? `<div class="topbar-status error">${escapeHtml(item.x_error)}</div>` : ''}
                 ${item.error ? `<div class="topbar-status error">${escapeHtml(item.error)}</div>` : ''}
               </div>
             `).join('')}
           </div>
         </div>
       `;
+      renderOpenNewsBatchReview(job);
     }
 
     async function fetchOpenNewsBatchJob(jobId) {
@@ -4627,13 +4768,123 @@
         const job = await fetchOpenNewsBatchJob(jobId);
         renderOpenNewsBatchJob(job);
         const status = job?.status;
-        if (['done', 'partial', 'failed'].includes(status)) {
+        const collectionStatus = String(job?.collection_status || '');
+        const waitingReview = ['review_pending'].includes(status);
+        const collectionRunning = ['running', 'queued', 'recovering'].includes(collectionStatus);
+        if (waitingReview) {
+          await loadActiveTasks();
+          return;
+        }
+        if (['done', 'partial', 'failed'].includes(status) && !collectionRunning) {
           renderOpenNewsBatchJob(await fetchOpenNewsBatchJob(jobId));
           await loadActiveTasks();
           return;
         }
       }
       throw new Error('批量生产状态等待超时，请稍后在当前任务或历史记录里查看。');
+    }
+
+    function collectOpenNewsReviewSelections() {
+      const itemIds = [];
+      const selectedMaterialsByItem = {};
+      document.querySelectorAll('.opennews-review-approve-check').forEach(input => {
+        if (!input.checked) return;
+        const itemId = input.dataset.itemId || '';
+        if (!itemId) return;
+        itemIds.push(itemId);
+      });
+      document.querySelectorAll('.opennews-review-material-check').forEach(input => {
+        const itemId = input.dataset.itemId || '';
+        const segmentIndex = input.dataset.segmentIndex || '';
+        if (!itemId || !segmentIndex) return;
+        if (!selectedMaterialsByItem[itemId]) selectedMaterialsByItem[itemId] = {};
+        if (!selectedMaterialsByItem[itemId][segmentIndex]) selectedMaterialsByItem[itemId][segmentIndex] = [];
+        if (!input.checked) return;
+        selectedMaterialsByItem[itemId][segmentIndex].push(input.value);
+      });
+      return { itemIds, selectedMaterialsByItem };
+    }
+
+    async function prepareOpenNewsBatchReview() {
+      const itemIds = selectedOpenNewsBatchItemIds();
+      if (!itemIds.length) {
+        setOpenNewsBatchProduceStatus('请先勾选要进入人工审核的新闻，建议先选 6 条。', true);
+        return;
+      }
+      if (els.openNewsBatchPrepareReviewBtn) {
+        els.openNewsBatchPrepareReviewBtn.disabled = true;
+        els.openNewsBatchPrepareReviewBtn.textContent = '准备中...';
+      }
+      setOpenNewsBatchProduceStatus(`正在为 ${itemIds.length} 条新闻生成文案、配音和待审核素材...`);
+      try {
+        const res = await fetch('/api/opennews/batches/prepare-review', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_ids: itemIds,
+            target_market: els.openNewsBatchMarketSelect?.value || state.selectedTargetMarket || 'cn',
+            voice_preset_id: els.openNewsBatchVoiceSelect?.value || '',
+            aspect_ratio: els.openNewsBatchAspectSelect?.value || 'horizontal',
+            notes: els.openNewsNotesInput?.value || '',
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '人工审核批次创建失败');
+        renderOpenNewsBatchJob(data.job || {});
+        setOpenNewsBatchProduceStatus('待审核素材准备中，完成后会停在人工审核阶段。你可以逐条删减素材后再继续。');
+        await pollOpenNewsBatchJob(data.job_id);
+        setOpenNewsBatchProduceStatus('素材已准备好。请逐条删除不相关素材，并确保每个素材段至少保留 1 个，再点“第3步：审核后继续生产”。');
+        await loadOpenNewsBatches();
+      } catch (error) {
+        setOpenNewsBatchProduceStatus(friendlyRequestError(error, '人工审核批次准备失败'), true);
+      } finally {
+        if (els.openNewsBatchPrepareReviewBtn) {
+          els.openNewsBatchPrepareReviewBtn.disabled = false;
+          els.openNewsBatchPrepareReviewBtn.textContent = '第2步：准备素材审核';
+        }
+      }
+    }
+
+    async function continueOpenNewsBatchAfterReview() {
+      const jobId = state.openNewsReviewJobId || state.openNewsBatchJobId;
+      if (!jobId) {
+        setOpenNewsBatchProduceStatus('当前没有待继续的人工审核批次。', true);
+        return;
+      }
+      const { itemIds, selectedMaterialsByItem } = collectOpenNewsReviewSelections();
+      if (!itemIds.length) {
+        setOpenNewsBatchProduceStatus('请至少勾选一条通过审核并继续生产的新闻。', true);
+        return;
+      }
+      if (els.openNewsBatchContinueReviewBtn) {
+        els.openNewsBatchContinueReviewBtn.disabled = true;
+        els.openNewsBatchContinueReviewBtn.textContent = '继续中...';
+      }
+      setOpenNewsBatchProduceStatus(`正在继续生产 ${itemIds.length} 条已审核新闻，后面会自动衔接合集和发布...`);
+      try {
+        const res = await fetch(`/api/opennews/batches/jobs/${encodeURIComponent(jobId)}/continue`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            item_ids: itemIds,
+            selected_materials_by_item: selectedMaterialsByItem,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '审核后继续生产失败');
+        renderOpenNewsBatchJob(data.job || {});
+        setOpenNewsBatchProduceStatus('人工审核已确认，正在继续生成单条成片、合集和发布。');
+        await pollOpenNewsBatchJob(data.job_id);
+        setOpenNewsBatchProduceStatus('人工审核批次已完成，可查看成片和发布结果。');
+        await loadOpenNewsBatches();
+      } catch (error) {
+        setOpenNewsBatchProduceStatus(friendlyRequestError(error, '审核后继续生产失败'), true);
+      } finally {
+        if (els.openNewsBatchContinueReviewBtn) {
+          els.openNewsBatchContinueReviewBtn.disabled = false;
+          els.openNewsBatchContinueReviewBtn.textContent = '第3步：审核后继续生产';
+        }
+      }
     }
 
     async function produceOpenNewsBatchVideos() {
@@ -4659,13 +4910,15 @@
             youtube_auto_publish: false,
             youtube_privacy_status: 'public',
             youtube_aspects: ['horizontal', 'vertical'],
+            x_auto_publish: false,
+            x_aspects: ['vertical'],
             notes: els.openNewsNotesInput?.value || '',
           }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || '批量生产提交失败');
         renderOpenNewsBatchJob(data.job || {});
-        setOpenNewsBatchProduceStatus('批量生产已开始，系统只生成成片文件，不发布 YouTube。');
+        setOpenNewsBatchProduceStatus('批量生产已开始，系统会按配置生成成片和发布平台。');
         await pollOpenNewsBatchJob(data.job_id);
         setOpenNewsBatchProduceStatus('批量生产已完成，可在当前任务和历史记录查看视频。');
       } catch (error) {
@@ -4673,7 +4926,7 @@
       } finally {
         if (els.openNewsBatchProduceBtn) {
           els.openNewsBatchProduceBtn.disabled = false;
-          els.openNewsBatchProduceBtn.textContent = '一键制作选中新闻视频';
+          els.openNewsBatchProduceBtn.textContent = '跳过审核直接制作';
         }
       }
     }
@@ -4739,6 +4992,7 @@
         const status = job.status || 'queued';
         const result = job.result || {};
         const records = Array.isArray(result.youtube_publish_records) ? result.youtube_publish_records : [];
+        const xRecords = Array.isArray(result.x_publish_records) ? result.x_publish_records : [];
         return `
           <div class="history-card">
             <div class="history-top">
@@ -4752,16 +5006,22 @@
             <div class="history-topic">包含 ${Array.isArray(job.items) ? job.items.length : 0} 条新闻</div>
             ${job.error ? `<div class="topbar-status error">${escapeHtml(job.error)}</div>` : ''}
             ${records.length ? `<div class="social-card" style="margin-top:10px;"><strong>YouTube 已发布</strong>${records.map(record => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>${escapeHtml(record.privacy_status || '')}</span><a href="${escapeHtml(record.youtube_url || '#')}" target="_blank" rel="noopener">打开 YouTube</a></div>`).join('')}</div>` : ''}
+            ${xRecords.length ? `<div class="social-card" style="margin-top:10px;"><strong>X 已发布</strong>${xRecords.map(record => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>${escapeHtml(record.aspect_ratio || '')}</span><a href="${escapeHtml(record.x_url || '#')}" target="_blank" rel="noopener">打开 X</a></div>`).join('')}</div>` : ''}
+            ${job.x_error || result.x_error ? `<div class="topbar-status error">${escapeHtml(job.x_error || result.x_error)}</div>` : ''}
             <div class="actions" style="margin-top:10px;">
               ${status === 'done' && job.download_url ? `<a class="btn btn-secondary" href="${escapeHtml(job.download_url)}" target="_blank" rel="noopener">下载合集</a>` : ''}
               ${status === 'done' ? `<button class="btn btn-primary opennews-collection-publish" type="button" data-job-id="${escapeHtml(job.job_id || '')}">发布 YouTube</button>` : ''}
-              ${status === 'running' || status === 'queued' ? `<button class="btn btn-secondary opennews-collection-poll" type="button" data-job-id="${escapeHtml(job.job_id || '')}">刷新进度</button>` : ''}
+              ${status === 'done' ? `<button class="btn btn-secondary opennews-collection-publish-x" type="button" data-job-id="${escapeHtml(job.job_id || '')}">发布 X</button>` : ''}
+              ${['running', 'queued', 'publishing_youtube', 'publishing_x'].includes(status) ? `<button class="btn btn-secondary opennews-collection-poll" type="button" data-job-id="${escapeHtml(job.job_id || '')}">刷新进度</button>` : ''}
             </div>
           </div>
         `;
       }).join('');
       els.openNewsCollectionJobList.querySelectorAll('.opennews-collection-publish').forEach(btn => {
         btn.addEventListener('click', () => publishOpenNewsCollectionYoutube(btn.dataset.jobId));
+      });
+      els.openNewsCollectionJobList.querySelectorAll('.opennews-collection-publish-x').forEach(btn => {
+        btn.addEventListener('click', () => publishOpenNewsCollectionX(btn.dataset.jobId));
       });
       els.openNewsCollectionJobList.querySelectorAll('.opennews-collection-poll').forEach(btn => {
         btn.addEventListener('click', () => pollOpenNewsCollectionJob(btn.dataset.jobId));
@@ -4811,7 +5071,7 @@
         const job = await fetchOpenNewsCollectionJob(jobId);
         renderOpenNewsCollectionJobs([job, ...state.openNewsCollectionJobs.filter(item => item.job_id !== jobId)]);
         if (['done', 'failed'].includes(job.status)) {
-          setOpenNewsCollectionStatus(job.status === 'done' ? '合集视频已生成，可下载或发布 YouTube。' : (job.message || '合集生成失败'), job.status === 'failed');
+          setOpenNewsCollectionStatus(job.status === 'done' ? '合集视频已生成，可下载或发布 YouTube / X。' : (job.message || '合集生成失败'), job.status === 'failed');
           await loadOpenNewsCollectionPool();
           return;
         }
@@ -4870,6 +5130,24 @@
         setOpenNewsCollectionStatus('合集已发布 YouTube。');
       } catch (error) {
         setOpenNewsCollectionStatus(friendlyRequestError(error, '合集 YouTube 发布失败'), true);
+      }
+    }
+
+    async function publishOpenNewsCollectionX(jobId) {
+      if (!jobId) return;
+      setOpenNewsCollectionStatus('正在发布合集到 X...');
+      try {
+        const res = await fetch(`/api/opennews/collections/${encodeURIComponent(jobId)}/publish-x`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'X 发布失败');
+        renderOpenNewsCollectionJobs([data.job, ...state.openNewsCollectionJobs.filter(item => item.job_id !== jobId)]);
+        setOpenNewsCollectionStatus('合集已发布 X。');
+      } catch (error) {
+        setOpenNewsCollectionStatus(friendlyRequestError(error, '合集 X 发布失败'), true);
       }
     }
 
@@ -6937,6 +7215,8 @@
     els.openNewsBatchRunBtn?.addEventListener('click', runOpenNewsBatchNow);
     els.openNewsBatchRefreshBtn?.addEventListener('click', loadOpenNewsBatches);
     els.openNewsBatchProduceBtn?.addEventListener('click', produceOpenNewsBatchVideos);
+    els.openNewsBatchPrepareReviewBtn?.addEventListener('click', prepareOpenNewsBatchReview);
+    els.openNewsBatchContinueReviewBtn?.addEventListener('click', continueOpenNewsBatchAfterReview);
     els.openNewsLocalTokProposeBtn?.addEventListener('click', proposeOpenNewsToLocalTok);
     els.openNewsLocalTokRefreshBtn?.addEventListener('click', loadOpenNewsLocalTokProposals);
     els.openNewsCollectionRefreshBtn?.addEventListener('click', loadOpenNewsCollectionPool);

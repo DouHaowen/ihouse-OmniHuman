@@ -7,6 +7,8 @@ items. It is intentionally separate from the single-news production pipeline.
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
 import subprocess
 import threading
@@ -15,7 +17,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, ImageOps
+
 FILE_LOCK = threading.Lock()
+
+
+def _duplicate_image_blocking_enabled() -> bool:
+    return os.getenv("OPENNEWS_COLLECTION_DUPLICATE_IMAGE_BLOCKING", "0").strip().lower() not in {
+        "0", "false", "no", "off", ""
+    }
 
 
 def _read_json(path: Path, fallback: Any) -> Any:
@@ -149,6 +159,188 @@ def _result_has_complete_material_assets(result: dict, output_dir: Path) -> bool
     return material_count > 0
 
 
+def _material_item_resolved_path(item: dict, output_dir: Path) -> Path | None:
+    raw_path = str((item or {}).get("path") or "").strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = output_dir / raw_path
+    return path if path.exists() and path.is_file() else None
+
+
+def _image_material_fingerprint(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".mp4", ".mov", ".m4v", ".webm"}:
+        return ""
+    try:
+        with Image.open(path) as image:
+            image = ImageOps.exif_transpose(image).convert("L")
+            image = image.resize((32, 32), Image.Resampling.LANCZOS)
+            avg = sum(image.getdata()) / (32 * 32)
+            bits = "".join("1" if pixel >= avg else "0" for pixel in image.getdata())
+            visual_hash = hex(int(bits, 2))[2:].rjust(256, "0")
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return f"{visual_hash}:{digest.hexdigest()}"
+    except Exception:
+        try:
+            digest = hashlib.sha256()
+            with open(path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        except Exception:
+            return ""
+
+
+def image_material_fingerprint(path: Path) -> str:
+    return _image_material_fingerprint(path)
+
+
+def _image_material_fingerprint_label(fingerprint: str) -> str:
+    text = str(fingerprint or "")
+    if ":" in text:
+        visual_hash, digest = text.split(":", 1)
+        return f"{visual_hash[:16]}:{digest[:16]}"
+    return text[:32]
+
+
+def audit_result_image_duplicates(result: dict, output_dir: Path) -> dict:
+    segments = result.get("segments") if isinstance(result, dict) else []
+    fingerprint_map: dict[str, list[dict]] = {}
+    segment_count = 0
+    image_count = 0
+    if not isinstance(segments, list):
+        segments = []
+    for segment_index, segment in enumerate(segments, start=1):
+        if not isinstance(segment, dict) or segment.get("type") != "material":
+            continue
+        segment_count += 1
+        for item_index, item in enumerate(segment.get("material_items") or [], start=1):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("kind") or "image").lower() == "video":
+                continue
+            path = _material_item_resolved_path(item, output_dir)
+            if not path:
+                continue
+            fingerprint = _image_material_fingerprint(path)
+            if not fingerprint:
+                continue
+            image_count += 1
+            fingerprint_map.setdefault(fingerprint, []).append(
+                {
+                    "segment_index": segment_index,
+                    "item_index": item_index,
+                    "path": str(path),
+                    "name": path.name,
+                    "source": str(item.get("source") or ""),
+                    "title": str(item.get("title") or ""),
+                }
+            )
+    duplicates = []
+    for fingerprint, entries in fingerprint_map.items():
+        if len(entries) <= 1:
+            continue
+        duplicates.append(
+            {
+                "fingerprint": _image_material_fingerprint_label(fingerprint),
+                "occurrences": len(entries),
+                "entries": entries,
+            }
+        )
+    duplicates.sort(key=lambda item: (-int(item.get("occurrences") or 0), str(item.get("fingerprint") or "")))
+    return {
+        "ok": not duplicates,
+        "segment_count": segment_count,
+        "image_count": image_count,
+        "duplicate_group_count": len(duplicates),
+        "duplicate_groups": duplicates,
+    }
+
+
+def audit_collection_candidate_image_duplicates(root: Path, output_root: Path, history_ids: list[str]) -> dict:
+    pool = {item["history_id"]: item for item in list_collection_pool(root, output_root, limit=300, include_used=True)}
+    item_audits: list[dict] = []
+    collection_fingerprints: dict[str, list[dict]] = {}
+    invalid_history_ids: list[str] = []
+
+    for history_id in history_ids:
+        key = str(history_id or "").strip()
+        if not key:
+            continue
+        item = pool.get(key)
+        if not item:
+            invalid_history_ids.append(key)
+            continue
+        output_dir = output_root / key
+        result = _read_json(output_dir / "result.json", {})
+        if not isinstance(result, dict):
+            invalid_history_ids.append(key)
+            continue
+        audit = audit_result_image_duplicates(result, output_dir)
+        item_audits.append({
+            "history_id": key,
+            "title": str(item.get("title") or _opennews_title(result)),
+            **audit,
+        })
+        segments = result.get("segments") if isinstance(result, dict) else []
+        if not isinstance(segments, list):
+            continue
+        for segment_index, segment in enumerate(segments, start=1):
+            if not isinstance(segment, dict) or segment.get("type") != "material":
+                continue
+            for item_index, material_item in enumerate(segment.get("material_items") or [], start=1):
+                if not isinstance(material_item, dict):
+                    continue
+                if str(material_item.get("kind") or "image").lower() == "video":
+                    continue
+                path = _material_item_resolved_path(material_item, output_dir)
+                if not path:
+                    continue
+                fingerprint = _image_material_fingerprint(path)
+                if not fingerprint:
+                    continue
+                collection_fingerprints.setdefault(fingerprint, []).append(
+                    {
+                        "history_id": key,
+                        "title": str(item.get("title") or _opennews_title(result)),
+                        "segment_index": segment_index,
+                        "item_index": item_index,
+                        "path": str(path),
+                        "name": path.name,
+                        "source": str(material_item.get("source") or ""),
+                        "title_material": str(material_item.get("title") or ""),
+                    }
+                )
+
+    cross_duplicates = []
+    for fingerprint, entries in collection_fingerprints.items():
+        history_set = {str(entry.get("history_id") or "") for entry in entries if str(entry.get("history_id") or "")}
+        if len(history_set) <= 1:
+            continue
+        cross_duplicates.append(
+            {
+                "fingerprint": _image_material_fingerprint_label(fingerprint),
+                "history_count": len(history_set),
+                "occurrences": len(entries),
+                "entries": entries,
+            }
+        )
+    cross_duplicates.sort(key=lambda item: (-int(item.get("history_count") or 0), -int(item.get("occurrences") or 0)))
+    self_duplicates = [item for item in item_audits if not item.get("ok")]
+    return {
+        "ok": not invalid_history_ids and not self_duplicates and not cross_duplicates,
+        "invalid_history_ids": invalid_history_ids,
+        "self_duplicate_items": self_duplicates,
+        "cross_duplicate_groups": cross_duplicates,
+        "item_audits": item_audits,
+    }
+
+
 def _collection_video_item_is_usable(item: dict, aspect_ratio: str) -> tuple[bool, str, Path | None]:
     video_path = Path(item.get(f"{aspect_ratio}_path") or item.get("horizontal_path") or item.get("vertical_path") or "")
     if not video_path.exists() or not video_path.is_file():
@@ -206,6 +398,7 @@ def list_collection_pool(root: Path, output_root: Path, *, limit: int = 80, incl
         if not _result_has_complete_material_assets(result, output_dir):
             continue
         source = ((result.get("workflow_config") or {}).get("source") or {}).get("article") or {}
+        image_audit = audit_result_image_duplicates(result, output_dir)
         tts_providers = []
         for segment in result.get("segments") or []:
             if isinstance(segment, dict):
@@ -227,6 +420,8 @@ def list_collection_pool(root: Path, output_root: Path, *, limit: int = 80, incl
                 "horizontal_path": str(horizontal) if horizontal else "",
                 "vertical_path": str(vertical) if vertical else "",
                 "used_in_collection": used.get(history_id) or "",
+                "has_duplicate_images": not image_audit.get("ok", True),
+                "duplicate_image_group_count": int(image_audit.get("duplicate_group_count") or 0),
             }
         )
         if len(items) >= max(1, min(int(limit or 80), 200)):
@@ -251,6 +446,7 @@ def create_collection_job(root: Path, output_root: Path, *, history_ids: list[st
         raise ValueError("请先选择要加入合集的视频")
     if len(selected) > 10:
         raise ValueError("第一阶段一次最多选择 10 条新闻")
+    duplicate_audit = audit_collection_candidate_image_duplicates(root, output_root, [item.get("history_id") for item in selected])
     aspect_ratio = "vertical" if str(aspect_ratio).lower() == "vertical" else "horizontal"
     job_id = f"opennews_collection_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     job = {
@@ -264,6 +460,7 @@ def create_collection_job(root: Path, output_root: Path, *, history_ids: list[st
         "title": title or f"OpenNews 新闻合集 {time.strftime('%Y-%m-%d')}",
         "items": selected,
         "skipped_items": [{"history_id": item, "reason": "不可用于合集或已入过合集"} for item in missing if item],
+        "image_duplicate_audit": duplicate_audit,
         "result": {},
         "error": "",
     }
@@ -315,6 +512,14 @@ def build_collection_video(root: Path, output_root: Path, job_id: str) -> dict:
     job = load_collection_job(root, job_id)
     if not job:
         raise ValueError("合集任务不存在")
+    duplicate_audit = audit_collection_candidate_image_duplicates(
+        root,
+        output_root,
+        [str((item or {}).get("history_id") or "") for item in (job.get("items") or [])],
+    )
+    update_collection_job(root, job_id, image_duplicate_audit=duplicate_audit)
+    if not duplicate_audit.get("ok", True) and _duplicate_image_blocking_enabled():
+        raise RuntimeError("合集素材审核失败：检测到重复图片素材，已阻止生成合集")
     update_collection_job(root, job_id, status="running", message="正在准备合集视频素材...")
     aspect_ratio = "vertical" if job.get("aspect_ratio") == "vertical" else "horizontal"
     target_w, target_h = (1080, 1920) if aspect_ratio == "vertical" else (1920, 1080)

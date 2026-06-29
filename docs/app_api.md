@@ -301,7 +301,7 @@ JSON 请求，按分区和时间范围抓取热点。
 ### 自动抓取批次
 
 - `GET /api/opennews/batches/config`
-- `POST /api/opennews/batches/config`
+- `POST /api/opennews/batches/config`：OpenNews 页面按钮会写入 `enabled=true/false`、`interval_minutes=120`、`limit=20`。开启后每 2 小时抓取 20 条热点，按 3:1:2 生成 6 条；主播男女轮换状态独立持久化，关闭再开启会继续切换。
 - `POST /api/opennews/batches/run-now`
 - `GET /api/opennews/batches`
 
@@ -320,6 +320,8 @@ JSON 请求:
   "youtube_auto_publish": true,
   "youtube_privacy_status": "public",
   "youtube_aspects": ["horizontal", "vertical"],
+  "x_auto_publish": false,
+  "x_aspects": ["vertical"],
   "notes": "做成简短新闻口播"
 }
 ```
@@ -343,7 +345,35 @@ X-Token: NEWSdesk8821Aki6000HsVp
 - `GET /api/external/opennews/jobs/{job_id}`
 - `GET /api/external/opennews/ready-videos?limit=50`
 
-这些接口已经会在选定新闻后自动生成横屏/竖屏视频，并可自动发布 YouTube。
+这些接口已经会在选定新闻后自动生成横屏/竖屏视频，并可自动发布 YouTube / X。X 发布结果会返回在 `x_records`、`x_latest`、`x_urls`、`x_error` 字段里。
+
+## X 自动发布
+
+后台配置:
+
+```env
+X_CONSUMER_KEY=...
+X_CONSUMER_SECRET=...
+X_BEARER_TOKEN=...
+X_CLIENT_ID=...
+X_CLIENT_SECRET=...
+X_REDIRECT_URI=https://aiagent.office.ihousejapan.cn/api/x/oauth/callback
+OPENNEWS_X_AUTO_PUBLISH_ENABLED=1
+OPENNEWS_X_PUBLISH_SINGLE_SHORTS_ENABLED=1
+OPENNEWS_X_PUBLISH_COLLECTION_ENABLED=0
+```
+
+自动批次里，X 发布本批选中的 6 条竖屏视频；横屏合集不自动发布到 X。
+
+授权与状态:
+
+- `GET /api/x/status`
+- `GET /api/x/oauth/start`
+- `GET /api/x/oauth/callback`
+- `POST /api/x/upload`
+- `GET /api/x/jobs/{job_id}`
+
+第一次部署后，用管理员登录系统并访问 `/api/x/oauth/start`，在 X 授权页点击 Authorize app。回调成功后系统会保存 `access_token`、`refresh_token` 和过期时间到 `output/x_auth/x_token.json`，后续发布会自动刷新 token。
 
 ## 素材库
 
