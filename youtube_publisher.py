@@ -12,6 +12,7 @@ load_dotenv(override=False)
 
 YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
+YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 YOUTUBE_UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 YOUTUBE_THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube"
@@ -122,6 +123,40 @@ def get_youtube_channel(token_store_path: Path) -> dict[str, Any]:
         "uploads_playlist": (((item.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads") or ""),
         "privacy_status": ((item.get("status") or {}).get("privacyStatus") or ""),
         "long_uploads_status": ((item.get("status") or {}).get("longUploadsStatus") or ""),
+        "raw": item,
+    }
+
+
+def get_youtube_video_metrics(token_store_path: Path, video_id: str) -> dict[str, Any]:
+    video_id = str(video_id or "").strip()
+    if not video_id:
+        raise YouTubePublishError("读取 YouTube 视频数据失败：缺少 video_id")
+    access_token = refresh_youtube_access_token(token_store_path)
+    response = requests.get(
+        YOUTUBE_VIDEOS_URL,
+        params={"part": "snippet,statistics,status", "id": video_id},
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise YouTubePublishError(f"读取 YouTube 视频数据失败：{response.status_code} {response.text[:500]}")
+    items = (response.json().get("items") or [])
+    if not items:
+        raise YouTubePublishError("读取 YouTube 视频数据失败：未找到对应视频")
+    item = items[0]
+    statistics = item.get("statistics") or {}
+    snippet = item.get("snippet") or {}
+    status = item.get("status") or {}
+    return {
+        "platform": "youtube",
+        "video_id": video_id,
+        "title": str(snippet.get("title") or "").strip(),
+        "published_at": str(snippet.get("publishedAt") or "").strip(),
+        "privacy_status": str(status.get("privacyStatus") or "").strip(),
+        "view_count": int(statistics.get("viewCount") or 0),
+        "like_count": int(statistics.get("likeCount") or 0),
+        "comment_count": int(statistics.get("commentCount") or 0),
+        "favorite_count": int(statistics.get("favoriteCount") or 0),
         "raw": item,
     }
 

@@ -3046,12 +3046,21 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
         for item in related_articles[:8]
         if isinstance(item, dict)
     )
-    language = "繁體中文" if target_market == "tw" else ("日本語" if target_market == "jp" else "简体中文")
+    language = (
+        "繁體中文"
+        if target_market == "tw"
+        else ("日本語" if target_market == "jp" else ("English" if target_market == "en" else "简体中文"))
+    )
+    length_guidance = (
+        "简体/繁体中文约 220-320 字；日语约 420-560 字；英语约 110-160 words。"
+        if target_market == "en"
+        else "简体/繁体中文约 220-320 字；日语约 420-560 字。"
+    )
     prompt = f"""
 你是 iHouse 的 OpenNews 新闻视频编辑。请根据公开新闻源生成短视频新闻口播稿。
 
 输出语言：{language}
-目标长度：新闻视频口播，约 45-60 秒。简体/繁体中文约 220-320 字；日语约 420-560 字。
+目标长度：新闻视频口播，约 45-60 秒。{length_guidance}
 来源名称：{article.get("source_name")}
 授权：{article.get("license")}
 标题：{article.get("title")}

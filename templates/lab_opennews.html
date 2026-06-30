@@ -1915,13 +1915,61 @@
       if (item.vertical_url) links.push(`<button class="link-btn" data-download-url="${escapeHtml(item.vertical_url)}" data-name="${escapeHtml(item.title || "vertical")}_vertical.mp4">下载竖屏</button>`);
       (item.youtube_urls || []).forEach((url, index) => links.push(`<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`));
       (item.x_urls || []).forEach((url, index) => links.push(`<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">X ${index + 1}</a>`));
+      (item.facebook_urls || []).forEach((url, index) => links.push(`<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Facebook ${index + 1}</a>`));
       const dotClass = item.status === "completed" ? "done" : item.status === "failed" ? "failed" : "running";
       return `
         <div class="progress-item">
           <span class="dot ${dotClass}"></span>
           <span><strong>${escapeHtml(item.title || "新闻")}</strong><br>${escapeHtml(item.status || "")}${item.youtube_error ? ` · ${escapeHtml(item.youtube_error)}` : ""}${item.x_error ? ` · ${escapeHtml(item.x_error)}` : ""}</span>
         </div>
+        ${renderPlatformMetricsBlock(item.platform_metrics)}
         <div class="links">${links.join("")}</div>
+      `;
+    }
+
+    function formatMetricNumber(value) {
+      if (value === null || value === undefined || value === "") return "—";
+      const num = Number(value);
+      if (!Number.isFinite(num)) return "—";
+      return num.toLocaleString("zh-CN");
+    }
+
+    function renderSinglePlatformMetric(label, payload) {
+      if (!payload || (!payload.record && !payload.metrics && !payload.error)) return "";
+      const record = payload.record || {};
+      const data = payload.metrics || {};
+      const url = record.youtube_url || record.x_url || record.facebook_url || data.permalink_url || "";
+      const title = data.title || data.text || record.title || record.text || "—";
+      return `
+        <div class="detail-row" style="padding:12px; margin-top:10px;">
+          <div class="detail-title" style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
+            <span>${escapeHtml(label)}</span>
+            ${url ? `<a class="chip" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">打开</a>` : ""}
+          </div>
+          <div class="preview-meta" style="margin-top:6px;">${escapeHtml(title)}</div>
+          ${payload.ok ? `
+            <div class="chips" style="margin-top:10px;">
+              <span class="chip">浏览 ${escapeHtml(formatMetricNumber(data.view_count))}</span>
+              <span class="chip">点赞 ${escapeHtml(formatMetricNumber(data.like_count))}</span>
+              <span class="chip">评论 ${escapeHtml(formatMetricNumber(data.comment_count))}</span>
+            </div>
+          ` : `<div class="notice error" style="margin-top:10px;">${escapeHtml(payload.error || "平台数据读取失败")}</div>`}
+        </div>
+      `;
+    }
+
+    function renderPlatformMetricsBlock(platformMetrics) {
+      const platforms = (platformMetrics && platformMetrics.platforms) || {};
+      const cards = [];
+      if (platforms.youtube) cards.push(renderSinglePlatformMetric("YouTube", platforms.youtube));
+      if (platforms.x) cards.push(renderSinglePlatformMetric("X", platforms.x));
+      if (platforms.facebook) cards.push(renderSinglePlatformMetric("Facebook", platforms.facebook));
+      if (!cards.length) return "";
+      return `
+        <div class="detail-row" style="margin-top:12px;">
+          <div class="detail-title">平台数据</div>
+          ${cards.join("")}
+        </div>
       `;
     }
 
@@ -1970,6 +2018,7 @@
       $("videoList").innerHTML = state.videos.map((video) => {
         const youtubeLinks = (video.youtube_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`);
         const xLinks = (video.x_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">X ${index + 1}</a>`);
+        const facebookLinks = (video.facebook_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Facebook ${index + 1}</a>`);
         return `
           <article class="video">
             <div class="video-head">
@@ -1978,6 +2027,7 @@
                 <div class="meta">${escapeHtml(video.source_name || "")} · ${escapeHtml(video.published_at || "")} · 完成 ${formatTime(video.completed_at)}</div>
               </div>
             </div>
+            ${renderPlatformMetricsBlock(video.platform_metrics)}
             <div class="links">
               ${video.horizontal_url ? `<button class="link-btn" data-preview-url="${escapeHtml(video.horizontal_url)}" data-preview-title="${escapeHtml(video.title || "OpenNews 成片")}">预览横屏</button>` : ""}
               ${video.vertical_url ? `<button class="link-btn" data-preview-url="${escapeHtml(video.vertical_url)}" data-preview-title="${escapeHtml(video.title || "OpenNews 成片")}">预览竖屏</button>` : ""}
@@ -1985,6 +2035,7 @@
               ${video.vertical_url ? `<button class="link-btn" data-download-url="${escapeHtml(video.vertical_url)}" data-name="${escapeHtml(video.title || "opennews")}_vertical.mp4">下载竖屏</button>` : ""}
               ${youtubeLinks.join("")}
               ${xLinks.join("")}
+              ${facebookLinks.join("")}
             </div>
           </article>
         `;
@@ -2315,7 +2366,9 @@
               ${item.vertical_url ? `<button class="link-btn" data-download-url="${escapeHtml(item.vertical_url)}" data-name="${escapeHtml(item.title || "vertical")}_vertical.mp4">下载竖屏</button>` : ""}
               ${(item.youtube_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">YouTube ${index + 1}</a>`).join("")}
               ${(item.x_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">X ${index + 1}</a>`).join("")}
+              ${(item.facebook_urls || []).map((url, index) => `<a class="link-btn" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Facebook ${index + 1}</a>`).join("")}
             </div>
+            ${renderPlatformMetricsBlock(item.platform_metrics)}
           </div>
         `).join("") || '<div class="empty">这个任务暂无条目。</div>'}
       `;

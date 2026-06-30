@@ -140,11 +140,24 @@ from opennews_localtok import (
     update_proposal as update_localtok_proposal,
 )
 from source_ingest import analyze_topic_fields, analyze_topic_input
+from facebook_publisher import (
+    FACEBOOK_SCOPE,
+    FacebookPublishError,
+    build_facebook_authorization_url,
+    exchange_facebook_code_for_tokens,
+    exchange_facebook_long_lived_user_token,
+    facebook_env_config,
+    get_facebook_video_metrics,
+    get_facebook_page,
+    save_facebook_authorization,
+    upload_video_to_facebook_page,
+)
 from youtube_publisher import (
     YOUTUBE_SCOPE,
     YouTubePublishError,
     exchange_youtube_code_for_tokens,
     get_youtube_channel,
+    get_youtube_video_metrics,
     save_youtube_refresh_token,
     set_youtube_thumbnail,
     upload_video_to_youtube,
@@ -156,6 +169,7 @@ from x_publisher import (
     build_x_authorization_url,
     exchange_x_code_for_tokens,
     generate_x_pkce_pair,
+    get_x_post_metrics,
     get_x_user,
     save_x_tokens,
     upload_video_to_x,
@@ -194,6 +208,8 @@ YOUTUBE_UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
 YOUTUBE_UPLOAD_LOCK = threading.Lock()
 X_UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
 X_UPLOAD_LOCK = threading.Lock()
+FACEBOOK_UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
+FACEBOOK_UPLOAD_LOCK = threading.Lock()
 OPENNEWS_COLLECTION_AUTO_LOCK = threading.Lock()
 OPENNEWS_BATCH_AUTO_PRODUCE_LOCK = threading.Lock()
 ASSETS_DIR = BASE_DIR / "assets"
@@ -277,6 +293,8 @@ YOUTUBE_THUMBNAIL_RETRY_DIR = OUTPUT_DIR / "youtube_thumbnail_retries"
 YOUTUBE_THUMBNAIL_COOLDOWN_PATH = YOUTUBE_AUTH_DIR / "thumbnail_cooldown.json"
 X_AUTH_DIR = OUTPUT_DIR / "x_auth"
 X_TOKEN_STORE_PATH = X_AUTH_DIR / "x_token.json"
+FACEBOOK_AUTH_DIR = OUTPUT_DIR / "facebook_auth"
+FACEBOOK_TOKEN_STORE_PATH = FACEBOOK_AUTH_DIR / "facebook_token.json"
 FLOORPLAN_NAV_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_AUTO_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_BATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -285,6 +303,7 @@ OPENNEWS_LOCALTOK_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_THUMBNAIL_RETRY_DIR.mkdir(parents=True, exist_ok=True)
 X_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+FACEBOOK_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 
 MATERIAL_VECTOR_SERVICE_URL = os.getenv("OPENNEWS_MATERIAL_VECTOR_URL", "http://192.168.0.34:8897").strip().rstrip("/")
 MATERIAL_VECTOR_SYNC_ENABLED = (
@@ -330,6 +349,34 @@ def _opennews_x_single_shorts_enabled() -> bool:
 
 def _opennews_x_collection_enabled() -> bool:
     return _env_flag("OPENNEWS_X_PUBLISH_COLLECTION_ENABLED", "0")
+
+
+def _opennews_facebook_auto_publish_default() -> bool:
+    return _env_flag("OPENNEWS_FACEBOOK_AUTO_PUBLISH_ENABLED", "1")
+
+
+def _opennews_facebook_auto_publish_disabled() -> bool:
+    return _env_flag("OPENNEWS_FACEBOOK_AUTO_PUBLISH_DISABLED", "0")
+
+
+def _opennews_facebook_single_shorts_enabled() -> bool:
+    return _env_flag("OPENNEWS_FACEBOOK_PUBLISH_SINGLE_SHORTS_ENABLED", "1")
+
+
+def _opennews_facebook_collection_enabled() -> bool:
+    return _env_flag("OPENNEWS_FACEBOOK_PUBLISH_COLLECTION_ENABLED", "0")
+
+
+def _opennews_youtube_publish_language_versions_enabled() -> bool:
+    return _env_flag("OPENNEWS_YOUTUBE_PUBLISH_LANGUAGE_VERSIONS_ENABLED", "0")
+
+
+def _opennews_x_publish_language_versions_enabled() -> bool:
+    return _env_flag("OPENNEWS_X_PUBLISH_LANGUAGE_VERSIONS_ENABLED", "1")
+
+
+def _opennews_facebook_publish_language_versions_enabled() -> bool:
+    return _env_flag("OPENNEWS_FACEBOOK_PUBLISH_LANGUAGE_VERSIONS_ENABLED", "1")
 
 
 def _youtube_thumbnail_error_is_rate_limited(error: str) -> bool:
@@ -661,6 +708,23 @@ VOICE_PRESETS = [
         "tags": ["女声", "日语", "自然"],
         "sample_text": "こんにちは。今日はこのテーマを、わかりやすく短く整理してご紹介します。",
     },
+    {
+        "id": "english_female",
+        "name": "自然英语女声",
+        "subtitle": "英语",
+        "gender": "female",
+        "language": "en-US",
+        "style": "适合国际新闻、科技资讯、英文市场解说内容",
+        "voice_id": (
+            os.getenv("VOICE_ENGLISH_FEMALE", "").strip()
+            or os.getenv("VOICE_MANDARIN_FEMALE", "").strip()
+            or "Chinese (Mandarin)_Warm_Bestie"
+        ),
+        "default_speed": 1.05,
+        "default_volume": 1.0,
+        "tags": ["女声", "英语", "国际"],
+        "sample_text": "Hello, here is a quick and clear breakdown of today's biggest story.",
+    },
 ]
 
 
@@ -668,6 +732,7 @@ INTERFACE_LANGUAGES = [
     {"id": "zh-CN", "name": "简体中文"},
     {"id": "zh-TW", "name": "繁體中文"},
     {"id": "ja-JP", "name": "日本語"},
+    {"id": "en-US", "name": "English"},
 ]
 
 DEPARTMENTS = [
@@ -679,6 +744,7 @@ TARGET_MARKETS = [
     {"id": "cn", "name": "中国市场", "content_language": "简体中文", "default_voice_preset_id": "mandarin_female"},
     {"id": "tw", "name": "台湾市场", "content_language": "繁體中文", "default_voice_preset_id": "taiwan_clone"},
     {"id": "jp", "name": "日本市场", "content_language": "日语", "default_voice_preset_id": "japanese_female"},
+    {"id": "en", "name": "英语市场", "content_language": "English", "default_voice_preset_id": "english_female"},
 ]
 
 COMPOSITION_TRANSITIONS = [
@@ -913,6 +979,22 @@ OPENNEWS_QWEN_TTS_TOKEN = os.getenv("OPENNEWS_QWEN_TTS_TOKEN", "local-qwen3-tts-
 OPENNEWS_QWEN_TTS_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_SPEAKER", "serena").strip() or "serena"
 OPENNEWS_QWEN_TTS_FEMALE_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_FEMALE_SPEAKER", "serena").strip() or "serena"
 OPENNEWS_QWEN_TTS_MALE_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_MALE_SPEAKER", "aiden").strip() or "aiden"
+OPENNEWS_QWEN_TTS_JAPANESE_FEMALE_SPEAKER = os.getenv(
+    "OPENNEWS_QWEN_TTS_JAPANESE_FEMALE_SPEAKER",
+    OPENNEWS_QWEN_TTS_FEMALE_SPEAKER,
+).strip() or OPENNEWS_QWEN_TTS_FEMALE_SPEAKER
+OPENNEWS_QWEN_TTS_JAPANESE_MALE_SPEAKER = os.getenv(
+    "OPENNEWS_QWEN_TTS_JAPANESE_MALE_SPEAKER",
+    OPENNEWS_QWEN_TTS_MALE_SPEAKER,
+).strip() or OPENNEWS_QWEN_TTS_MALE_SPEAKER
+OPENNEWS_QWEN_TTS_ENGLISH_FEMALE_SPEAKER = os.getenv(
+    "OPENNEWS_QWEN_TTS_ENGLISH_FEMALE_SPEAKER",
+    OPENNEWS_QWEN_TTS_FEMALE_SPEAKER,
+).strip() or OPENNEWS_QWEN_TTS_FEMALE_SPEAKER
+OPENNEWS_QWEN_TTS_ENGLISH_MALE_SPEAKER = os.getenv(
+    "OPENNEWS_QWEN_TTS_ENGLISH_MALE_SPEAKER",
+    OPENNEWS_QWEN_TTS_MALE_SPEAKER,
+).strip() or OPENNEWS_QWEN_TTS_MALE_SPEAKER
 OPENNEWS_QWEN_TTS_LANGUAGE = os.getenv("OPENNEWS_QWEN_TTS_LANGUAGE", "chinese").strip() or "chinese"
 OPENNEWS_QWEN_TTS_TIMEOUT = max(15, int(os.getenv("OPENNEWS_QWEN_TTS_TIMEOUT", "180") or "180"))
 OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX = (os.getenv("OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
@@ -928,9 +1010,33 @@ OPENNEWS_QWEN_TTS_MALE_INSTRUCT = os.getenv(
     "OPENNEWS_QWEN_TTS_MALE_INSTRUCT",
     "用沉稳、清晰、专业的中文新闻男主播语气朗读，节奏稳定，信息感强。",
 ).strip()
+OPENNEWS_QWEN_TTS_JAPANESE_FEMALE_INSTRUCT = os.getenv(
+    "OPENNEWS_QWEN_TTS_JAPANESE_FEMALE_INSTRUCT",
+    "自然で聞き取りやすい日本語ニュース女性アナウンサーの口調で読み上げてください。落ち着いて、明瞭で、テンポは安定させてください。",
+).strip()
+OPENNEWS_QWEN_TTS_JAPANESE_MALE_INSTRUCT = os.getenv(
+    "OPENNEWS_QWEN_TTS_JAPANESE_MALE_INSTRUCT",
+    "落ち着きがあり聞き取りやすい日本語ニュース男性アナウンサーの口調で読み上げてください。明瞭で安定したテンポを保ってください。",
+).strip()
+OPENNEWS_QWEN_TTS_ENGLISH_FEMALE_INSTRUCT = os.getenv(
+    "OPENNEWS_QWEN_TTS_ENGLISH_FEMALE_INSTRUCT",
+    "Read in a clear, natural, professional English female news anchor tone with steady pacing and trustworthy delivery.",
+).strip()
+OPENNEWS_QWEN_TTS_ENGLISH_MALE_INSTRUCT = os.getenv(
+    "OPENNEWS_QWEN_TTS_ENGLISH_MALE_INSTRUCT",
+    "Read in a clear, calm, professional English male news anchor tone with steady pacing and strong information delivery.",
+).strip()
 OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID = os.getenv("OPENNEWS_MINIMAX_FALLBACK_VOICE_PRESET_ID", "mandarin_female").strip() or "mandarin_female"
 OPENNEWS_MINIMAX_FALLBACK_FEMALE_VOICE_PRESET_ID = os.getenv("OPENNEWS_MINIMAX_FALLBACK_FEMALE_VOICE_PRESET_ID", "mandarin_female").strip() or "mandarin_female"
 OPENNEWS_MINIMAX_FALLBACK_MALE_VOICE_PRESET_ID = os.getenv("OPENNEWS_MINIMAX_FALLBACK_MALE_VOICE_PRESET_ID", "mandarin_male").strip() or "mandarin_male"
+OPENNEWS_MINIMAX_FALLBACK_JAPANESE_FEMALE_VOICE_PRESET_ID = os.getenv(
+    "OPENNEWS_MINIMAX_FALLBACK_JAPANESE_FEMALE_VOICE_PRESET_ID",
+    "japanese_female",
+).strip() or "japanese_female"
+OPENNEWS_MINIMAX_FALLBACK_ENGLISH_FEMALE_VOICE_PRESET_ID = os.getenv(
+    "OPENNEWS_MINIMAX_FALLBACK_ENGLISH_FEMALE_VOICE_PRESET_ID",
+    "english_female",
+).strip() or "english_female"
 # Collection intro is intentionally short because digital-human generation is slow.
 OPENNEWS_COLLECTION_INTRO_ENABLED = (os.getenv("OPENNEWS_COLLECTION_INTRO_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_COLLECTION_INTRO_ANCHOR_PATH = ASSETS_DIR / os.getenv("OPENNEWS_COLLECTION_INTRO_ANCHOR_FILENAME", "opennews_anchor_daily.png").strip()
@@ -988,6 +1094,35 @@ def _opennews_presenter_config(gender: str = "female") -> dict:
             "不要改变背景中的 OpenNews 每日热点标识，不要添加额外文字。"
         ),
     }
+
+
+def _opennews_presenter_config_for_market(target_market: str = "cn", gender: str = "female") -> dict:
+    target_market = str(target_market or "cn").strip().lower() or "cn"
+    presenter = _opennews_presenter_config(gender)
+    gender = presenter.get("gender", "female")
+    if target_market == "jp":
+        presenter["qwen_speaker"] = (
+            OPENNEWS_QWEN_TTS_JAPANESE_MALE_SPEAKER if gender == "male" else OPENNEWS_QWEN_TTS_JAPANESE_FEMALE_SPEAKER
+        )
+        presenter["qwen_instruct"] = (
+            OPENNEWS_QWEN_TTS_JAPANESE_MALE_INSTRUCT if gender == "male" else OPENNEWS_QWEN_TTS_JAPANESE_FEMALE_INSTRUCT
+        )
+        presenter["minimax_voice_preset_id"] = OPENNEWS_MINIMAX_FALLBACK_JAPANESE_FEMALE_VOICE_PRESET_ID
+        presenter["voice_preset_id"] = "japanese_female"
+        return presenter
+    if target_market == "en":
+        presenter["qwen_speaker"] = (
+            OPENNEWS_QWEN_TTS_ENGLISH_MALE_SPEAKER if gender == "male" else OPENNEWS_QWEN_TTS_ENGLISH_FEMALE_SPEAKER
+        )
+        presenter["qwen_instruct"] = (
+            OPENNEWS_QWEN_TTS_ENGLISH_MALE_INSTRUCT if gender == "male" else OPENNEWS_QWEN_TTS_ENGLISH_FEMALE_INSTRUCT
+        )
+        presenter["minimax_voice_preset_id"] = OPENNEWS_MINIMAX_FALLBACK_ENGLISH_FEMALE_VOICE_PRESET_ID
+        presenter["voice_preset_id"] = "english_female"
+        return presenter
+    if target_market == "tw":
+        presenter["voice_preset_id"] = "taiwan_clone" if str(os.getenv("VOICE_TAIWAN_CLONE", "")).strip() else "taiwan_female"
+    return presenter
 
 
 def _normalize_opennews_presenter_config(config: Optional[dict]) -> dict:
@@ -1443,6 +1578,49 @@ def _get_target_market(target_market_id: Optional[str]) -> dict:
     return dict(TARGET_MARKETS[0])
 
 
+OPENNEWS_EXTRA_TARGET_MARKET_IDS = ("jp", "en")
+
+
+def _normalize_opennews_extra_target_markets(raw: Any, primary_target_market: str = "cn") -> list[str]:
+    primary = str(primary_target_market or "cn").strip().lower() or "cn"
+    if isinstance(raw, str):
+        requested = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        requested = [str(part or "").strip().lower() for part in raw if str(part or "").strip()]
+    else:
+        requested = []
+    valid_market_ids = {item["id"] for item in TARGET_MARKETS}
+    normalized: list[str] = []
+    for market_id in requested:
+        if market_id == primary:
+            continue
+        if market_id not in valid_market_ids:
+            continue
+        if market_id not in OPENNEWS_EXTRA_TARGET_MARKET_IDS:
+            continue
+        if market_id not in normalized:
+            normalized.append(market_id)
+    return normalized
+
+
+def _opennews_multilingual_enabled() -> bool:
+    return _env_flag("OPENNEWS_MULTI_LANGUAGE_ENABLED", "1")
+
+
+def _opennews_extra_target_markets_for_primary(primary_target_market: str, configured: Any = None) -> list[str]:
+    if configured is None:
+        configured = os.getenv("OPENNEWS_MULTI_LANGUAGE_TARGET_MARKETS", ",".join(OPENNEWS_EXTRA_TARGET_MARKET_IDS))
+    normalized = _normalize_opennews_extra_target_markets(configured, primary_target_market)
+    if normalized:
+        return normalized
+    primary = str(primary_target_market or "cn").strip().lower() or "cn"
+    return [market_id for market_id in OPENNEWS_EXTRA_TARGET_MARKET_IDS if market_id != primary]
+
+
+def _language_version_group_id() -> str:
+    return f"opennews_lang_{int(time.time())}_{uuid.uuid4().hex[:10]}"
+
+
 def _get_department(department_id: Optional[str]) -> dict:
     for department in DEPARTMENTS:
         if department["id"] == department_id:
@@ -1466,10 +1644,12 @@ def _get_visible_voice_preset_ids(target_market_id: Optional[str]) -> set[str]:
     target_market_id = (target_market_id or "cn").strip() or "cn"
     base_ids = {"ricky_clone", "bin_clone"}
     if target_market_id == "tw":
-        return {"mandarin_female", "mandarin_male", "taiwan_female", "taiwan_clone", "japanese_female"} | base_ids
+        return {"mandarin_female", "mandarin_male", "taiwan_female", "taiwan_clone", "japanese_female", "english_female"} | base_ids
     if target_market_id == "jp":
-        return {"mandarin_female", "mandarin_male", "japanese_female"} | base_ids
-    return {"mandarin_female", "mandarin_male"} | base_ids
+        return {"mandarin_female", "mandarin_male", "japanese_female", "english_female"} | base_ids
+    if target_market_id == "en":
+        return {"english_female", "japanese_female", "mandarin_female", "mandarin_male"} | base_ids
+    return {"mandarin_female", "mandarin_male", "english_female"} | base_ids
 
 
 def _is_avatar_voice_compatible(avatar_option: Optional[dict], voice_preset: Optional[dict]) -> bool:
@@ -2059,6 +2239,48 @@ def run_pipeline_with_progress(
             "cost_entries": task.get("cost_entries", []),
             "cost_summary": task.get("cost_summary", _empty_cost_summary()),
         }
+
+        if (
+            _opennews_multilingual_enabled()
+            and (
+                workflow_config.get("opennews")
+                or workflow_config.get("opennews_material_only")
+                or digital_human_engine == "opennews_material_only"
+            )
+        ):
+            extra_market_ids = _opennews_extra_target_markets_for_primary(target_market)
+            language_versions: list[dict] = []
+            if extra_market_ids:
+                tracker.log(f"正在派生多语言版本：{' / '.join(extra_market_ids)}...", step=5)
+            for extra_market_id in extra_market_ids:
+                try:
+                    version_payload = _build_opennews_language_version(
+                        output_dir=output_dir,
+                        source_topic=topic,
+                        source_script=script_data,
+                        source_segments=final_segments,
+                        primary_workflow_config=result_data.get("workflow_config") or {},
+                        target_market=extra_market_id,
+                        department_id=department_id,
+                        provider=script_model,
+                        user={
+                            "username": task.get("owner_username"),
+                            "display_name": task.get("owner_display_name"),
+                            "role": task.get("owner_role", "user"),
+                        },
+                        compose_videos=False,
+                    )
+                    language_versions.append(version_payload)
+                except Exception as exc:
+                    language_versions.append(
+                        {
+                            "target_market": extra_market_id,
+                            "error": str(exc),
+                        }
+                    )
+            if language_versions:
+                result_data["language_version_group_id"] = _language_version_group_id()
+                result_data["language_versions"] = language_versions
 
         task["result"] = result_data
         _persist_task_result(task)
@@ -2810,7 +3032,27 @@ def _should_use_qwen_tts_for_workflow(workflow_config: dict) -> bool:
     )
 
 
-def _generate_opennews_qwen_tts_audio(script_text: str, output_path: str, presenter_config: Optional[dict] = None) -> str:
+def _opennews_qwen_tts_language_enabled(target_market: str) -> bool:
+    target_market = str(target_market or "cn").strip().lower() or "cn"
+    return target_market in {"cn", "tw", "jp", "en"}
+
+
+def _opennews_qwen_tts_language_for_market(target_market: str) -> str:
+    target_market = str(target_market or "cn").strip().lower() or "cn"
+    if target_market == "jp":
+        return "japanese"
+    if target_market == "en":
+        return "english"
+    return OPENNEWS_QWEN_TTS_LANGUAGE
+
+
+def _generate_opennews_qwen_tts_audio(
+    script_text: str,
+    output_path: str,
+    presenter_config: Optional[dict] = None,
+    *,
+    target_market: str = "cn",
+) -> str:
     if not OPENNEWS_QWEN_TTS_BASE_URL or not OPENNEWS_QWEN_TTS_TOKEN:
         raise RuntimeError("OpenNews Qwen3-TTS 未配置 base_url 或 token")
     presenter = _normalize_opennews_presenter_config(presenter_config)
@@ -2822,7 +3064,7 @@ def _generate_opennews_qwen_tts_audio(script_text: str, output_path: str, presen
     }
     payload = {
         "text": script_text,
-        "language": OPENNEWS_QWEN_TTS_LANGUAGE,
+        "language": _opennews_qwen_tts_language_for_market(target_market),
         "speaker": presenter.get("qwen_speaker") or OPENNEWS_QWEN_TTS_SPEAKER,
         "instruct": presenter.get("qwen_instruct") or OPENNEWS_QWEN_TTS_INSTRUCT,
     }
@@ -2897,13 +3139,22 @@ def _generate_audio_for_workflow(
     generate_audio_fn,
     log=None,
 ) -> tuple[str, str]:
-    opennews_tts = _should_use_qwen_tts_for_workflow(workflow_config)
+    target_market = str(workflow_config.get("target_market") or "cn").strip().lower() or "cn"
+    opennews_tts = _should_use_qwen_tts_for_workflow(workflow_config) and _opennews_qwen_tts_language_enabled(target_market)
     if opennews_tts:
         presenter_config = _normalize_opennews_presenter_config(workflow_config.get("opennews_presenter"))
         try:
             if log:
-                log(f"OpenNews 使用 5090 Qwen3-TTS 本地配音：{presenter_config.get('qwen_speaker')}")
-            _generate_opennews_qwen_tts_audio(script_text, audio_path, presenter_config=presenter_config)
+                log(
+                    f"OpenNews 使用 5090 Qwen3-TTS 本地配音："
+                    f"{presenter_config.get('qwen_speaker')} / {_opennews_qwen_tts_language_for_market(target_market)}"
+                )
+            _generate_opennews_qwen_tts_audio(
+                script_text,
+                audio_path,
+                presenter_config=presenter_config,
+                target_market=target_market,
+            )
             return audio_path, "qwen3-tts"
         except Exception as exc:
             if not OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX:
@@ -3899,7 +4150,53 @@ def _serialize_result_for_ui(output_dir: str, result: dict, topic: str) -> dict:
             "url": narration_audio_url,
             "name": Path(str(payload.get("narration_audio_path", ""))).name or "narration.mp3",
         }
+    payload["language_versions"] = _serialize_language_versions_for_ui(output_dir, payload)
     return payload
+
+
+def _serialize_language_versions_for_ui(output_dir: str, result: dict) -> list[dict]:
+    raw_versions = result.get("language_versions")
+    if not isinstance(raw_versions, list):
+        return []
+    serialized: list[dict] = []
+    for item in raw_versions:
+        if not isinstance(item, dict):
+            continue
+        workflow_config = item.get("workflow_config") if isinstance(item.get("workflow_config"), dict) else {}
+        target_market = str(item.get("target_market") or workflow_config.get("target_market") or "").strip()
+        market = _get_target_market(target_market or "cn")
+        variant_payload = {
+            "target_market": target_market,
+            "language_label": market.get("content_language") or target_market,
+            "title": str(item.get("title") or "").strip(),
+            "cover_title": str(item.get("cover_title") or "").strip(),
+            "social_post": str(item.get("social_post") or "").strip(),
+            "history_id": result.get("history_id") if isinstance(result.get("history_id"), str) else "",
+        }
+        final_video_url = _history_file_url(output_dir, item.get("final_video_path", ""))
+        if final_video_url:
+            variant_payload["final_video"] = {
+                "url": final_video_url,
+                "name": Path(str(item.get("final_video_path", ""))).name or "final_video.mp4",
+            }
+        raw_video_variants = item.get("final_video_variants")
+        if isinstance(raw_video_variants, dict):
+            final_video_variants = {}
+            for variant_key, variant_data in raw_video_variants.items():
+                if not isinstance(variant_data, dict):
+                    continue
+                variant_video_url = _history_file_url(output_dir, variant_data.get("final_video_path", ""))
+                if not variant_video_url:
+                    continue
+                final_video_variants[str(variant_key)] = {
+                    "url": variant_video_url,
+                    "name": Path(str(variant_data.get("final_video_path", ""))).name or f"final_video_{variant_key}.mp4",
+                    "aspect_ratio": str(variant_data.get("compose_aspect_ratio") or variant_key),
+                }
+            if final_video_variants:
+                variant_payload["final_video_variants"] = final_video_variants
+        serialized.append(variant_payload)
+    return serialized
 
 
 def _segment_material_items(segment: dict) -> list[dict]:
@@ -4080,6 +4377,127 @@ def _save_result_to_output_dir(output_dir: Path, result: dict) -> None:
     (output_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
+def _platform_metrics_path(output_dir: Path) -> Path:
+    return output_dir / "platform_metrics.json"
+
+
+def _load_platform_metrics(output_dir: Path) -> dict[str, Any]:
+    path = _platform_metrics_path(output_dir)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_platform_metrics(output_dir: Path, payload: dict[str, Any]) -> None:
+    _platform_metrics_path(output_dir).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
+def _latest_publish_record(records: Any) -> dict[str, Any]:
+    if not isinstance(records, list):
+        return {}
+    for record in records:
+        if isinstance(record, dict):
+            return record
+    return {}
+
+
+def _collect_history_platform_metrics(output_dir: Path, result: dict, *, force_refresh: bool = False) -> dict[str, Any]:
+    existing = _load_platform_metrics(output_dir)
+    if existing and not force_refresh:
+        return existing
+    payload: dict[str, Any] = {
+        "history_id": output_dir.name,
+        "updated_at": int(time.time()),
+        "platforms": {},
+    }
+    youtube_record = _latest_publish_record(result.get("youtube_publish_records"))
+    if youtube_record.get("video_id"):
+        try:
+            payload["platforms"]["youtube"] = {
+                "ok": True,
+                "record": youtube_record,
+                "metrics": get_youtube_video_metrics(YOUTUBE_TOKEN_STORE_PATH, str(youtube_record.get("video_id") or "")),
+            }
+        except Exception as exc:
+            payload["platforms"]["youtube"] = {"ok": False, "record": youtube_record, "error": str(exc)}
+    x_record = _latest_publish_record(result.get("x_publish_records"))
+    post_id = str(x_record.get("post_id") or "").strip()
+    if post_id:
+        try:
+            payload["platforms"]["x"] = {
+                "ok": True,
+                "record": x_record,
+                "metrics": get_x_post_metrics(X_TOKEN_STORE_PATH, post_id),
+            }
+        except Exception as exc:
+            payload["platforms"]["x"] = {"ok": False, "record": x_record, "error": str(exc)}
+    facebook_record = _latest_publish_record(result.get("facebook_publish_records"))
+    facebook_video_id = str(facebook_record.get("video_id") or "").strip()
+    if facebook_video_id:
+        try:
+            payload["platforms"]["facebook"] = {
+                "ok": True,
+                "record": facebook_record,
+                "metrics": get_facebook_video_metrics(FACEBOOK_TOKEN_STORE_PATH, facebook_video_id),
+            }
+        except Exception as exc:
+            payload["platforms"]["facebook"] = {"ok": False, "record": facebook_record, "error": str(exc)}
+    language_versions_payload: list[dict[str, Any]] = []
+    for version in result.get("language_versions") or []:
+        if not isinstance(version, dict):
+            continue
+        version_payload: dict[str, Any] = {
+            "target_market": str(version.get("target_market") or ""),
+            "title": str(version.get("title") or ""),
+            "platforms": {},
+        }
+        youtube_record = _latest_publish_record(version.get("youtube_publish_records"))
+        if youtube_record.get("video_id"):
+            try:
+                version_payload["platforms"]["youtube"] = {
+                    "ok": True,
+                    "record": youtube_record,
+                    "metrics": get_youtube_video_metrics(YOUTUBE_TOKEN_STORE_PATH, str(youtube_record.get("video_id") or "")),
+                }
+            except Exception as exc:
+                version_payload["platforms"]["youtube"] = {"ok": False, "record": youtube_record, "error": str(exc)}
+        x_record = _latest_publish_record(version.get("x_publish_records"))
+        post_id = str(x_record.get("post_id") or "").strip()
+        if post_id:
+            try:
+                version_payload["platforms"]["x"] = {
+                    "ok": True,
+                    "record": x_record,
+                    "metrics": get_x_post_metrics(X_TOKEN_STORE_PATH, post_id),
+                }
+            except Exception as exc:
+                version_payload["platforms"]["x"] = {"ok": False, "record": x_record, "error": str(exc)}
+        facebook_record = _latest_publish_record(version.get("facebook_publish_records"))
+        facebook_video_id = str(facebook_record.get("video_id") or "").strip()
+        if facebook_video_id:
+            try:
+                version_payload["platforms"]["facebook"] = {
+                    "ok": True,
+                    "record": facebook_record,
+                    "metrics": get_facebook_video_metrics(FACEBOOK_TOKEN_STORE_PATH, facebook_video_id),
+                }
+            except Exception as exc:
+                version_payload["platforms"]["facebook"] = {"ok": False, "record": facebook_record, "error": str(exc)}
+        if version_payload["platforms"]:
+            language_versions_payload.append(version_payload)
+    if language_versions_payload:
+        payload["language_versions"] = language_versions_payload
+    _save_platform_metrics(output_dir, payload)
+    return payload
+
+
 def _resolve_youtube_publish_video(output_dir: Path, result: dict, aspect_ratio: str = "vertical") -> Path:
     aspect_ratio = (aspect_ratio or "vertical").strip().lower()
     variants = result.get("final_video_variants")
@@ -4210,6 +4628,7 @@ def _publish_opennews_result_to_youtube(
     aspects: list[str] | tuple[str, ...] = ("horizontal", "vertical"),
     privacy_status: str = "public",
     category_id: str = "25",
+    include_language_versions: bool = False,
 ) -> list[dict]:
     records: list[dict] = []
     metadata = _build_default_youtube_metadata(result)
@@ -4237,6 +4656,8 @@ def _publish_opennews_result_to_youtube(
             "job_id": f"auto_opennews_{aspect_key}_{int(time.time())}",
             "history_id": output_dir.name,
             "aspect_ratio": aspect_key,
+            "language_version": "primary",
+            "target_market": str((result.get("workflow_config") or {}).get("target_market") or "cn"),
             "video_path": str(video_path),
             "thumbnail_path": str(thumbnail_path) if thumbnail_path else "",
             "created_at": time.time(),
@@ -4247,6 +4668,55 @@ def _publish_opennews_result_to_youtube(
     if records:
         result["youtube_publish_records"] = existing_records[:20]
         result["youtube_publish_latest"] = records[-1]
+    if include_language_versions:
+        for version in result.get("language_versions") or []:
+            if not isinstance(version, dict) or version.get("error"):
+                continue
+            target_market = str(version.get("target_market") or "").strip()
+            if not target_market:
+                continue
+            version_metadata = _build_default_youtube_metadata(
+                version,
+                title=str(version.get("title") or metadata.get("title") or ""),
+                description=str(version.get("social_post") or metadata.get("description") or ""),
+                tags=["OpenNews", "iHouse", target_market.upper()],
+            )
+            version_records = version.get("youtube_publish_records")
+            if not isinstance(version_records, list):
+                version_records = []
+            for aspect in aspects:
+                aspect_key = str(aspect or "").strip().lower()
+                if aspect_key not in {"horizontal", "vertical"}:
+                    continue
+                video_path = _resolve_youtube_publish_video(output_dir, version, aspect_ratio=aspect_key)
+                thumbnail_path = _resolve_youtube_thumbnail(output_dir, version, aspect_ratio=aspect_key)
+                upload_result = upload_video_to_youtube(
+                    YOUTUBE_TOKEN_STORE_PATH,
+                    video_path,
+                    title=version_metadata["title"],
+                    description=version_metadata["description"],
+                    tags=version_metadata["tags"],
+                    privacy_status=privacy_status,
+                    category_id=category_id,
+                    made_for_kids=False,
+                    thumbnail_path=thumbnail_path,
+                )
+                record = {
+                    "job_id": f"auto_opennews_{target_market}_{aspect_key}_{int(time.time())}",
+                    "history_id": output_dir.name,
+                    "aspect_ratio": aspect_key,
+                    "language_version": target_market,
+                    "target_market": target_market,
+                    "video_path": str(video_path),
+                    "thumbnail_path": str(thumbnail_path) if thumbnail_path else "",
+                    "created_at": time.time(),
+                    **upload_result,
+                }
+                version_records.insert(0, record)
+                records.append(record)
+            if version_records:
+                version["youtube_publish_records"] = version_records[:20]
+                version["youtube_publish_latest"] = version_records[0]
         _save_result_to_output_dir(output_dir, result)
     return records
 
@@ -4298,6 +4768,60 @@ def _build_opennews_collection_x_post_text(items: list[dict], aspect_ratio: str)
     title = _short_opennews_collection_title(items, prefix="OpenNews热点合集")
     suffix = "#OpenNews #iHouse #新闻"
     return _fit_x_post_text(str(title), suffix=suffix)
+
+
+def _fit_facebook_post_text(
+    title: str,
+    *,
+    summary: str = "",
+    source_name: str = "",
+    source_url: str = "",
+    suffix: str = "#OpenNews #iHouse",
+) -> str:
+    title = re.sub(r"\s+", " ", str(title or "").strip()) or "iHouse OpenNews"
+    summary = re.sub(r"\s+", " ", str(summary or "").strip())
+    source_name = re.sub(r"\s+", " ", str(source_name or "").strip())
+    source_url = str(source_url or "").strip()
+    suffix = str(suffix or "").strip()
+    parts = [title]
+    if summary:
+        parts.append(summary[:400])
+    if source_name:
+        parts.append(f"来源：{source_name}")
+    if source_url:
+        parts.append(source_url)
+    if suffix:
+        parts.append(suffix)
+    return "\n".join(part for part in parts if part).strip()[:5000]
+
+
+def _build_default_facebook_post_text(result: dict, *, title: str = "", suffix: str = "#OpenNews #iHouse") -> str:
+    workflow_config = result.get("workflow_config") or {}
+    source = (workflow_config.get("source") or {}).get("article") or {}
+    default_title = (
+        title
+        or result.get("title")
+        or ((result.get("script") or {}).get("title") if isinstance(result.get("script"), dict) else "")
+        or result.get("topic")
+        or "iHouse OpenNews"
+    )
+    summary = ""
+    script = result.get("script") if isinstance(result.get("script"), dict) else {}
+    if isinstance(script, dict):
+        summary = str(script.get("summary") or script.get("social_post") or "").strip()
+    return _fit_facebook_post_text(
+        str(default_title),
+        summary=summary,
+        source_name=str(source.get("source_name") or source.get("trend_domain") or ""),
+        source_url=str(source.get("url") or ""),
+        suffix=suffix,
+    )
+
+
+def _build_opennews_collection_facebook_post_text(items: list[dict], aspect_ratio: str) -> str:
+    title = _short_opennews_collection_title(items, prefix="OpenNews热点合集")
+    summary = "精选热点新闻合集，自动生成横屏新闻视频。"
+    return _fit_facebook_post_text(str(title), summary=summary, suffix="#OpenNews #iHouse #新闻")
 
 
 def _update_x_upload_job(job_id: str, **updates: Any) -> dict:
@@ -4355,6 +4879,7 @@ def _publish_opennews_result_to_x(
     *,
     aspects: list[str] | tuple[str, ...] = ("vertical",),
     text: str = "",
+    include_language_versions: bool = True,
 ) -> list[dict]:
     records: list[dict] = []
     existing_records = result.get("x_publish_records")
@@ -4376,6 +4901,8 @@ def _publish_opennews_result_to_x(
             "job_id": f"auto_opennews_x_{aspect_key}_{int(time.time())}",
             "history_id": output_dir.name,
             "aspect_ratio": aspect_key,
+            "language_version": "primary",
+            "target_market": str((result.get("workflow_config") or {}).get("target_market") or "cn"),
             "video_path": str(video_path),
             "created_at": time.time(),
             **upload_result,
@@ -4385,6 +4912,172 @@ def _publish_opennews_result_to_x(
     if records:
         result["x_publish_records"] = existing_records[:20]
         result["x_publish_latest"] = records[-1]
+    if include_language_versions:
+        for version in result.get("language_versions") or []:
+            if not isinstance(version, dict) or version.get("error"):
+                continue
+            target_market = str(version.get("target_market") or "").strip()
+            if not target_market:
+                continue
+            version_records = version.get("x_publish_records")
+            if not isinstance(version_records, list):
+                version_records = []
+            for aspect in aspects:
+                aspect_key = str(aspect or "").strip().lower()
+                if aspect_key not in {"horizontal", "vertical"}:
+                    continue
+                video_path = _resolve_youtube_publish_video(output_dir, version, aspect_ratio=aspect_key)
+                post_text = str(text or "").strip() or _build_default_x_post_text(version, title=str(version.get("title") or ""))
+                upload_result = upload_video_to_x(
+                    X_TOKEN_STORE_PATH,
+                    video_path,
+                    text=post_text,
+                    made_with_ai=True,
+                )
+                record = {
+                    "job_id": f"auto_opennews_x_{target_market}_{aspect_key}_{int(time.time())}",
+                    "history_id": output_dir.name,
+                    "aspect_ratio": aspect_key,
+                    "language_version": target_market,
+                    "target_market": target_market,
+                    "video_path": str(video_path),
+                    "created_at": time.time(),
+                    **upload_result,
+                }
+                version_records.insert(0, record)
+                records.append(record)
+            if version_records:
+                version["x_publish_records"] = version_records[:20]
+                version["x_publish_latest"] = version_records[0]
+        _save_result_to_output_dir(output_dir, result)
+    return records
+
+
+def _update_facebook_upload_job(job_id: str, **updates: Any) -> dict:
+    with FACEBOOK_UPLOAD_LOCK:
+        job = FACEBOOK_UPLOAD_JOBS.get(job_id, {})
+        job.update(updates)
+        job["updated_at"] = time.time()
+        FACEBOOK_UPLOAD_JOBS[job_id] = job
+        return dict(job)
+
+
+def _run_facebook_upload_job(job_id: str) -> None:
+    job = _update_facebook_upload_job(job_id, status="running", message="正在上传到 Facebook...")
+    try:
+        output_dir = Path(job.get("output_dir") or "")
+        result = _load_result_from_output_dir(output_dir)
+        if not result:
+            raise FacebookPublishError("历史结果不存在，无法上传 Facebook")
+        upload_result = upload_video_to_facebook_page(
+            FACEBOOK_TOKEN_STORE_PATH,
+            Path(job.get("video_path") or ""),
+            description=str(job.get("text") or ""),
+            title=str(job.get("title") or ""),
+        )
+        publish_record = {
+            "job_id": job_id,
+            "history_id": output_dir.name,
+            "aspect_ratio": job.get("aspect_ratio") or "",
+            "video_path": job.get("video_path") or "",
+            "created_at": time.time(),
+            **upload_result,
+        }
+        records = result.get("facebook_publish_records")
+        if not isinstance(records, list):
+            records = []
+        records.insert(0, publish_record)
+        result["facebook_publish_records"] = records[:20]
+        result["facebook_publish_latest"] = publish_record
+        _save_result_to_output_dir(output_dir, result)
+        _update_facebook_upload_job(
+            job_id,
+            status="done",
+            message="Facebook 发布完成",
+            result=upload_result,
+            facebook_url=upload_result.get("facebook_url", ""),
+            video_id=upload_result.get("video_id", ""),
+        )
+    except Exception as exc:
+        _update_facebook_upload_job(job_id, status="failed", message=str(exc), error=str(exc))
+
+
+def _publish_opennews_result_to_facebook(
+    output_dir: Path,
+    result: dict,
+    *,
+    aspects: list[str] | tuple[str, ...] = ("vertical",),
+    text: str = "",
+    include_language_versions: bool = True,
+) -> list[dict]:
+    records: list[dict] = []
+    existing_records = result.get("facebook_publish_records")
+    if not isinstance(existing_records, list):
+        existing_records = []
+    for aspect in aspects:
+        aspect_key = str(aspect or "").strip().lower()
+        if aspect_key not in {"horizontal", "vertical"}:
+            continue
+        video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_key)
+        post_text = str(text or "").strip() or _build_default_facebook_post_text(result)
+        upload_result = upload_video_to_facebook_page(
+            FACEBOOK_TOKEN_STORE_PATH,
+            video_path,
+            description=post_text,
+            title=str(result.get("title") or result.get("topic") or "OpenNews"),
+        )
+        record = {
+            "job_id": f"auto_opennews_facebook_{aspect_key}_{int(time.time())}",
+            "history_id": output_dir.name,
+            "aspect_ratio": aspect_key,
+            "language_version": "primary",
+            "target_market": str((result.get("workflow_config") or {}).get("target_market") or "cn"),
+            "video_path": str(video_path),
+            "created_at": time.time(),
+            **upload_result,
+        }
+        existing_records.insert(0, record)
+        records.append(record)
+    if records:
+        result["facebook_publish_records"] = existing_records[:20]
+        result["facebook_publish_latest"] = records[-1]
+    if include_language_versions:
+        for version in result.get("language_versions") or []:
+            if not isinstance(version, dict) or version.get("error"):
+                continue
+            target_market = str(version.get("target_market") or "").strip()
+            if not target_market:
+                continue
+            version_records = version.get("facebook_publish_records")
+            if not isinstance(version_records, list):
+                version_records = []
+            for aspect in aspects:
+                aspect_key = str(aspect or "").strip().lower()
+                if aspect_key not in {"horizontal", "vertical"}:
+                    continue
+                video_path = _resolve_youtube_publish_video(output_dir, version, aspect_ratio=aspect_key)
+                post_text = str(text or "").strip() or _build_default_facebook_post_text(version, title=str(version.get("title") or ""))
+                upload_result = upload_video_to_facebook_page(
+                    FACEBOOK_TOKEN_STORE_PATH,
+                    video_path,
+                    description=post_text,
+                    title=str(version.get("title") or ""),
+                )
+                record = {
+                    "job_id": f"auto_opennews_facebook_{target_market}_{aspect_key}_{int(time.time())}",
+                    "history_id": output_dir.name,
+                    "aspect_ratio": aspect_key,
+                    "language_version": target_market,
+                    "target_market": target_market,
+                    "video_path": str(video_path),
+                    "created_at": time.time(),
+                    **upload_result,
+                }
+                version_records.insert(0, record)
+                records.append(record)
+            if version_records:
+                version["facebook_publish_records"] = version_records[:20]
+                version["facebook_publish_latest"] = version_records[0]
         _save_result_to_output_dir(output_dir, result)
     return records
 
@@ -4493,6 +5186,7 @@ def _publish_opennews_collection_selected_items(
     *,
     publish_top_shorts: bool = False,
     publish_all_x: bool = False,
+    publish_all_facebook: bool = False,
     privacy_status: str = "public",
 ) -> dict:
     job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id)
@@ -4532,6 +5226,7 @@ def _publish_opennews_collection_selected_items(
     distribution_result: dict[str, Any] = {
         "top_shorts": {},
         "x_items": [],
+        "facebook_items": [],
         "load_errors": load_errors,
         "requested_at": time.time(),
     }
@@ -4573,6 +5268,27 @@ def _publish_opennews_collection_selected_items(
                 )
         except Exception as exc:
             top_payload.update({"status": "failed", "error": str(exc)})
+        if _opennews_facebook_auto_publish_default() and _opennews_facebook_single_shorts_enabled() and not _opennews_facebook_auto_publish_disabled():
+            try:
+                if _opennews_publish_records_have_aspect(top_result.get("facebook_publish_records"), "vertical"):
+                    top_payload["facebook_status"] = "skipped"
+                    top_payload["facebook_reason"] = "这条新闻的竖屏 Facebook 视频已发布过，本次跳过重复发布。"
+                else:
+                    facebook_records = _publish_opennews_result_to_facebook(
+                        top_output_dir,
+                        top_result,
+                        aspects=["vertical"],
+                    )
+                    top_payload["facebook_status"] = "published"
+                    top_payload["facebook_records"] = facebook_records
+                    top_payload["facebook_urls"] = [
+                        record.get("facebook_url")
+                        for record in facebook_records
+                        if isinstance(record, dict) and record.get("facebook_url")
+                    ]
+            except Exception as exc:
+                top_payload["facebook_status"] = "failed"
+                top_payload["facebook_error"] = str(exc)
         distribution_result["top_shorts"] = top_payload
     elif publish_top_shorts:
         distribution_result["top_shorts"] = {
@@ -4624,6 +5340,42 @@ def _publish_opennews_collection_selected_items(
             "skipped": sum(1 for item in x_items if item.get("status") == "skipped"),
             "failed": sum(1 for item in x_items if item.get("status") == "failed"),
         }
+    if publish_all_facebook and _opennews_facebook_auto_publish_default() and _opennews_facebook_single_shorts_enabled() and not _opennews_facebook_auto_publish_disabled():
+        facebook_items: list[dict] = []
+        for entry in loaded_items:
+            item = dict(entry.get("item") or {})
+            output_dir = Path(entry.get("output_dir") or "")
+            result = dict(entry.get("result") or {})
+            payload: dict[str, Any] = {
+                "history_id": str(item.get("history_id") or ""),
+                "title": str(item.get("title") or result.get("title") or "OpenNews 新闻"),
+            }
+            try:
+                if _opennews_publish_records_have_aspect(result.get("facebook_publish_records"), "vertical"):
+                    payload.update({"status": "skipped", "reason": "这条新闻的竖屏 Facebook 视频已发布过，本次跳过重复发布。"})
+                else:
+                    records = _publish_opennews_result_to_facebook(output_dir, result, aspects=["vertical"])
+                    payload.update(
+                        {
+                            "status": "published",
+                            "records": records,
+                            "facebook_urls": [
+                                record.get("facebook_url")
+                                for record in records
+                                if isinstance(record, dict) and record.get("facebook_url")
+                            ],
+                        }
+                    )
+            except Exception as exc:
+                payload.update({"status": "failed", "error": str(exc)})
+            facebook_items.append(payload)
+        facebook_items.extend(load_errors)
+        distribution_result["facebook_items"] = facebook_items
+        distribution_result["facebook_summary"] = {
+            "published": sum(1 for item in facebook_items if item.get("status") == "published"),
+            "skipped": sum(1 for item in facebook_items if item.get("status") == "skipped"),
+            "failed": sum(1 for item in facebook_items if item.get("status") == "failed"),
+        }
     update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, distribution_result=distribution_result)
     return distribution_result
 
@@ -4635,6 +5387,7 @@ def _run_opennews_collection_job(job_id: str) -> None:
         publish_collection_youtube = bool(distribution.get("publish_collection_youtube"))
         publish_top_shorts = bool(distribution.get("publish_top_shorts"))
         publish_all_x = bool(distribution.get("publish_all_x"))
+        publish_all_facebook = bool(distribution.get("publish_all_facebook"))
         privacy_status = str(distribution.get("privacy_status") or "public")
         _ensure_opennews_collection_ai_thumbnail(job_id)
         _attach_opennews_collection_intro(job_id, message_suffix="正在生成合集...")
@@ -4654,7 +5407,7 @@ def _run_opennews_collection_job(job_id: str) -> None:
                 update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, youtube_error=youtube_error)
         distribution_result: dict[str, Any] = {}
         distribution_failures: list[str] = []
-        if publish_top_shorts or publish_all_x:
+        if publish_top_shorts or publish_all_x or publish_all_facebook:
             try:
                 message = "合集已生成，正在同步单条分发..."
                 if publish_collection_youtube and not youtube_error:
@@ -4669,6 +5422,7 @@ def _run_opennews_collection_job(job_id: str) -> None:
                     job_id,
                     publish_top_shorts=publish_top_shorts,
                     publish_all_x=publish_all_x,
+                    publish_all_facebook=publish_all_facebook,
                     privacy_status=privacy_status,
                 )
             except Exception as exc:
@@ -4683,6 +5437,14 @@ def _run_opennews_collection_job(job_id: str) -> None:
                 distribution_failures.extend(
                     str(item.get("error"))
                     for item in x_items
+                    if isinstance(item, dict) and item.get("status") == "failed" and item.get("error")
+                )
+        if publish_all_facebook:
+            facebook_items = distribution_result.get("facebook_items") if isinstance(distribution_result, dict) else []
+            if isinstance(facebook_items, list):
+                distribution_failures.extend(
+                    str(item.get("error"))
+                    for item in facebook_items
                     if isinstance(item, dict) and item.get("status") == "failed" and item.get("error")
                 )
         final_parts = ["合集视频已生成"]
@@ -4705,6 +5467,13 @@ def _run_opennews_collection_job(job_id: str) -> None:
                 skipped = int(x_summary.get("skipped") or 0)
                 failed = int(x_summary.get("failed") or 0)
                 final_parts.append(f"单条 X：已发布 {published} 条，跳过 {skipped} 条，失败 {failed} 条")
+        if publish_all_facebook:
+            facebook_summary = distribution_result.get("facebook_summary") if isinstance(distribution_result, dict) else {}
+            if isinstance(facebook_summary, dict):
+                published = int(facebook_summary.get("published") or 0)
+                skipped = int(facebook_summary.get("skipped") or 0)
+                failed = int(facebook_summary.get("failed") or 0)
+                final_parts.append(f"单条 Facebook：已发布 {published} 条，跳过 {skipped} 条，失败 {failed} 条")
         final_error = "；".join([part for part in [youtube_error, *distribution_failures] if part])
         update_collection_job(
             OPENNEWS_COLLECTION_DIR,
@@ -7285,6 +8054,160 @@ async def youtube_upload_job(job_id: str, request: Request):
     return {"job": job}
 
 
+@app.get("/api/facebook/status")
+async def facebook_status(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    config = facebook_env_config()
+    configured = bool(
+        config.get("app_id")
+        and config.get("app_secret")
+        and config.get("redirect_uri")
+        and (
+            (config.get("page_id") and config.get("page_access_token"))
+            or FACEBOOK_TOKEN_STORE_PATH.exists()
+        )
+    )
+    payload = {
+        "configured": configured,
+        "app_id_configured": bool(config.get("app_id")),
+        "app_secret_configured": bool(config.get("app_secret")),
+        "redirect_uri": config.get("redirect_uri") or "",
+        "page_id_configured": bool(config.get("page_id")),
+        "page_access_token_configured": bool(config.get("page_access_token") or FACEBOOK_TOKEN_STORE_PATH.exists()),
+        "auto_publish_enabled": _opennews_facebook_auto_publish_default(),
+        "auto_publish_disabled": _opennews_facebook_auto_publish_disabled(),
+        "scope": FACEBOOK_SCOPE,
+        "page": None,
+        "error": "",
+    }
+    if configured:
+        try:
+            payload["page"] = get_facebook_page(FACEBOOK_TOKEN_STORE_PATH)
+        except Exception as exc:
+            payload["error"] = str(exc)
+    return payload
+
+
+@app.get("/api/facebook/oauth/start")
+async def facebook_oauth_start(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    config = facebook_env_config()
+    if not config.get("app_id") or not config.get("redirect_uri"):
+        return JSONResponse({"error": "未配置 FACEBOOK_APP_ID / FACEBOOK_REDIRECT_URI"}, status_code=500)
+    state = hashlib.sha256(f"facebook:{user.get('username')}:{time.time()}:{uuid.uuid4()}".encode("utf-8")).hexdigest()
+    request.session["facebook_oauth_state"] = state
+    request.session["facebook_oauth_scope"] = FACEBOOK_SCOPE
+    try:
+        auth_url = build_facebook_authorization_url(state=state, scope=FACEBOOK_SCOPE)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return RedirectResponse(auth_url)
+
+
+@app.get("/api/facebook/oauth/callback")
+async def facebook_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if error:
+        return HTMLResponse(f"<h2>Facebook 授权失败</h2><p>{error}</p>", status_code=400)
+    expected_state = request.session.get("facebook_oauth_state")
+    if expected_state and state and not hmac.compare_digest(str(expected_state), str(state)):
+        return HTMLResponse("<h2>Facebook 授权失败</h2><p>state 校验失败。</p>", status_code=400)
+    if not code:
+        return HTMLResponse("<h2>Facebook 授权失败</h2><p>缺少 code。</p>", status_code=400)
+    try:
+        short_lived = exchange_facebook_code_for_tokens(code)
+        long_lived = exchange_facebook_long_lived_user_token(str(short_lived.get("access_token") or ""))
+        saved = save_facebook_authorization(
+            FACEBOOK_TOKEN_STORE_PATH,
+            user_access_token=str(long_lived.get("access_token") or short_lived.get("access_token") or ""),
+            user_token_expires_at=float(long_lived.get("expires_at") or short_lived.get("expires_at") or 0.0),
+            meta={
+                "scope": request.session.get("facebook_oauth_scope") or FACEBOOK_SCOPE,
+                "short_lived_token_response": short_lived.get("raw") or {},
+                "long_lived_token_response": long_lived.get("raw") or {},
+            },
+        )
+        request.session.pop("facebook_oauth_state", None)
+        request.session.pop("facebook_oauth_scope", None)
+        page = get_facebook_page(FACEBOOK_TOKEN_STORE_PATH)
+    except Exception as exc:
+        return HTMLResponse(f"<h2>Facebook 授权失败</h2><p>{exc}</p>", status_code=500)
+    return HTMLResponse(
+        "<h2>Facebook 授权成功</h2>"
+        f"<p>Page：{page.get('name') or saved.get('page_name') or ''}</p>"
+        f"<p>page_id：{page.get('id') or saved.get('page_id') or ''}</p>"
+        "<p>现在可以回到 iHouse 系统自动发布到 Facebook。</p>"
+    )
+
+
+@app.post("/api/facebook/upload")
+async def facebook_upload(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    history_id = str(payload.get("history_id") or "").strip()
+    if not history_id:
+        return JSONResponse({"error": "缺少 history_id"}, status_code=400)
+    output_dir, result, resolve_error = _resolve_history_for_user(history_id, user)
+    if resolve_error:
+        return resolve_error
+    assert output_dir is not None and result is not None
+    aspect_ratio = str(payload.get("aspect_ratio") or "vertical").strip().lower()
+    try:
+        video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_ratio)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    text = str(payload.get("text") or "").strip() or _build_default_facebook_post_text(result)
+    title = str(payload.get("title") or "").strip() or str(result.get("title") or result.get("topic") or "OpenNews")
+    job_id = f"facebook_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "message": "Facebook 发布任务已创建",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "owner_username": user.get("username") or "",
+        "history_id": history_id,
+        "output_dir": str(output_dir),
+        "video_path": str(video_path),
+        "aspect_ratio": aspect_ratio,
+        "text": text,
+        "title": title[:255],
+    }
+    with FACEBOOK_UPLOAD_LOCK:
+        FACEBOOK_UPLOAD_JOBS[job_id] = dict(job)
+    thread = threading.Thread(target=_run_facebook_upload_job, args=(job_id,), daemon=True)
+    thread.start()
+    return {"ok": True, "job_id": job_id, "job": job}
+
+
+@app.get("/api/facebook/jobs/{job_id}")
+async def facebook_upload_job(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    with FACEBOOK_UPLOAD_LOCK:
+        job = dict(FACEBOOK_UPLOAD_JOBS.get(job_id) or {})
+    if not job:
+        return JSONResponse({"error": "Facebook 发布任务不存在"}, status_code=404)
+    return {"job": job}
+
+
 @app.get("/api/x/status")
 async def x_status(request: Request):
     user, error = _require_user(request)
@@ -8794,6 +9717,7 @@ async def opennews_collections_build(request: Request):
         "publish_collection_youtube": _parse_bool_form(payload.get("publish_collection_youtube")) if "publish_collection_youtube" in payload else False,
         "publish_top_shorts": _parse_bool_form(payload.get("publish_top_shorts")) if "publish_top_shorts" in payload else False,
         "publish_all_x": _parse_bool_form(payload.get("publish_all_x")) if "publish_all_x" in payload else False,
+        "publish_all_facebook": _parse_bool_form(payload.get("publish_all_facebook")) if "publish_all_facebook" in payload else False,
         "privacy_status": str(payload.get("privacy_status") or "public"),
     }
     try:
@@ -8808,7 +9732,7 @@ async def opennews_collections_build(request: Request):
         )
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    if any(bool(distribution.get(key)) for key in ("publish_collection_youtube", "publish_top_shorts", "publish_all_x")):
+    if any(bool(distribution.get(key)) for key in ("publish_collection_youtube", "publish_top_shorts", "publish_all_x", "publish_all_facebook")):
         job = update_collection_job(
             OPENNEWS_COLLECTION_DIR,
             str(job.get("job_id") or ""),
@@ -8905,6 +9829,33 @@ async def opennews_collections_publish_x(job_id: str, request: Request):
         update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, x_error=str(exc))
         return JSONResponse({"error": str(exc)}, status_code=500)
     updated = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id) or job
+    return {"ok": True, "job": _serialize_opennews_collection_job(updated, request), "record": record}
+
+
+@app.post("/api/opennews/collections/{job_id}/publish-facebook")
+async def opennews_collections_publish_facebook(job_id: str, request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以发布 OpenNews 合集")
+    job = load_collection_job(OPENNEWS_COLLECTION_DIR, job_id)
+    result = (job or {}).get("result") if isinstance(job, dict) else {}
+    raw_video_path = str((result or {}).get("video_path") or "").strip()
+    video_path = Path(raw_video_path) if raw_video_path else None
+    if not job or job.get("status") != "done" or not video_path or not video_path.is_file():
+        return JSONResponse({"error": "合集成片尚未生成完成，不能发布 Facebook"}, status_code=400)
+    try:
+        record = upload_video_to_facebook_page(
+            FACEBOOK_TOKEN_STORE_PATH,
+            video_path,
+            description=_build_opennews_collection_facebook_post_text((result or {}).get("items") or [], "horizontal"),
+            title=str(job.get("title") or result.get("title") or "OpenNews 热点合集"),
+        )
+    except Exception as exc:
+        update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, facebook_error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    updated = update_collection_job(OPENNEWS_COLLECTION_DIR, job_id, facebook_latest=record, facebook_error="")
     return {"ok": True, "job": _serialize_opennews_collection_job(updated, request), "record": record}
 
 
@@ -9226,6 +10177,16 @@ def _external_general_video_payload(request: Request, output_dir: Path, result: 
 def _external_opennews_job_result_payload(job: dict) -> dict:
     items = []
     for item in job.get("items", []) or []:
+        history_id = item.get("history_id") or ""
+        platform_metrics: dict[str, Any] = {}
+        if history_id:
+            try:
+                output_dir = _resolve_history_output_dir(str(history_id))
+                result = _load_result_from_output_dir(output_dir) if output_dir else None
+                if output_dir and result:
+                    platform_metrics = _collect_history_platform_metrics(output_dir, result, force_refresh=False)
+            except Exception:
+                platform_metrics = {}
         items.append({
             "id": item.get("batch_item_id") or "",
             "title": item.get("title") or _opennews_article_title(item.get("article") or {}),
@@ -9257,12 +10218,20 @@ def _external_opennews_job_result_payload(job: dict) -> dict:
                 for record in (item.get("x_records") or [])
                 if isinstance(record, dict) and record.get("x_url")
             ],
+            "facebook_records": item.get("facebook_records") or [],
+            "facebook_error": item.get("facebook_error") or "",
+            "facebook_urls": [
+                record.get("facebook_url")
+                for record in (item.get("facebook_records") or [])
+                if isinstance(record, dict) and record.get("facebook_url")
+            ],
+            "platform_metrics": platform_metrics,
             "error": item.get("error") or "",
         })
     total_count = len(items)
     completed_count = sum(1 for item in items if item.get("status") == "completed")
     failed_count = sum(1 for item in items if item.get("status") == "failed")
-    publishing_count = sum(1 for item in items if item.get("status") in {"publishing_youtube", "publishing_x"})
+    publishing_count = sum(1 for item in items if item.get("status") in {"publishing_youtube", "publishing_x", "publishing_facebook"})
     running_count = sum(1 for item in items if item.get("status") not in {"completed", "failed"})
     return {
         "ok": str(job.get("status") or "") in {"done", "partial"},
@@ -9390,6 +10359,14 @@ def _external_opennews_video_payload(request: Request, output_dir: Path, result:
             for record in (result.get("x_publish_records") or [])
             if isinstance(record, dict) and record.get("x_url")
         ],
+        "facebook_records": result.get("facebook_publish_records") if isinstance(result.get("facebook_publish_records"), list) else [],
+        "facebook_latest": result.get("facebook_publish_latest") if isinstance(result.get("facebook_publish_latest"), dict) else {},
+        "facebook_urls": [
+            record.get("facebook_url")
+            for record in (result.get("facebook_publish_records") or [])
+            if isinstance(record, dict) and record.get("facebook_url")
+        ],
+        "platform_metrics": _collect_history_platform_metrics(output_dir, result, force_refresh=False),
     }
 
 
@@ -10232,8 +11209,13 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             youtube_error = ""
             x_records: list[dict] = []
             x_error = ""
+            facebook_records: list[dict] = []
+            facebook_error = ""
             publish_this_item = youtube_auto_publish or item_id in auto_single_shorts_ids
             x_publish_this_item = x_auto_publish or (item_id in auto_single_shorts_ids and x_single_shorts_publish)
+            facebook_publish_this_item = _opennews_facebook_auto_publish_default()
+            if _opennews_facebook_auto_publish_disabled():
+                facebook_publish_this_item = False
             if publish_this_item and not material_review.get("auto_publish_allowed", True):
                 publish_this_item = False
                 youtube_error = material_review.get("reason") or "素材审查未通过，已跳过 YouTube 自动发布"
@@ -10241,6 +11223,9 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             if x_publish_this_item and not material_review.get("auto_publish_allowed", True):
                 x_publish_this_item = False
                 x_error = material_review.get("reason") or "素材审查未通过，已跳过 X 自动发布"
+            if facebook_publish_this_item and not material_review.get("auto_publish_allowed", True):
+                facebook_publish_this_item = False
+                facebook_error = material_review.get("reason") or "素材审查未通过，已跳过 Facebook 自动发布"
             item_youtube_aspects = ["vertical"] if item_id in auto_single_shorts_ids else youtube_aspects
             if publish_this_item:
                 try:
@@ -10255,6 +11240,7 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                         composed_result,
                         aspects=item_youtube_aspects,
                         privacy_status=youtube_privacy_status,
+                        include_language_versions=_opennews_youtube_publish_language_versions_enabled(),
                     )
                 except Exception as youtube_exc:
                     youtube_error = str(youtube_exc)
@@ -10269,9 +11255,21 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                         output_dir,
                         composed_result,
                         aspects=item_x_aspects,
+                        include_language_versions=_opennews_x_publish_language_versions_enabled(),
                     )
                 except Exception as x_exc:
                     x_error = str(x_exc)
+            if facebook_publish_this_item:
+                try:
+                    mark_item(status="publishing_facebook", message="成片完成，正在自动发布到 Facebook...", material_review=material_review)
+                    facebook_records = _publish_opennews_result_to_facebook(
+                        output_dir,
+                        composed_result,
+                        aspects=["vertical"],
+                        include_language_versions=_opennews_facebook_publish_language_versions_enabled(),
+                    )
+                except Exception as facebook_exc:
+                    facebook_error = str(facebook_exc)
             final_status = "completed"
             published_platforms = []
             failed_parts = []
@@ -10290,6 +11288,13 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                     published_platforms.append("X")
             elif x_error:
                 skipped_parts.append(f"X 自动发布已跳过：{x_error}")
+            if facebook_publish_this_item:
+                if facebook_error:
+                    failed_parts.append(f"Facebook 发布失败：{facebook_error}")
+                else:
+                    published_platforms.append("Facebook")
+            elif facebook_error:
+                skipped_parts.append(f"Facebook 自动发布已跳过：{facebook_error}")
             if published_platforms:
                 final_message = f"成片已完成，{' / '.join(published_platforms)} 已发布。"
                 if failed_parts:
@@ -10311,6 +11316,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                 youtube_error=youtube_error,
                 x_records=x_records,
                 x_error=x_error,
+                facebook_records=facebook_records,
+                facebook_error=facebook_error,
                 material_review=material_review,
                 error="",
             )
@@ -10326,6 +11333,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                 youtube_error=youtube_error,
                 x_records=x_records,
                 x_error=x_error,
+                facebook_records=facebook_records,
+                facebook_error=facebook_error,
                 material_review=material_review,
                 error="",
                 completed_at=time.time(),
@@ -10380,6 +11389,7 @@ async def external_opennews_health(request: Request):
             "default_auto_publish": False,
             "default_privacy_status": "public",
             "default_aspects": ["horizontal", "vertical"],
+            "publish_language_versions_enabled": _opennews_youtube_publish_language_versions_enabled(),
         },
         "x": {
             "configured": bool(x_config.get("client_id") and x_config.get("redirect_uri") and (x_config.get("refresh_token") or X_TOKEN_STORE_PATH.exists())),
@@ -10392,6 +11402,24 @@ async def external_opennews_health(request: Request):
             "publish_single_shorts_enabled": _opennews_x_single_shorts_enabled(),
             "publish_collection_enabled": _opennews_x_collection_enabled(),
             "default_aspects": ["vertical"],
+            "publish_language_versions_enabled": _opennews_x_publish_language_versions_enabled(),
+        },
+        "facebook": {
+            "configured": bool(
+                facebook_env_config().get("app_id")
+                and facebook_env_config().get("app_secret")
+                and facebook_env_config().get("redirect_uri")
+                and (
+                    (facebook_env_config().get("page_id") and facebook_env_config().get("page_access_token"))
+                    or FACEBOOK_TOKEN_STORE_PATH.exists()
+                )
+            ),
+            "auto_publish_enabled": _opennews_facebook_auto_publish_default(),
+            "auto_publish_disabled": _opennews_facebook_auto_publish_disabled(),
+            "publish_single_shorts_enabled": _opennews_facebook_single_shorts_enabled(),
+            "publish_collection_enabled": _opennews_facebook_collection_enabled(),
+            "default_aspects": ["vertical"],
+            "publish_language_versions_enabled": _opennews_facebook_publish_language_versions_enabled(),
         },
     }
 
@@ -10992,6 +12020,14 @@ def _pick_compatible_avatar_for_opennews(target_market: str, voice_preset: dict,
     return _get_avatar_option(None, target_market_id=target_market)
 
 
+def _resolve_opennews_voice_preset_id(target_market: str, requested_voice_preset_id: str = "") -> str:
+    target_market = str(target_market or "cn").strip() or "cn"
+    voice_preset_id = str(requested_voice_preset_id or "").strip()
+    if voice_preset_id and voice_preset_id in _get_visible_voice_preset_ids(target_market):
+        return voice_preset_id
+    return _get_target_market(target_market).get("default_voice_preset_id") or "mandarin_female"
+
+
 def _create_opennews_material_task(
     *,
     user: dict,
@@ -11100,6 +12136,239 @@ def _create_opennews_material_task(
     )
     thread.start()
     return {"task_id": task_id, "reused_existing": False, "script": script_data}
+
+
+def _build_opennews_language_version(
+    *,
+    output_dir: str,
+    source_topic: str,
+    source_script: dict,
+    source_segments: list[dict],
+    primary_workflow_config: dict,
+    target_market: str,
+    department_id: str,
+    provider: str,
+    user: Optional[dict],
+    compose_videos: bool = True,
+) -> dict:
+    from generate_audio import generate_audio
+    from generate_script import translate_script_data
+    from tos_uploader import upload_file_and_get_url
+
+    output_path = Path(output_dir)
+    market = _get_target_market(target_market)
+    voice_preset = _get_voice_preset(market.get("default_voice_preset_id"), target_market)
+    tts_voice = voice_preset.get("voice_id")
+    if not tts_voice:
+        raise RuntimeError(f"{market.get('name') or target_market} 缺少可用配音方案")
+    tts_speed = float(voice_preset.get("default_speed") or 1.05)
+    tts_volume = float(voice_preset.get("default_volume") or 1.0)
+    translated_script = translate_script_data(
+        source_topic,
+        source_script,
+        target_market=target_market,
+        department_id=department_id,
+        provider=provider,
+    )
+    translated_meta = translated_script.pop("_meta", {}) if isinstance(translated_script, dict) else {}
+    primary_presenter = _normalize_opennews_presenter_config((primary_workflow_config or {}).get("opennews_presenter"))
+    presenter_for_market = _opennews_presenter_config_for_market(
+        target_market=target_market,
+        gender=str(primary_presenter.get("gender") or "female"),
+    )
+
+    translated_segments: list[dict] = []
+    for index, translated_seg in enumerate(translated_script.get("segments", []) or []):
+        base_seg = source_segments[index] if index < len(source_segments) else {}
+        seg_copy = copy.deepcopy(base_seg if isinstance(base_seg, dict) else {})
+        seg_copy.update(
+            {
+                "type": translated_seg.get("type", seg_copy.get("type")),
+                "start": translated_seg.get("start", seg_copy.get("start")),
+                "end": translated_seg.get("end", seg_copy.get("end")),
+                "duration": translated_seg.get("duration", seg_copy.get("duration")),
+                "script": translated_seg.get("script", seg_copy.get("script", "")),
+                "target_market": target_market,
+                "department_id": department_id,
+            }
+        )
+        if seg_copy.get("type") == "digital_human":
+            seg_copy["action"] = translated_seg.get("action", seg_copy.get("action", ""))
+        else:
+            seg_copy["material_keyword"] = translated_seg.get("material_keyword", seg_copy.get("material_keyword", ""))
+            seg_copy["material_search_keyword"] = translated_seg.get("material_search_keyword", seg_copy.get("material_search_keyword", ""))
+            seg_copy["material_desc"] = translated_seg.get("material_desc", seg_copy.get("material_desc", ""))
+
+        audio_dir = output_path / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        seg_type = str(seg_copy.get("type") or "segment")
+        audio_path = audio_dir / f"segment_{index:02d}_{seg_type}_{target_market}.mp3"
+        audio_path_str, tts_provider = _generate_audio_for_workflow(
+            script_text=str(seg_copy.get("script") or "").strip(),
+            audio_path=str(audio_path),
+            voice=tts_voice,
+            speed=tts_speed,
+            volume=tts_volume,
+            language=voice_preset.get("language", ""),
+            workflow_config={
+                **(primary_workflow_config or {}),
+                "target_market": target_market,
+                "opennews_presenter": presenter_for_market,
+                "voice_preset": {
+                    "id": voice_preset.get("id"),
+                    "name": voice_preset.get("name"),
+                    "subtitle": voice_preset.get("subtitle"),
+                    "selected_speed": tts_speed,
+                    "selected_volume": tts_volume,
+                    "language": market.get("content_language", ""),
+                },
+            },
+            generate_audio_fn=generate_audio,
+        )
+        seg_copy["audio_path"] = audio_path_str
+        try:
+            seg_copy["audio_url"] = upload_file_and_get_url(audio_path_str, key_prefix="full/audio")
+        except Exception:
+            seg_copy["audio_url"] = seg_copy.get("audio_url", "")
+        seg_copy["tts_provider"] = tts_provider
+        translated_segments.append(seg_copy)
+        _record_history_cost(
+            output_dir=output_path,
+            result={"topic": source_topic, "cost_entries": [], "cost_summary": _empty_cost_summary()},
+            user=user,
+            event_type="tts_generate",
+            amount=_estimate_tts_cost(str(seg_copy.get("script") or ""), audio_path_str),
+            provider=tts_provider,
+            topic=source_topic,
+            meta={"segment_index": index + 1, "audio_path": audio_path_str, "scope": f"opennews_translate_{target_market}"},
+        )
+
+    compose_input = {
+        "topic": source_topic,
+        "title": translated_script.get("title") or "",
+        "cover_title": translated_script.get("cover_title") or "",
+        "total_duration": translated_script.get("total_duration") or source_script.get("total_duration") or 0,
+        "segment_count": len(translated_segments),
+        "script": translated_script,
+        "segments": translated_segments,
+        "social_post": translated_script.get("social_post") or "",
+        "workflow_config": {
+            **(primary_workflow_config or {}),
+            "voice_preset": {
+                "id": voice_preset.get("id"),
+                "name": voice_preset.get("name"),
+                "subtitle": voice_preset.get("subtitle"),
+                "selected_speed": tts_speed,
+                "selected_volume": tts_volume,
+                "language": market.get("content_language", ""),
+            },
+            "target_market": target_market,
+            "department_id": department_id,
+            "compose_aspect_ratio": "vertical",
+            "subtitle_template_id": "property_clear",
+            "opennews": True,
+            "opennews_material_only": True,
+            "opennews_presenter": presenter_for_market,
+        },
+        "cost_entries": [],
+        "cost_summary": _empty_cost_summary(),
+    }
+    if not compose_videos:
+        compose_input.update(
+            {
+                "target_market": target_market,
+                "translation_usage": translated_meta.get("usage", {}),
+            }
+        )
+        return compose_input
+
+    from video_composer import compose_history_video
+    variant_results: dict[str, dict] = {}
+    for variant_aspect in ("horizontal", "vertical"):
+        variant_results[variant_aspect] = compose_history_video(
+            output_dir,
+            compose_input,
+            transition_id=str((primary_workflow_config or {}).get("compose_transition_id") or "fade"),
+            subtitle_template_id="property_clear",
+            aspect_ratio=variant_aspect,
+            output_stem=f"final_video_{target_market}_{variant_aspect}",
+        )
+    composed = dict(variant_results.get("vertical") or variant_results.get("horizontal") or {})
+    composed["final_video_variants"] = variant_results
+    composed.update(
+        {
+            "target_market": target_market,
+            "title": compose_input.get("title"),
+            "cover_title": compose_input.get("cover_title"),
+            "social_post": compose_input.get("social_post"),
+            "workflow_config": compose_input.get("workflow_config"),
+            "script": translated_script,
+            "segments": translated_segments,
+            "translation_usage": translated_meta.get("usage", {}),
+        }
+    )
+    return composed
+
+
+def _compose_opennews_language_versions(
+    *,
+    output_path: Path,
+    result: dict,
+    user: Optional[dict],
+    source_topic: str,
+    department_id: str,
+    provider: str,
+) -> None:
+    language_versions = result.get("language_versions")
+    if not isinstance(language_versions, list):
+        language_versions = []
+    if not language_versions and _opennews_multilingual_enabled():
+        primary_market = str((result.get("workflow_config") or {}).get("target_market") or "cn").strip() or "cn"
+        for extra_market_id in _opennews_extra_target_markets_for_primary(primary_market):
+            try:
+                language_versions.append(
+                    _build_opennews_language_version(
+                        output_dir=str(output_path),
+                        source_topic=source_topic,
+                        source_script=result.get("script") or {},
+                        source_segments=result.get("segments") or [],
+                        primary_workflow_config=result.get("workflow_config") or {},
+                        target_market=extra_market_id,
+                        department_id=department_id,
+                        provider=provider,
+                        user=user,
+                        compose_videos=False,
+                    )
+                )
+            except Exception as exc:
+                language_versions.append({"target_market": extra_market_id, "error": str(exc)})
+        if language_versions:
+            result["language_version_group_id"] = result.get("language_version_group_id") or _language_version_group_id()
+            result["language_versions"] = language_versions
+
+    from video_composer import compose_history_video
+
+    for item in language_versions:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        target_market = str(item.get("target_market") or ((item.get("workflow_config") or {}).get("target_market")) or "").strip()
+        if not target_market:
+            continue
+        if isinstance(item.get("final_video_variants"), dict) and item.get("final_video_path"):
+            continue
+        variant_results: dict[str, dict] = {}
+        for variant_aspect in ("horizontal", "vertical"):
+            variant_results[variant_aspect] = compose_history_video(
+                str(output_path),
+                item,
+                transition_id=str((result.get("workflow_config") or {}).get("compose_transition_id") or "fade"),
+                subtitle_template_id="property_clear",
+                aspect_ratio=variant_aspect,
+                output_stem=f"final_video_{target_market}_{variant_aspect}",
+            )
+        composed = dict(variant_results.get("vertical") or variant_results.get("horizontal") or {})
+        item.update(composed)
+        item["final_video_variants"] = variant_results
 
 
 def _find_job_item_payload(job: dict, item_id: str) -> dict | None:
@@ -11423,14 +12692,22 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
             youtube_error = ""
             x_records: list[dict] = []
             x_error = ""
+            facebook_records: list[dict] = []
+            facebook_error = ""
             publish_this_item = youtube_auto_publish or item_id in auto_single_shorts_ids
             x_publish_this_item = x_auto_publish
+            facebook_publish_this_item = _opennews_facebook_auto_publish_default()
+            if _opennews_facebook_auto_publish_disabled():
+                facebook_publish_this_item = False
             if publish_this_item and not material_review.get("auto_publish_allowed", True):
                 publish_this_item = False
                 youtube_error = material_review.get("reason") or "素材审查未通过，已跳过 YouTube 自动发布"
             if x_publish_this_item and not material_review.get("auto_publish_allowed", True):
                 x_publish_this_item = False
                 x_error = material_review.get("reason") or "素材审查未通过，已跳过 X 自动发布"
+            if facebook_publish_this_item and not material_review.get("auto_publish_allowed", True):
+                facebook_publish_this_item = False
+                facebook_error = material_review.get("reason") or "素材审查未通过，已跳过 Facebook 自动发布"
             item_youtube_aspects = ["vertical"] if item_id in auto_single_shorts_ids else youtube_aspects
             if publish_this_item:
                 try:
@@ -11440,6 +12717,7 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
                         composed_result,
                         aspects=item_youtube_aspects,
                         privacy_status=youtube_privacy_status,
+                        include_language_versions=_opennews_youtube_publish_language_versions_enabled(),
                     )
                 except Exception as youtube_exc:
                     youtube_error = str(youtube_exc)
@@ -11450,9 +12728,21 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
                         output_dir,
                         composed_result,
                         aspects=x_aspects,
+                        include_language_versions=_opennews_x_publish_language_versions_enabled(),
                     )
                 except Exception as x_exc:
                     x_error = str(x_exc)
+            if facebook_publish_this_item:
+                try:
+                    mark_item(item_id, status="publishing_facebook", message="成片完成，正在自动发布到 Facebook...", material_review=material_review)
+                    facebook_records = _publish_opennews_result_to_facebook(
+                        output_dir,
+                        composed_result,
+                        aspects=["vertical"],
+                        include_language_versions=_opennews_facebook_publish_language_versions_enabled(),
+                    )
+                except Exception as facebook_exc:
+                    facebook_error = str(facebook_exc)
             published_platforms = []
             failed_parts = []
             skipped_parts = []
@@ -11470,6 +12760,13 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
                     published_platforms.append("X")
             elif x_error:
                 skipped_parts.append(f"X 自动发布已跳过：{x_error}")
+            if facebook_publish_this_item:
+                if facebook_error:
+                    failed_parts.append(f"Facebook 发布失败：{facebook_error}")
+                else:
+                    published_platforms.append("Facebook")
+            elif facebook_error:
+                skipped_parts.append(f"Facebook 自动发布已跳过：{facebook_error}")
             if published_platforms:
                 final_message = f"人工审核后成片已完成，{' / '.join(published_platforms)} 已发布。"
                 if failed_parts:
@@ -11494,6 +12791,8 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
                 youtube_error=youtube_error,
                 x_records=x_records,
                 x_error=x_error,
+                facebook_records=facebook_records,
+                facebook_error=facebook_error,
                 material_review=material_review,
                 error="",
                 completed_at=time.time(),
@@ -11509,6 +12808,8 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
                 "youtube_error": youtube_error,
                 "x_records": x_records,
                 "x_error": x_error,
+                "facebook_records": facebook_records,
+                "facebook_error": facebook_error,
                 "material_review": material_review,
                 "error": "",
                 "completed_at": time.time(),
@@ -11710,6 +13011,14 @@ def _compose_opennews_result(
     workflow_config["compose_aspect_ratio"] = aspect_ratio
     result["workflow_config"] = workflow_config
     result.update(compose_result)
+    _compose_opennews_language_versions(
+        output_path=output_path,
+        result=result,
+        user=user,
+        source_topic=str(result.get("topic") or ""),
+        department_id=str(workflow_config.get("department_id") or "real_estate"),
+        provider=str(workflow_config.get("script_model") or SCRIPT_MODEL_CLAUDE),
+    )
     _record_history_cost(
         output_dir=output_path,
         result=result,
@@ -14233,7 +15542,21 @@ async def history_result(history_id: str, request: Request):
     output_dir, result, access_error = _resolve_history_for_user(history_id, user)
     if access_error:
         return access_error
-    return _serialize_result_for_ui(str(output_dir), result, result.get("topic", ""))
+    payload = _serialize_result_for_ui(str(output_dir), result, result.get("topic", ""))
+    payload["platform_metrics"] = _collect_history_platform_metrics(output_dir, result, force_refresh=False)
+    return payload
+
+
+@app.get("/api/history/{history_id}/platform-metrics")
+async def history_platform_metrics(history_id: str, request: Request, refresh: int = 0):
+    user, error = _require_user(request)
+    if error:
+        return error
+    output_dir, result, access_error = _resolve_history_for_user(history_id, user)
+    if access_error:
+        return access_error
+    payload = _collect_history_platform_metrics(output_dir, result, force_refresh=bool(refresh))
+    return payload
 
 
 @app.get("/api/history/{history_id}/files")

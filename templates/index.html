@@ -1490,6 +1490,16 @@
               </div>
 
               <div class="result-kpis" id="resultSummary"></div>
+              <div class="panel" id="resultLanguageVersionsPanel" style="display:none; padding:16px; gap:12px; margin-bottom:16px;">
+                <div class="panel-header" style="margin-bottom:0;">
+                  <div>
+                    <div class="section-kicker">Multi Language</div>
+                    <h3 class="section-title" style="font-size:22px;">多语言竖屏版本</h3>
+                    <p class="section-desc">当前这条 OpenNews 新闻会把附加语言版本集中展示在这里，默认包含英文版和日文版。</p>
+                  </div>
+                </div>
+                <div class="file-board" id="resultLanguageVersions"></div>
+              </div>
               <div class="insight-grid" id="workflowSummary" style="margin-bottom: 16px;"></div>
               <div class="insight-grid" id="composeSettingsPanel" style="display:none; margin-bottom:16px;"></div>
               <div class="media-grid" id="finalOutputPanel" style="display:none; margin-bottom:16px;"></div>
@@ -1506,7 +1516,10 @@
               <div id="resultSocialWrap" style="display:none;">
                 <div class="insight-grid">
                   <div class="insight-card">
-                    <div class="label" id="resultSocialLabel">SNS文案</div>
+                    <div style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
+                      <div class="label" id="resultSocialLabel">SNS文案</div>
+                      <button class="btn btn-secondary" type="button" id="refreshPlatformMetricsBtn" style="display:none; min-height:36px;">刷新平台数据</button>
+                    </div>
                     <div class="social-card" id="resultSocial"></div>
                   </div>
                 </div>
@@ -1531,6 +1544,23 @@
 
             <div class="actions" style="justify-content:flex-start; margin-bottom:14px;">
               <button class="btn btn-primary" id="openNewsQuickHotBtn" type="button">一键抓取指定热点</button>
+            </div>
+
+            <div class="panel" id="openNewsOverviewPanel" style="padding:16px; gap:12px; margin-bottom:16px;">
+              <div class="panel-header" style="margin-bottom:0;">
+                <div>
+                  <div class="section-kicker">Platform Overview</div>
+                  <h3 class="section-title" style="font-size:22px;">OpenNews 平台数据总览</h3>
+                  <p class="section-desc">这里直接汇总 YouTube、X、Facebook 的整体发布、浏览、点赞、评论，不需要点任何单条合集。</p>
+                </div>
+                <div class="actions" style="justify-content:flex-end;">
+                  <button class="btn btn-secondary" id="openNewsOverviewRefreshBtn" type="button">刷新平台总览</button>
+                </div>
+              </div>
+              <div class="topbar-status" id="openNewsOverviewStatus">正在汇总 OpenNews 平台数据...</div>
+              <div class="result-kpis" id="openNewsOverviewKpis"></div>
+              <div class="insight-grid" id="openNewsOverviewPlatforms"></div>
+              <div class="file-board" id="openNewsOverviewRecent"></div>
             </div>
 
             <div class="panel" style="padding:16px; gap:12px; margin-bottom:16px;">
@@ -2105,8 +2135,10 @@
       openNewsCollectionPool: [],
       openNewsCollectionJobs: [],
       openNewsCollectionJobId: '',
+      openNewsOverview: null,
       openNewsSelectedArticle: null,
       openNewsDraft: null,
+      platformMetricsLoading: false,
       workspaceMode: 'ai',
       propertyVideoTaskId: null,
       propertyVideoEventSource: null,
@@ -2159,11 +2191,14 @@
       resultTitle: document.getElementById('resultTitle'),
       resultSubtitle: document.getElementById('resultSubtitle'),
       resultSummary: document.getElementById('resultSummary'),
+      resultLanguageVersionsPanel: document.getElementById('resultLanguageVersionsPanel'),
+      resultLanguageVersions: document.getElementById('resultLanguageVersions'),
       workflowSummary: document.getElementById('workflowSummary'),
       composeSettingsPanel: document.getElementById('composeSettingsPanel'),
       finalOutputPanel: document.getElementById('finalOutputPanel'),
       resultSegments: document.getElementById('resultSegments'),
       resultSocial: document.getElementById('resultSocial'),
+      refreshPlatformMetricsBtn: document.getElementById('refreshPlatformMetricsBtn'),
       fileList: document.getElementById('fileList'),
       bundleDownloadBtn: document.getElementById('bundleDownloadBtn'),
       composeVideoBtn: document.getElementById('composeVideoBtn'),
@@ -2201,6 +2236,12 @@
       openNewsWorkspace: document.getElementById('openNewsWorkspace'),
       openNewsBackBtn: document.getElementById('openNewsBackBtn'),
       openNewsQuickHotBtn: document.getElementById('openNewsQuickHotBtn'),
+      openNewsOverviewPanel: document.getElementById('openNewsOverviewPanel'),
+      openNewsOverviewRefreshBtn: document.getElementById('openNewsOverviewRefreshBtn'),
+      openNewsOverviewStatus: document.getElementById('openNewsOverviewStatus'),
+      openNewsOverviewKpis: document.getElementById('openNewsOverviewKpis'),
+      openNewsOverviewPlatforms: document.getElementById('openNewsOverviewPlatforms'),
+      openNewsOverviewRecent: document.getElementById('openNewsOverviewRecent'),
       openNewsCategorySelect: document.getElementById('openNewsCategorySelect'),
       openNewsQueryInput: document.getElementById('openNewsQueryInput'),
       openNewsTrendRangeField: document.getElementById('openNewsTrendRangeField'),
@@ -4794,6 +4835,140 @@
       els.openNewsCollectionStatus.classList.toggle('error', !!error);
     }
 
+    function setOpenNewsOverviewStatus(message, error = false) {
+      if (!els.openNewsOverviewStatus) return;
+      els.openNewsOverviewStatus.textContent = message;
+      els.openNewsOverviewStatus.classList.toggle('error', !!error);
+    }
+
+    function openNewsEmptyPlatformStats() {
+      return { published: 0, views: 0, likes: 0, comments: 0 };
+    }
+
+    function buildOpenNewsOverview(videos = [], collectionJobs = []) {
+      const platforms = {
+        youtube: openNewsEmptyPlatformStats(),
+        x: openNewsEmptyPlatformStats(),
+        facebook: openNewsEmptyPlatformStats(),
+      };
+      const recent = [];
+      for (const video of (videos || [])) {
+        const title = video.title || video.topic || 'OpenNews 新闻';
+        const metrics = (video.platform_metrics && video.platform_metrics.platforms) || {};
+        for (const key of ['youtube', 'x', 'facebook']) {
+          const payload = metrics[key];
+          if (!payload) continue;
+          platforms[key].published += 1;
+          if (payload.ok && payload.metrics) {
+            platforms[key].views += Number(payload.metrics.view_count || 0);
+            platforms[key].likes += Number(payload.metrics.like_count || 0);
+            platforms[key].comments += Number(payload.metrics.comment_count || 0);
+          }
+          const record = payload.record || {};
+          const url = record.youtube_url || record.x_url || record.facebook_url || '';
+          if (url) {
+            recent.push({
+              platform: key,
+              title,
+              url,
+              created_at: Number(record.created_at || video.completed_at || video.created_at || 0),
+            });
+          }
+        }
+      }
+      let collectionPublishedYoutube = 0;
+      let collectionPublishedX = 0;
+      let collectionPublishedFacebook = 0;
+      for (const job of (collectionJobs || [])) {
+        const result = job.result || {};
+        if (Array.isArray(result.youtube_publish_records) && result.youtube_publish_records.length) collectionPublishedYoutube += 1;
+        if (Array.isArray(result.x_publish_records) && result.x_publish_records.length) collectionPublishedX += 1;
+        if ((result.facebook_latest && result.facebook_latest.facebook_url) || (job.facebook_latest && job.facebook_latest.facebook_url)) collectionPublishedFacebook += 1;
+      }
+      recent.sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+      return {
+        totalVideos: (videos || []).length,
+        totalCollections: (collectionJobs || []).length,
+        platforms,
+        recent: recent.slice(0, 12),
+        collectionPublishedYoutube,
+        collectionPublishedX,
+        collectionPublishedFacebook,
+      };
+    }
+
+    function renderOpenNewsOverview() {
+      if (!els.openNewsOverviewKpis || !els.openNewsOverviewPlatforms || !els.openNewsOverviewRecent) return;
+      const overview = state.openNewsOverview;
+      if (!overview) {
+        els.openNewsOverviewKpis.innerHTML = '';
+        els.openNewsOverviewPlatforms.innerHTML = '';
+        els.openNewsOverviewRecent.innerHTML = '<div class="empty-box">暂无平台数据。</div>';
+        return;
+      }
+      const p = overview.platforms || {};
+      const totalPublished = (p.youtube?.published || 0) + (p.x?.published || 0) + (p.facebook?.published || 0);
+      const totalViews = (p.youtube?.views || 0) + (p.x?.views || 0) + (p.facebook?.views || 0);
+      const totalLikes = (p.youtube?.likes || 0) + (p.x?.likes || 0) + (p.facebook?.likes || 0);
+      const totalComments = (p.youtube?.comments || 0) + (p.x?.comments || 0) + (p.facebook?.comments || 0);
+      els.openNewsOverviewKpis.innerHTML = `
+        <div class="result-kpi"><div class="label">单条新闻成片</div><div class="value">${escapeHtml(String(overview.totalVideos || 0))}</div></div>
+        <div class="result-kpi"><div class="label">合集任务数</div><div class="value">${escapeHtml(String(overview.totalCollections || 0))}</div></div>
+        <div class="result-kpi"><div class="label">累计发布条目</div><div class="value">${escapeHtml((totalPublished || 0).toLocaleString('zh-CN'))}</div></div>
+        <div class="result-kpi"><div class="label">累计总浏览</div><div class="value">${escapeHtml((totalViews || 0).toLocaleString('zh-CN'))}</div></div>
+        <div class="result-kpi"><div class="label">累计总点赞</div><div class="value">${escapeHtml((totalLikes || 0).toLocaleString('zh-CN'))}</div></div>
+        <div class="result-kpi"><div class="label">累计总评论</div><div class="value">${escapeHtml((totalComments || 0).toLocaleString('zh-CN'))}</div></div>
+      `;
+      const platformCards = [
+        ['youtube', 'YouTube', overview.collectionPublishedYoutube || 0],
+        ['x', 'X', overview.collectionPublishedX || 0],
+        ['facebook', 'Facebook', overview.collectionPublishedFacebook || 0],
+      ];
+      els.openNewsOverviewPlatforms.innerHTML = platformCards.map(([key, label, collectionCount]) => {
+        const item = p[key] || openNewsEmptyPlatformStats();
+        return `
+          <div class="insight-card">
+            <div class="label">${escapeHtml(label)}</div>
+            <div class="value">${escapeHtml(String(item.published || 0))} 条单条已发布</div>
+            <div class="helper" style="margin-top:8px;">合集已发布 ${escapeHtml(String(collectionCount || 0))} 条</div>
+            <div class="helper" style="margin-top:6px;">浏览 ${escapeHtml((item.views || 0).toLocaleString('zh-CN'))}｜点赞 ${escapeHtml((item.likes || 0).toLocaleString('zh-CN'))}｜评论 ${escapeHtml((item.comments || 0).toLocaleString('zh-CN'))}</div>
+          </div>
+        `;
+      }).join('');
+      els.openNewsOverviewRecent.innerHTML = overview.recent.length ? overview.recent.map(item => `
+        <div class="history-item">
+          <div class="history-main">
+            <div class="history-title">${escapeHtml(item.title || 'OpenNews 新闻')}</div>
+            <div class="history-topic">${escapeHtml(String(item.platform || '').toUpperCase())}</div>
+          </div>
+          <div class="history-actions">
+            <a class="btn btn-secondary" href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener">打开链接</a>
+          </div>
+        </div>
+      `).join('') : '<div class="empty-box">还没有可展示的平台发布链接。</div>';
+    }
+
+    async function loadOpenNewsOverview() {
+      setOpenNewsOverviewStatus('正在汇总 OpenNews 平台数据...');
+      try {
+        const [videosRes, jobsRes] = await Promise.all([
+          fetch('/api/lab/opennews/ready-videos?limit=80'),
+          fetch('/api/opennews/collections/jobs?limit=30'),
+        ]);
+        const videosData = await videosRes.json().catch(() => ({}));
+        const jobsData = await jobsRes.json().catch(() => ({}));
+        if (!videosRes.ok) throw new Error(videosData.error || 'OpenNews 成片数据加载失败');
+        if (!jobsRes.ok) throw new Error(jobsData.error || 'OpenNews 合集任务加载失败');
+        state.openNewsOverview = buildOpenNewsOverview(videosData.videos || [], jobsData.jobs || []);
+        renderOpenNewsOverview();
+        setOpenNewsOverviewStatus('平台总览已更新。这里汇总的是当前 OpenNews 页面可读取到的整体发布与互动数据。');
+      } catch (error) {
+        state.openNewsOverview = null;
+        renderOpenNewsOverview();
+        setOpenNewsOverviewStatus(friendlyRequestError(error, 'OpenNews 平台总览加载失败'), true);
+      }
+    }
+
     function selectedOpenNewsCollectionIds() {
       return Array.from(document.querySelectorAll('.opennews-collection-check:checked')).map(input => input.value).filter(Boolean);
     }
@@ -4845,19 +5020,57 @@
         els.openNewsCollectionJobList.innerHTML = '<div class="empty-box">还没有合集任务。</div>';
         return;
       }
+      const formatMetricNumber = (value) => {
+        if (value === null || value === undefined || value === '') return '—';
+        const num = Number(value);
+        if (!Number.isFinite(num)) return '—';
+        return num.toLocaleString('zh-CN');
+      };
+      const renderPlatformMetricCards = (platformMetrics = {}) => {
+        const platforms = platformMetrics.platforms || {};
+        const entries = [
+          ['youtube', 'YouTube'],
+          ['x', 'X'],
+          ['facebook', 'Facebook'],
+        ].filter(([key]) => platforms[key]);
+        if (!entries.length) return '';
+        return `<div class="social-card" style="margin-top:10px;"><strong>平台数据</strong>${entries.map(([key, label]) => {
+          const payload = platforms[key] || {};
+          const record = payload.record || {};
+          const metrics = payload.metrics || {};
+          const url = record.youtube_url || record.x_url || record.facebook_url || metrics.permalink_url || '';
+          const title = metrics.title || metrics.text || record.title || record.text || '';
+          return `<div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--line);">
+            <div style="display:flex; justify-content:space-between; gap:12px; align-items:center;">
+              <strong>${escapeHtml(label)}</strong>
+              ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">打开</a>` : ''}
+            </div>
+            ${title ? `<div style="margin-top:6px; color:var(--muted);">${escapeHtml(title)}</div>` : ''}
+            ${payload.ok ? `<div style="margin-top:6px; color:var(--muted);">浏览 ${escapeHtml(formatMetricNumber(metrics.view_count))}｜点赞 ${escapeHtml(formatMetricNumber(metrics.like_count))}｜评论 ${escapeHtml(formatMetricNumber(metrics.comment_count))}</div>` : `<div class="topbar-status error" style="margin-top:6px;">${escapeHtml(payload.error || '平台数据读取失败')}</div>`}
+          </div>`;
+        }).join('')}</div>`;
+      };
       els.openNewsCollectionJobList.innerHTML = state.openNewsCollectionJobs.map(job => {
         const status = job.status || 'queued';
         const result = job.result || {};
         const records = Array.isArray(result.youtube_publish_records) ? result.youtube_publish_records : [];
         const xRecords = Array.isArray(result.x_publish_records) ? result.x_publish_records : [];
+        const facebookLatest = result.facebook_latest || job.facebook_latest || {};
         const distribution = job.distribution_result || {};
         const topShorts = distribution.top_shorts || {};
         const topShortsUrls = Array.isArray(topShorts.youtube_urls) ? topShorts.youtube_urls : [];
+        const topShortsFacebookUrls = Array.isArray(topShorts.facebook_urls) ? topShorts.facebook_urls : [];
         const xItems = Array.isArray(distribution.x_items) ? distribution.x_items : [];
+        const facebookItems = Array.isArray(distribution.facebook_items) ? distribution.facebook_items : [];
         const xSummary = distribution.x_summary || {};
+        const facebookSummary = distribution.facebook_summary || {};
         const xPublished = Number(xSummary.published || 0);
         const xSkipped = Number(xSummary.skipped || 0);
         const xFailed = Number(xSummary.failed || 0);
+        const facebookPublished = Number(facebookSummary.published || 0);
+        const facebookSkipped = Number(facebookSummary.skipped || 0);
+        const facebookFailed = Number(facebookSummary.failed || 0);
+        const topPlatformMetricsBlock = renderPlatformMetricCards(topShorts.platform_metrics || {});
         return `
           <div class="history-card">
             <div class="history-top">
@@ -4868,17 +5081,22 @@
               </div>
               <span class="badge">${escapeHtml(status)}</span>
             </div>
+            ${topPlatformMetricsBlock ? `<div style="margin-top:12px; padding:14px 16px; border-radius:16px; background:rgba(13,107,99,0.08); border:1px solid rgba(13,107,99,0.18);"><div style="font-size:12px; font-weight:800; color:#0d6b63; letter-spacing:0;">平台数据总览</div>${topPlatformMetricsBlock}</div>` : ''}
             <div class="history-topic">包含 ${Array.isArray(job.items) ? job.items.length : 0} 条新闻</div>
             ${job.error ? `<div class="topbar-status error">${escapeHtml(job.error)}</div>` : ''}
             ${records.length ? `<div class="social-card" style="margin-top:10px;"><strong>YouTube 已发布</strong>${records.map(record => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>${escapeHtml(record.privacy_status || '')}</span><a href="${escapeHtml(record.youtube_url || '#')}" target="_blank" rel="noopener">打开 YouTube</a></div>`).join('')}</div>` : ''}
             ${xRecords.length ? `<div class="social-card" style="margin-top:10px;"><strong>X 已发布</strong>${xRecords.map(record => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>${escapeHtml(record.aspect_ratio || '')}</span><a href="${escapeHtml(record.x_url || '#')}" target="_blank" rel="noopener">打开 X</a></div>`).join('')}</div>` : ''}
-            ${topShorts.status ? `<div class="social-card" style="margin-top:10px;"><strong>最热点 Shorts</strong><div style="margin-top:6px;">${escapeHtml(topShorts.title || topShorts.history_id || '未命名新闻')}</div><div style="margin-top:6px; color:var(--muted);">${escapeHtml(topShorts.status === 'published' ? '已发布 YouTube Shorts' : (topShorts.reason || topShorts.error || topShorts.status || ''))}</div>${topShortsUrls.map((url, index) => `<div style="margin-top:6px;"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">打开 Shorts ${index + 1}</a></div>`).join('')}</div>` : ''}
+            ${facebookLatest.facebook_url ? `<div class="social-card" style="margin-top:10px;"><strong>Facebook 已发布</strong><div style="display:flex; justify-content:space-between; gap:12px; align-items:center; margin:6px 0;"><span>horizontal</span><a href="${escapeHtml(facebookLatest.facebook_url || '#')}" target="_blank" rel="noopener">打开 Facebook</a></div></div>` : ''}
+            ${topShorts.status || topShorts.facebook_status ? `<div class="social-card" style="margin-top:10px;"><strong>最热点 Shorts</strong><div style="margin-top:6px;">${escapeHtml(topShorts.title || topShorts.history_id || '未命名新闻')}</div><div style="margin-top:6px; color:var(--muted);">YouTube：${escapeHtml(topShorts.status === 'published' ? '已发布 YouTube Shorts' : (topShorts.reason || topShorts.error || topShorts.status || ''))}</div>${topShortsUrls.map((url, index) => `<div style="margin-top:6px;"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">打开 Shorts ${index + 1}</a></div>`).join('')}${topShorts.facebook_status ? `<div style="margin-top:6px; color:var(--muted);">Facebook：${escapeHtml(topShorts.facebook_status === 'published' ? '已发布 Facebook 竖屏视频' : (topShorts.facebook_reason || topShorts.facebook_error || topShorts.facebook_status || ''))}</div>${topShortsFacebookUrls.map((url, index) => `<div style="margin-top:6px;"><a href="${escapeHtml(url)}" target="_blank" rel="noopener">打开 Facebook ${index + 1}</a></div>`).join('')}` : ''}</div>` : ''}
             ${xItems.length ? `<div class="social-card" style="margin-top:10px;"><strong>单条 X 分发</strong><div style="margin-top:6px; color:var(--muted);">已发布 ${escapeHtml(String(xPublished))} 条｜跳过 ${escapeHtml(String(xSkipped))} 条｜失败 ${escapeHtml(String(xFailed))} 条</div>${xItems.slice(0, 6).map(item => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin:8px 0;"><span style="flex:1; min-width:0;">${escapeHtml(item.title || item.history_id || 'OpenNews 新闻')}<br><span style="color:var(--muted);">${escapeHtml(item.status === 'published' ? '已发布 X' : (item.reason || item.error || item.status || ''))}</span></span><span>${Array.isArray(item.x_urls) && item.x_urls.length ? item.x_urls.map((url, index) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">X ${index + 1}</a>`).join('<br>') : ''}</span></div>`).join('')}</div>` : ''}
+            ${facebookItems.length ? `<div class="social-card" style="margin-top:10px;"><strong>单条 Facebook 分发</strong><div style="margin-top:6px; color:var(--muted);">已发布 ${escapeHtml(String(facebookPublished))} 条｜跳过 ${escapeHtml(String(facebookSkipped))} 条｜失败 ${escapeHtml(String(facebookFailed))} 条</div>${facebookItems.slice(0, 6).map(item => `<div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin:8px 0;"><span style="flex:1; min-width:0;">${escapeHtml(item.title || item.history_id || 'OpenNews 新闻')}<br><span style="color:var(--muted);">${escapeHtml(item.status === 'published' ? '已发布 Facebook' : (item.reason || item.error || item.status || ''))}</span></span><span>${Array.isArray(item.facebook_urls) && item.facebook_urls.length ? item.facebook_urls.map((url, index) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">Facebook ${index + 1}</a>`).join('<br>') : ''}</span></div>`).join('')}</div>` : ''}
             ${job.x_error || result.x_error ? `<div class="topbar-status error">${escapeHtml(job.x_error || result.x_error)}</div>` : ''}
+            ${job.facebook_error || result.facebook_error ? `<div class="topbar-status error">${escapeHtml(job.facebook_error || result.facebook_error)}</div>` : ''}
             <div class="actions" style="margin-top:10px;">
               ${status === 'done' && job.download_url ? `<a class="btn btn-secondary" href="${escapeHtml(job.download_url)}" target="_blank" rel="noopener">下载合集</a>` : ''}
               ${status === 'done' ? `<button class="btn btn-primary opennews-collection-publish" type="button" data-job-id="${escapeHtml(job.job_id || '')}">发布 YouTube</button>` : ''}
               ${status === 'done' ? `<button class="btn btn-secondary opennews-collection-publish-x" type="button" data-job-id="${escapeHtml(job.job_id || '')}">发布 X</button>` : ''}
+              ${status === 'done' ? `<button class="btn btn-secondary opennews-collection-publish-facebook" type="button" data-job-id="${escapeHtml(job.job_id || '')}">发布 Facebook</button>` : ''}
               ${['running', 'queued', 'publishing_youtube', 'publishing_x', 'publishing_distribution'].includes(status) ? `<button class="btn btn-secondary opennews-collection-poll" type="button" data-job-id="${escapeHtml(job.job_id || '')}">刷新进度</button>` : ''}
             </div>
           </div>
@@ -4889,6 +5107,9 @@
       });
       els.openNewsCollectionJobList.querySelectorAll('.opennews-collection-publish-x').forEach(btn => {
         btn.addEventListener('click', () => publishOpenNewsCollectionX(btn.dataset.jobId));
+      });
+      els.openNewsCollectionJobList.querySelectorAll('.opennews-collection-publish-facebook').forEach(btn => {
+        btn.addEventListener('click', () => publishOpenNewsCollectionFacebook(btn.dataset.jobId));
       });
       els.openNewsCollectionJobList.querySelectorAll('.opennews-collection-poll').forEach(btn => {
         btn.addEventListener('click', () => pollOpenNewsCollectionJob(btn.dataset.jobId));
@@ -4982,6 +5203,7 @@
             publish_collection_youtube: distribute,
             publish_top_shorts: distribute,
             publish_all_x: distribute,
+            publish_all_facebook: distribute,
             privacy_status: 'public',
           }),
         });
@@ -5031,6 +5253,24 @@
         setOpenNewsCollectionStatus('合集已发布 X。');
       } catch (error) {
         setOpenNewsCollectionStatus(friendlyRequestError(error, '合集 X 发布失败'), true);
+      }
+    }
+
+    async function publishOpenNewsCollectionFacebook(jobId) {
+      if (!jobId) return;
+      setOpenNewsCollectionStatus('正在发布合集到 Facebook...');
+      try {
+        const res = await fetch(`/api/opennews/collections/${encodeURIComponent(jobId)}/publish-facebook`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Facebook 发布失败');
+        renderOpenNewsCollectionJobs([data.job, ...state.openNewsCollectionJobs.filter(item => item.job_id !== jobId)]);
+        setOpenNewsCollectionStatus('合集已发布 Facebook。');
+      } catch (error) {
+        setOpenNewsCollectionStatus(friendlyRequestError(error, '合集 Facebook 发布失败'), true);
       }
     }
 
@@ -5331,6 +5571,7 @@
       if (openNewsMode) {
         renderOpenNewsOptions();
         loadOpenNewsSources();
+        loadOpenNewsOverview();
         setHeroStatus('OpenNews 新闻视频工作台已就绪');
       } else if (propertyMode) {
         renderPropertyVideoOptions();
@@ -6474,6 +6715,110 @@
       `;
     }
 
+    function formatMetricNumber(value) {
+      if (value === null || value === undefined || value === '') return '—';
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '—';
+      return num.toLocaleString('zh-CN');
+    }
+
+    function renderLanguageVersions(result) {
+      if (!els.resultLanguageVersionsPanel || !els.resultLanguageVersions) return;
+      const versions = Array.isArray(result.language_versions) ? result.language_versions : [];
+      if (!versions.length) {
+        els.resultLanguageVersionsPanel.style.display = 'none';
+        els.resultLanguageVersions.innerHTML = '';
+        return;
+      }
+      els.resultLanguageVersionsPanel.style.display = 'block';
+      els.resultLanguageVersions.innerHTML = versions.map(item => {
+        const variants = item.final_video_variants || {};
+        const vertical = variants.vertical || item.final_video || {};
+        const horizontal = variants.horizontal || null;
+        return `
+          <div class="file-card">
+            <div class="label">${escapeHtml(item.language_label || item.target_market || '版本')}</div>
+            <div style="font-size:18px; font-weight:800; line-height:1.45; margin-top:6px;">${escapeHtml(item.title || '未生成标题')}</div>
+            <div style="margin-top:8px; color:var(--muted); line-height:1.7;">${escapeHtml(item.social_post || (item.error ? '' : '正在准备多语言版本内容...'))}</div>
+            ${item.error ? `<div class="topbar-status error" style="margin-top:10px;">${escapeHtml(item.error)}</div>` : ''}
+            <div class="actions" style="margin-top:12px; justify-content:flex-start;">
+              ${vertical.url ? `<a class="btn btn-primary" href="${escapeHtml(vertical.url)}" target="_blank" rel="noopener">打开竖屏版</a>` : `<button class="btn btn-secondary" type="button" disabled>竖屏版生成中</button>`}
+              ${horizontal && horizontal.url ? `<a class="btn btn-secondary" href="${escapeHtml(horizontal.url)}" target="_blank" rel="noopener">打开横屏版</a>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderPlatformMetrics(result) {
+      const metrics = result.platform_metrics || {};
+      const platforms = metrics.platforms || {};
+      const cards = [];
+      const renderCard = (label, payload, urlField, titleField = 'title') => {
+        if (!payload || (!payload.record && !payload.metrics && !payload.error)) return '';
+        const record = payload.record || {};
+        const data = payload.metrics || {};
+        const url = record[urlField] || data.permalink_url || '';
+        return `
+          <div class="social-card" style="margin-top:12px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+              <strong>${escapeHtml(label)}</strong>
+              ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">打开${escapeHtml(label)}</a>` : ''}
+            </div>
+            <div style="margin-top:8px; color:var(--muted);">${escapeHtml(data[titleField] || record.title || record.text || '—')}</div>
+            ${payload.ok ? `
+              <div style="display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:10px; margin-top:12px;">
+                <div class="insight-card" style="padding:12px;">
+                  <div class="label">浏览量</div>
+                  <div class="value">${escapeHtml(formatMetricNumber(data.view_count))}</div>
+                </div>
+                <div class="insight-card" style="padding:12px;">
+                  <div class="label">点赞量</div>
+                  <div class="value">${escapeHtml(formatMetricNumber(data.like_count))}</div>
+                </div>
+                <div class="insight-card" style="padding:12px;">
+                  <div class="label">评论量</div>
+                  <div class="value">${escapeHtml(formatMetricNumber(data.comment_count))}</div>
+                </div>
+              </div>
+            ` : `<div class="topbar-status error" style="margin-top:10px;">${escapeHtml(payload.error || '平台数据读取失败')}</div>`}
+          </div>
+        `;
+      };
+      if (platforms.youtube) cards.push(renderCard('YouTube', platforms.youtube, 'youtube_url'));
+      if (platforms.x) cards.push(renderCard('X', platforms.x, 'x_url', 'text'));
+      if (platforms.facebook) cards.push(renderCard('Facebook', platforms.facebook, 'facebook_url'));
+      const socialPost = result.social_post || copyText('statusNone', '暂无');
+      const metricsBlock = cards.length
+        ? `<div style="margin-top:14px;"><div class="label" style="margin-bottom:8px;">平台数据</div>${cards.join('')}</div>`
+        : '';
+      els.resultSocial.innerHTML = `<div>${escapeHtml(socialPost).replace(/\n/g, '<br>')}</div>${metricsBlock}`;
+      if (els.refreshPlatformMetricsBtn) {
+        els.refreshPlatformMetricsBtn.style.display = result.history_id ? 'inline-flex' : 'none';
+      }
+    }
+
+    async function refreshPlatformMetrics(force = false) {
+      if (!state.currentHistoryId || !els.refreshPlatformMetricsBtn || state.platformMetricsLoading) return;
+      state.platformMetricsLoading = true;
+      const originalText = els.refreshPlatformMetricsBtn.textContent;
+      els.refreshPlatformMetricsBtn.disabled = true;
+      els.refreshPlatformMetricsBtn.textContent = '刷新中...';
+      try {
+        const res = await fetch(`/api/history/${encodeURIComponent(state.currentHistoryId)}/platform-metrics?refresh=${force ? 1 : 0}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '平台数据刷新失败');
+        state.resultData = { ...(state.resultData || {}), platform_metrics: data };
+        renderPlatformMetrics(state.resultData || {});
+      } catch (error) {
+        alert(error.message || '平台数据刷新失败');
+      } finally {
+        state.platformMetricsLoading = false;
+        els.refreshPlatformMetricsBtn.disabled = false;
+        els.refreshPlatformMetricsBtn.textContent = originalText;
+      }
+    }
+
     function renderResult(result) {
       state.resultData = result;
       state.currentHistoryId = result.history_id || state.currentHistoryId;
@@ -6495,8 +6840,12 @@
         <div class="result-kpi"><div class="label">${escapeHtml(costCopy().total)}</div><div class="value">${escapeHtml(formatEstimatedCost(result.cost_summary?.estimated_total || 0))}</div></div>
       `;
       renderWorkflowSummary(result);
+      renderLanguageVersions(result);
       renderComposeSettings(result);
-      els.resultSocial.textContent = result.social_post || copyText('statusNone', '暂无');
+      renderPlatformMetrics(result);
+      if (result.history_id && (!result.platform_metrics || !Object.keys(result.platform_metrics.platforms || {}).length)) {
+        refreshPlatformMetrics(false).catch(() => {});
+      }
       const bundleHref = historyIdForActions ? `/api/history/${historyIdForActions}/bundle` : '';
       if (els.bundleDownloadBtn) {
         els.bundleDownloadBtn.textContent = copyText('bundleDownload', '一键打包下载');
@@ -7005,6 +7354,12 @@
         els.finalOutputPanel.innerHTML = '';
         els.finalOutputPanel.style.display = 'none';
       }
+      if (els.resultLanguageVersionsPanel) {
+        els.resultLanguageVersionsPanel.style.display = 'none';
+      }
+      if (els.resultLanguageVersions) {
+        els.resultLanguageVersions.innerHTML = '';
+      }
       document.getElementById('scriptSegmentsWrap').style.display = 'block';
       document.getElementById('scriptSocialWrap').style.display = 'none';
       document.getElementById('resultSegmentsWrap').style.display = 'block';
@@ -7072,6 +7427,7 @@
       renderHistory(state.historyItems || []);
     });
     els.webSearchToggle.addEventListener('change', () => { state.useWebSearch = els.webSearchToggle.checked; updateSelectionSummary(); });
+    els.refreshPlatformMetricsBtn?.addEventListener('click', () => refreshPlatformMetrics(true));
     els.previewBtn.addEventListener('click', createScriptPreview);
     els.regenBtn.addEventListener('click', createScriptPreview);
     els.resetBtn.addEventListener('click', resetWorkspace);
@@ -7105,6 +7461,7 @@
     els.openNewsCollectionJobsBtn?.addEventListener('click', loadOpenNewsCollectionJobs);
     els.openNewsCollectionBuildBtn?.addEventListener('click', buildOpenNewsCollection);
     els.openNewsCollectionBuildAndDistributeBtn?.addEventListener('click', buildAndDistributeOpenNewsCollection);
+    els.openNewsOverviewRefreshBtn?.addEventListener('click', loadOpenNewsOverview);
     els.openNewsBatchMarketSelect?.addEventListener('change', renderOpenNewsOptions);
     els.openNewsCategorySelect?.addEventListener('change', () => {
       renderOpenNewsOptions();

@@ -109,6 +109,11 @@ TARGET_MARKET_RULES = {
         "language_label": "日语",
         "content_rules": "整条输出必须使用自然日语。title、cover_title、segments 中的 script、social_post 全部都要使用日语，不要夹杂中文。material_keyword 也使用日语，但 material_search_keyword 必须保留英文。",
     },
+    "en": {
+        "name": "英语市场",
+        "language_label": "English",
+        "content_rules": "The entire output must use natural English. title, cover_title, segments script, and social_post must all be in English. material_keyword should also be in English, while material_search_keyword must remain in English.",
+    },
 }
 
 DEPARTMENT_RULES = {
@@ -1610,6 +1615,87 @@ def revise_script_segment(topic: str, script_data: dict, segment_index: int, ins
         'material_desc': revised.get('material_desc', target.get('material_desc', '')),
         '_meta': {'usage': usage},
     }
+
+
+def _coerce_translated_script_to_source_timeline(source_script: dict, translated: dict, target_market: str) -> dict:
+    source_segments = list(source_script.get("segments", []) or [])
+    translated_segments = list(translated.get("segments", []) or []) if isinstance(translated.get("segments", []), list) else []
+    payload = {
+        "title": str(translated.get("title") or source_script.get("title") or "").strip(),
+        "cover_title": str(translated.get("cover_title") or source_script.get("cover_title") or "").strip(),
+        "total_duration": int(source_script.get("total_duration") or translated.get("total_duration") or 0),
+        "segments": [],
+        "social_post": str(translated.get("social_post") or source_script.get("social_post") or "").strip(),
+    }
+    for index, source_seg in enumerate(source_segments):
+        translated_seg = translated_segments[index] if index < len(translated_segments) and isinstance(translated_segments[index], dict) else {}
+        seg_type = str(source_seg.get("type") or "material")
+        normalized = {
+            "type": seg_type,
+            "start": source_seg.get("start"),
+            "end": source_seg.get("end"),
+            "duration": source_seg.get("duration"),
+            "script": str(translated_seg.get("script") or source_seg.get("script") or "").strip(),
+        }
+        if seg_type == "digital_human":
+            normalized["action"] = str(translated_seg.get("action") or source_seg.get("action") or _digital_human_action_fallback(target_market)).strip()
+        else:
+            normalized["material_keyword"] = str(
+                translated_seg.get("material_keyword")
+                or source_seg.get("material_keyword")
+                or _material_keyword_fallback(normalized["script"], target_market)
+            ).strip()
+            normalized["material_search_keyword"] = str(
+                translated_seg.get("material_search_keyword")
+                or source_seg.get("material_search_keyword")
+                or _material_search_keyword_fallback("real_estate")
+            ).strip()
+            normalized["material_desc"] = str(
+                translated_seg.get("material_desc")
+                or source_seg.get("material_desc")
+                or _material_desc_fallback(target_market)
+            ).strip()
+        payload["segments"].append(normalized)
+    payload["segment_count"] = len(payload["segments"])
+    return payload
+
+
+def translate_script_data(
+    source_topic: str,
+    script_data: dict,
+    *,
+    target_market: str = "en",
+    department_id: str = "real_estate",
+    provider: str = SCRIPT_MODEL_CLAUDE,
+) -> dict:
+    prompt = f"""
+你会收到一条已经定稿的视频脚本。你的任务不是重写结构，而是在严格保留原有分段顺序、段落类型、时长节奏和信息重点的前提下，把它翻译并本地化成目标市场版本。
+
+原始主题：
+{source_topic}
+
+原始脚本：
+{json.dumps(script_data, ensure_ascii=False, indent=2)}
+
+要求：
+1. 只输出同样结构的 JSON。
+2. 必须保持原有 segments 数量、顺序、type、start、end、duration 不变。
+3. 你只需要改写 title、cover_title、social_post，以及各段 script / action / material_keyword / material_desc。
+4. material_search_keyword 必须保持英文，可沿用原值，也可微调得更适合素材检索。
+5. 不要扩写成不同长度的内容，尽量贴近原稿节奏，方便后续直接复用原视频素材时间轴。
+6. 如果原稿某段是数字人短过渡句，翻译后也必须保持短。
+"""
+    translated, usage = _request_json_by_provider(
+        provider,
+        prompt,
+        max_tokens=4200,
+        enable_web_search=False,
+        target_market=target_market,
+        department_id=department_id,
+    )
+    payload = _coerce_translated_script_to_source_timeline(script_data, translated, target_market)
+    payload["_meta"] = {"usage": usage}
+    return payload
 
 
 def generate_script(topic: str, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_CLAUDE) -> dict:

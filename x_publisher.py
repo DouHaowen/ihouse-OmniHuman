@@ -18,6 +18,7 @@ X_AUTHORIZE_URL = os.getenv("X_OAUTH_AUTHORIZE_URL", "https://x.com/i/oauth2/aut
 X_TOKEN_URL = os.getenv("X_OAUTH_TOKEN_URL", "https://api.x.com/2/oauth2/token").strip()
 X_USERS_ME_URL = os.getenv("X_USERS_ME_URL", "https://api.x.com/2/users/me").strip()
 X_TWEETS_URL = os.getenv("X_TWEETS_URL", "https://api.x.com/2/tweets").strip()
+X_TWEET_DETAIL_URL = os.getenv("X_TWEET_DETAIL_URL", "https://api.x.com/2/tweets").strip()
 X_MEDIA_UPLOAD_URL = os.getenv("X_MEDIA_UPLOAD_URL", "https://api.x.com/2/media/upload").strip()
 X_SCOPE = "tweet.read tweet.write users.read media.write offline.access"
 
@@ -206,6 +207,46 @@ def get_x_user(token_store_path: Path) -> dict[str, Any]:
         "verified": payload.get("verified"),
         "profile_image_url": payload.get("profile_image_url") or "",
         "raw": payload,
+    }
+
+
+def get_x_post_metrics(token_store_path: Path, post_id: str) -> dict[str, Any]:
+    post_id = str(post_id or "").strip()
+    if not post_id:
+        raise XPublishError("读取 X 帖子数据失败：缺少 post_id")
+    access_token = refresh_x_access_token(token_store_path)
+    response = requests.get(
+        f"{X_TWEET_DETAIL_URL}/{quote(post_id, safe='')}",
+        params={
+            "tweet.fields": "created_at,public_metrics,organic_metrics,non_public_metrics,text",
+            "expansions": "author_id",
+        },
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise XPublishError(f"读取 X 帖子数据失败：{response.status_code} {response.text[:500]}")
+    data = response.json().get("data") or {}
+    if not isinstance(data, dict) or not data:
+        raise XPublishError("读取 X 帖子数据失败：未找到对应帖子")
+    public_metrics = data.get("public_metrics") or {}
+    organic_metrics = data.get("organic_metrics") or {}
+    non_public_metrics = data.get("non_public_metrics") or {}
+    view_count = organic_metrics.get("impression_count")
+    if view_count in (None, ""):
+        view_count = non_public_metrics.get("impression_count")
+    return {
+        "platform": "x",
+        "post_id": post_id,
+        "text": str(data.get("text") or "").strip(),
+        "created_at": str(data.get("created_at") or "").strip(),
+        "like_count": int(public_metrics.get("like_count") or 0),
+        "comment_count": int(public_metrics.get("reply_count") or 0),
+        "repost_count": int(public_metrics.get("retweet_count") or 0),
+        "quote_count": int(public_metrics.get("quote_count") or 0),
+        "bookmark_count": int(public_metrics.get("bookmark_count") or 0),
+        "view_count": int(view_count or 0) if view_count not in (None, "") else None,
+        "raw": data,
     }
 
 

@@ -95,7 +95,11 @@ WHISPER_LANGUAGE_MAP = {
     "cn": "zh",
     "tw": "zh",
     "jp": "ja",
+    "en": "en",
 }
+
+LATIN_SUBTITLE_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*|[^\w\s]", re.UNICODE)
+SUBTITLE_SPOKEN_TEXT_RE = re.compile(r"[\s\W_]+", re.UNICODE)
 
 
 def _run(cmd: list[str]) -> None:
@@ -635,8 +639,62 @@ def _concat_media_from_list(file_list: list[Path], output_path: Path, media_type
         list_path.unlink(missing_ok=True)
 
 
+def _subtitle_spoken_length(text: str) -> int:
+    spoken = SUBTITLE_SPOKEN_TEXT_RE.sub("", str(text or ""))
+    return len(spoken)
+
+
+def _has_latin_words(text: str) -> bool:
+    return bool(re.search(r"[A-Za-z]", str(text or "")))
+
+
+def _split_latin_subtitle_text(text: str, max_words: int = 7, max_chars: int = 38) -> list[str]:
+    tokens = LATIN_SUBTITLE_WORD_RE.findall(text or "")
+    if not tokens:
+        return []
+
+    chunks: list[str] = []
+    current: list[str] = []
+    word_count = 0
+    clause_breakers = {",", ";", ":", ".", "!", "?", "—"}
+
+    def flush() -> None:
+        nonlocal current, word_count
+        rendered = " ".join(current).strip()
+        rendered = re.sub(r"\s+([,.;:!?])", r"\1", rendered)
+        if rendered:
+            chunks.append(rendered)
+        current = []
+        word_count = 0
+
+    for token in tokens:
+        if re.match(r"[A-Za-z0-9]", token):
+            candidate = " ".join(current + [token]).strip()
+            if current and (word_count >= max_words or len(candidate) > max_chars):
+                flush()
+            current.append(token)
+            word_count += 1
+            continue
+        if current:
+            current.append(token)
+            rendered = " ".join(current).strip()
+            rendered = re.sub(r"\s+([,.;:!?])", r"\1", rendered)
+            if token in clause_breakers or len(rendered) >= max_chars:
+                flush()
+
+    if current:
+        flush()
+    return chunks
+
+
 def _split_subtitle_text(script: str) -> list[str]:
-    text = re.sub(r"\s+", "", script or "").strip()
+    raw_text = (script or "").strip()
+    if _has_latin_words(raw_text):
+        latin_chunks = _split_latin_subtitle_text(re.sub(r"\s+", " ", raw_text))
+        if latin_chunks:
+            return latin_chunks
+
+    text = re.sub(r"\s+", "", raw_text)
     if not text:
         return []
     parts = re.split(r"(?<=[，。！？；：,.!?;:])", text)
@@ -759,11 +817,11 @@ def _map_chunks_to_word_timeline(
         return []
     if not words:
         # No word timestamps available — fall back to proportional split
-        total_chars = sum(len(c) for c in chunks)
+        total_chars = sum(max(_subtitle_spoken_length(c), 1) for c in chunks)
         rows: list[tuple[float, float, str]] = []
         cursor = 0.0
         for i, chunk in enumerate(chunks):
-            ratio = len(chunk) / max(total_chars, 1)
+            ratio = max(_subtitle_spoken_length(chunk), 1) / max(total_chars, 1)
             chunk_start = cursor
             chunk_end = cursor + audio_duration * ratio
             if i == len(chunks) - 1:
@@ -778,7 +836,8 @@ def _map_chunks_to_word_timeline(
     char_pos = 0
     anchors.append((0, words[0][0]))  # speech start
     for w_start, w_end, w_text in words:
-        n = max(len(w_text), 1)
+        normalized_word = SUBTITLE_SPOKEN_TEXT_RE.sub("", w_text or "")
+        n = max(len(normalized_word), 1)
         for ci in range(n):
             t = w_start + (w_end - w_start) * ci / n
             anchors.append((char_pos + ci, t))
@@ -787,7 +846,7 @@ def _map_chunks_to_word_timeline(
     total_word_chars = char_pos
 
     # Total characters in original script
-    total_script_chars = sum(len(c) for c in chunks)
+    total_script_chars = sum(max(_subtitle_spoken_length(c), 0) for c in chunks)
     if total_script_chars == 0:
         return []
 
@@ -819,7 +878,7 @@ def _map_chunks_to_word_timeline(
     char_cursor = 0
     for i, chunk in enumerate(chunks):
         chunk_start = _time_at_char_pos(char_cursor)
-        char_cursor += len(chunk)
+        char_cursor += max(_subtitle_spoken_length(chunk), 1)
         chunk_end = _time_at_char_pos(char_cursor)
         if i == len(chunks) - 1:
             chunk_end = max(chunk_end, words[-1][1])
