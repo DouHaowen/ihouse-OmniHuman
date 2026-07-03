@@ -1341,6 +1341,17 @@
                       <select id="targetMarketSelect" class="select-input"></select>
                     </div>
                   </div>
+                    <div class="field" id="autoDigitalBatchPanel" style="display:none;">
+                      <label for="autoDigitalSeedInput">批量数字人自动生成</label>
+                      <div class="field-grid" style="grid-template-columns: minmax(0, 1fr) auto auto; align-items:end;">
+                        <input id="autoDigitalSeedInput" class="select-input" type="text" placeholder="例如：日本房地产相关">
+                        <button class="btn btn-secondary" id="autoDigitalGenerateTopicsBtn" type="button">生成10条选题</button>
+                        <button class="btn btn-primary" id="autoDigitalStartBatchBtn" type="button">开始批量生成</button>
+                      </div>
+                      <div class="helper" id="autoDigitalStatus" style="margin-top:10px;">默认：中国市场 / 5090 本地女声 / 女主播C / 5090 InfiniteTalk</div>
+                      <div class="script-board" id="autoDigitalTopicList" style="display:none; margin-top:14px;"></div>
+                      <div class="file-board" id="autoDigitalBatchList" style="margin-top:14px;"></div>
+                    </div>
                     <div class="field">
                       <label for="topicInput" id="topicInputLabel">视频选题</label>
                       <textarea id="topicInput" placeholder="例如：为什么越来越多台湾家庭开始关注日本置业？&#10;也可以直接粘贴新闻 / YouTube / B站 / 抖音 / 小红书链接"></textarea>
@@ -1558,6 +1569,8 @@
                 </div>
               </div>
               <div class="topbar-status" id="openNewsOverviewStatus">正在汇总 OpenNews 平台数据...</div>
+              <div class="insight-grid" id="openNewsPublishModeCard" style="margin-top:6px;"></div>
+              <div class="actions" id="openNewsXBrowserActions" style="justify-content:flex-start; gap:10px; flex-wrap:wrap; margin-top:4px;"></div>
               <div class="result-kpis" id="openNewsOverviewKpis"></div>
               <div class="insight-grid" id="openNewsOverviewPlatforms"></div>
               <div class="file-board" id="openNewsOverviewRecent"></div>
@@ -1568,7 +1581,7 @@
                 <div>
                   <div class="section-kicker">Auto Radar</div>
                   <h3 class="section-title" style="font-size:22px;">2小时自动化 OpenNews</h3>
-                  <p class="section-desc">手动开启后，系统每 2 小时抓取 20 条热点，按 AI 3 条、机器人 1 条、其他热点 2 条制作 6 条新闻短片；YouTube 保持合集和最热 Shorts 规则，X 同步发布本批 6 条竖屏视频。男女配音按批次交替并持久记录，关闭后再开启会继续切换。</p>
+                  <p class="section-desc">手动开启后，系统每 2 小时抓取 20 条热点，按 AI 3 条、机器人 1 条、其他热点 2 条制作 6 条新闻短片；中/日/英竖屏版本会同步发布到 X 和 Facebook，YouTube 自动发布暂时关闭。男女配音按批次交替并持久记录，关闭后再开启会继续切换。</p>
                 </div>
               </div>
               <div class="field-grid" style="grid-template-columns: repeat(2, minmax(0,1fr));">
@@ -2143,6 +2156,9 @@
       propertyVideoTaskId: null,
       propertyVideoEventSource: null,
       propertyVideoTimelineSegments: [],
+      autoDigitalTopics: [],
+      autoDigitalBatches: [],
+      autoDigitalBatchTimer: null,
     };
 
     function progressLabelsForLanguage(lang) {
@@ -2153,6 +2169,13 @@
 
     const els = {
       topicInput: document.getElementById('topicInput'),
+      autoDigitalBatchPanel: document.getElementById('autoDigitalBatchPanel'),
+      autoDigitalSeedInput: document.getElementById('autoDigitalSeedInput'),
+      autoDigitalGenerateTopicsBtn: document.getElementById('autoDigitalGenerateTopicsBtn'),
+      autoDigitalStartBatchBtn: document.getElementById('autoDigitalStartBatchBtn'),
+      autoDigitalStatus: document.getElementById('autoDigitalStatus'),
+      autoDigitalTopicList: document.getElementById('autoDigitalTopicList'),
+      autoDigitalBatchList: document.getElementById('autoDigitalBatchList'),
       topInterfaceLanguageSelect: document.getElementById('topInterfaceLanguageSelect'),
       departmentSelect: document.getElementById('departmentSelect'),
       targetMarketSelect: document.getElementById('targetMarketSelect'),
@@ -2239,6 +2262,8 @@
       openNewsOverviewPanel: document.getElementById('openNewsOverviewPanel'),
       openNewsOverviewRefreshBtn: document.getElementById('openNewsOverviewRefreshBtn'),
       openNewsOverviewStatus: document.getElementById('openNewsOverviewStatus'),
+      openNewsPublishModeCard: document.getElementById('openNewsPublishModeCard'),
+      openNewsXBrowserActions: document.getElementById('openNewsXBrowserActions'),
       openNewsOverviewKpis: document.getElementById('openNewsOverviewKpis'),
       openNewsOverviewPlatforms: document.getElementById('openNewsOverviewPlatforms'),
       openNewsOverviewRecent: document.getElementById('openNewsOverviewRecent'),
@@ -2478,6 +2503,8 @@
         const map = {
           script: copyText('activeTaskStageScript', '文案处理中'),
           audio: copyText('activeTaskStageAudio', '配音中'),
+          qwen_tts_waiting: copyText('activeTaskStageQwenWaiting', '5090 配音排队中'),
+          qwen_tts_running: copyText('activeTaskStageQwenRunning', '5090 配音生成中'),
           digital_human_preparing: copyText('activeTaskStageDigitalPreparing', '数字人准备中'),
           digital_human_waiting: copyText('activeTaskStageDigitalWaiting', '等待数字人'),
           digital_human_running: copyText('activeTaskStageDigitalRunning', '数字人生成中'),
@@ -2506,9 +2533,10 @@
                 <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:4px;">
                   <div class="history-title" style="margin:0;">${escapeHtml(item.topic || item.task_id)}</div>
                   <span class="tag" style="${stageTone(item)}">${escapeHtml(stageLabel(item))}</span>
+                  ${item.auto_digital_batch_index ? `<span class="tag">批量第 ${escapeHtml(String(item.auto_digital_batch_index))} 条</span>` : ''}
                 </div>
                 <div class="history-topic">${escapeHtml((copyText('activeTaskStep', '步骤 {step}/{total}')).replace('{step}', String(item.step || 0)).replace('{total}', String(item.total_steps || 0)))} · ${escapeHtml(item.latest_message || copyText('progressRunning', '正在处理'))}</div>
-                <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at || 0))} · ${escapeHtml(item.mode === 'avatar_test' ? copyText('activeTaskModeTest', '测试任务') : copyText('activeTaskModeFull', '一站式生产'))}${item.task_id === state.currentTaskId ? ` · ${escapeHtml(copyText('activeTaskWatching', '当前查看中'))}` : ''}</div>
+                <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at || 0))} · ${escapeHtml(item.mode === 'avatar_test' ? copyText('activeTaskModeTest', '测试任务') : (item.mode === 'auto_digital_batch' ? '批量数字人生成' : copyText('activeTaskModeFull', '一站式生产')))}${item.task_id === state.currentTaskId ? ` · ${escapeHtml(copyText('activeTaskWatching', '当前查看中'))}` : ''}</div>
               </div>
               <div class="history-actions">
                 <button class="btn btn-secondary active-task-open-btn" type="button" data-task-id="${item.task_id}">${escapeHtml(copyText('activeTaskOpen', '继续查看'))}</button>
@@ -2712,6 +2740,273 @@
       setHeroStatus(copyText('resumeTaskFound', '已恢复后台任务进度'));
       subscribeProgress(taskId);
       window.scrollTo({ top: els.progressPanel.offsetTop - 20, behavior: 'smooth' });
+    }
+
+    function autoDigitalStatusText(status) {
+      const map = {
+        queued: '排队中',
+        running: '生成中',
+        done: '已完成',
+        error: '失败',
+        partial: '部分完成',
+        cancelled: '已停止',
+      };
+      return map[status] || status || '未知';
+    }
+
+    function renderAutoDigitalTopics() {
+      if (!els.autoDigitalTopicList) return;
+      const topics = state.autoDigitalTopics || [];
+      if (!topics.length) {
+        els.autoDigitalTopicList.style.display = 'none';
+        els.autoDigitalTopicList.innerHTML = '';
+        return;
+      }
+      els.autoDigitalTopicList.style.display = 'grid';
+      els.autoDigitalTopicList.innerHTML = topics.map((item, index) => `
+        <div class="script-card" style="padding:14px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px;">
+            <span class="tag">选题 ${index + 1}</span>
+            <button class="btn btn-ghost auto-digital-remove-topic-btn" type="button" data-index="${index}" style="min-height:34px; padding:8px 12px;">移除</button>
+          </div>
+          <input class="select-input auto-digital-topic-input" data-index="${index}" value="${escapeHtml(item.topic || item.title || '')}" style="min-height:42px;">
+          <div class="helper" style="margin-top:8px;">${escapeHtml(item.angle || '')}</div>
+        </div>
+      `).join('');
+      els.autoDigitalTopicList.querySelectorAll('.auto-digital-topic-input').forEach(input => {
+        input.addEventListener('input', () => {
+          const index = Number(input.dataset.index);
+          if (state.autoDigitalTopics[index]) {
+            state.autoDigitalTopics[index].topic = input.value.trim();
+            state.autoDigitalTopics[index].title = input.value.trim();
+          }
+        });
+      });
+      els.autoDigitalTopicList.querySelectorAll('.auto-digital-remove-topic-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.autoDigitalTopics.splice(Number(btn.dataset.index), 1);
+          renderAutoDigitalTopics();
+        });
+      });
+    }
+
+    function renderAutoDigitalBatches(items = state.autoDigitalBatches || []) {
+      if (!els.autoDigitalBatchList) return;
+      const batches = Array.isArray(items) ? items.filter(Boolean) : [];
+      state.autoDigitalBatches = batches;
+      if (!batches.length) {
+        els.autoDigitalBatchList.innerHTML = '';
+        return;
+      }
+      const latest = batches[0];
+      els.autoDigitalBatchList.innerHTML = batches.slice(0, 3).map(batch => `
+        <div class="history-item">
+          <div class="history-main">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:6px;">
+              <div class="history-title" style="margin:0;">${escapeHtml(batch.seed_topic || '批量数字人任务')}</div>
+              <span class="tag">${escapeHtml(autoDigitalStatusText(batch.status))}</span>
+              <span class="tag">${escapeHtml(`${batch.done_count || 0}/${batch.task_count || 0} 完成`)}</span>
+            </div>
+            <div class="history-topic">${escapeHtml(batch.message || '')}</div>
+            <div class="history-meta">${escapeHtml(formatHistoryTime(batch.created_at))} · 5090 本地女声 · 女主播C · 5090 InfiniteTalk</div>
+            <div style="display:grid; gap:8px; margin-top:12px;">
+              ${(batch.items || []).map(item => `
+                <div style="display:grid; grid-template-columns: 42px minmax(0,1fr) auto; gap:10px; align-items:center; padding:10px 12px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,0.72);">
+                  <span class="tag">${escapeHtml(String(item.index || ''))}</span>
+                  <div style="min-width:0;">
+                    <div style="font-weight:800; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(item.topic || '')}</div>
+                    <div class="helper">${escapeHtml(autoDigitalStatusText(item.status))}${item.error ? ` · ${escapeHtml(item.error.replace(/^出错了：/, ''))}` : ''}</div>
+                  </div>
+                  <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;">
+                    ${item.task_id && ['running', 'queued'].includes(item.status) ? `<button class="btn btn-secondary auto-digital-open-task-btn" type="button" data-task-id="${escapeHtml(item.task_id)}" style="min-height:34px; padding:8px 12px;">查看进度</button>` : ''}
+                    ${item.history_id ? `<button class="btn btn-secondary auto-digital-open-history-btn" type="button" data-history-id="${escapeHtml(item.history_id)}" style="min-height:34px; padding:8px 12px;">打开结果</button>` : ''}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          <div class="history-actions">
+            ${['queued', 'running'].includes(batch.status) ? `<button class="btn btn-ghost auto-digital-cancel-batch-btn" type="button" data-batch-id="${escapeHtml(batch.batch_id)}">停止批量</button>` : ''}
+          </div>
+        </div>
+      `).join('');
+      els.autoDigitalBatchList.querySelectorAll('.auto-digital-open-task-btn').forEach(btn => {
+        btn.addEventListener('click', () => openActiveTask(btn.dataset.taskId));
+      });
+      els.autoDigitalBatchList.querySelectorAll('.auto-digital-open-history-btn').forEach(btn => {
+        btn.addEventListener('click', () => openHistoryTask(btn.dataset.historyId));
+      });
+      els.autoDigitalBatchList.querySelectorAll('.auto-digital-cancel-batch-btn').forEach(btn => {
+        btn.addEventListener('click', () => cancelAutoDigitalBatch(btn.dataset.batchId, btn));
+      });
+      if (els.autoDigitalStatus && latest) {
+        els.autoDigitalStatus.textContent = `${autoDigitalStatusText(latest.status)}：${latest.done_count || 0}/${latest.task_count || 0} 已完成。${latest.message || ''}`;
+      }
+    }
+
+    async function loadAutoDigitalBatches() {
+      if (!canUseAutoDigitalBatch()) {
+        renderAutoDigitalBatches([]);
+        stopAutoDigitalBatchPolling();
+        return;
+      }
+      try {
+        const res = await fetch('/api/auto-digital/batches');
+        if (res.status === 401) return;
+        if (res.status === 403) {
+          renderAutoDigitalBatches([]);
+          stopAutoDigitalBatchPolling();
+          return;
+        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '批量任务加载失败');
+        renderAutoDigitalBatches(data.items || []);
+        const hasRunning = (data.items || []).some(item => ['queued', 'running'].includes(item.status));
+        if (hasRunning) startAutoDigitalBatchPolling();
+        else stopAutoDigitalBatchPolling();
+      } catch (_) {}
+    }
+
+    function startAutoDigitalBatchPolling() {
+      if (state.autoDigitalBatchTimer) return;
+      state.autoDigitalBatchTimer = setInterval(loadAutoDigitalBatches, 4000);
+    }
+
+    function stopAutoDigitalBatchPolling() {
+      if (state.autoDigitalBatchTimer) {
+        clearInterval(state.autoDigitalBatchTimer);
+        state.autoDigitalBatchTimer = null;
+      }
+    }
+
+    async function generateAutoDigitalTopics() {
+      if (!canUseAutoDigitalBatch()) {
+        alert('只有管理员可以使用批量数字人自动生成');
+        return;
+      }
+      const seed = (els.autoDigitalSeedInput?.value || '').trim();
+      if (!seed) {
+        alert('请先输入一个批量主题方向，例如：日本房地产相关');
+        return;
+      }
+      const btn = els.autoDigitalGenerateTopicsBtn;
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = '生成中...';
+      }
+      if (els.autoDigitalStatus) els.autoDigitalStatus.textContent = '正在用本地 Qwen 生成 10 条选题...';
+      try {
+        const formData = new FormData();
+        formData.append('seed_topic', seed);
+        formData.append('count', '10');
+        const res = await fetch('/api/auto-digital/topics', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '生成选题失败');
+        state.autoDigitalTopics = (data.topics || []).map(item => ({
+          topic: item.topic || item.title || '',
+          title: item.topic || item.title || '',
+          angle: item.angle || '',
+        }));
+        renderAutoDigitalTopics();
+        if (els.autoDigitalStatus) els.autoDigitalStatus.textContent = `已生成 ${state.autoDigitalTopics.length} 条选题，可以微调后开始批量生成。`;
+      } catch (error) {
+        if (els.autoDigitalStatus) els.autoDigitalStatus.textContent = error.message || '生成选题失败';
+        alert(error.message || '生成选题失败');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '生成10条选题';
+        }
+      }
+    }
+
+    async function startAutoDigitalBatch() {
+      if (!canUseAutoDigitalBatch()) {
+        alert('只有管理员可以创建批量数字人任务');
+        return;
+      }
+      const seed = (els.autoDigitalSeedInput?.value || '').trim();
+      let topics = (state.autoDigitalTopics || [])
+        .map(item => ({ topic: (item.topic || item.title || '').trim(), angle: item.angle || '' }))
+        .filter(item => item.topic);
+      if (!seed) {
+        alert('请先输入一个批量主题方向');
+        return;
+      }
+      const btn = els.autoDigitalStartBatchBtn;
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = '提交中...';
+      }
+      try {
+        if (!topics.length) {
+          if (els.autoDigitalStatus) els.autoDigitalStatus.textContent = '未检测到现成选题，正在先生成 10 条选题...';
+          const topicForm = new FormData();
+          topicForm.append('seed_topic', seed);
+          topicForm.append('count', '10');
+          const topicRes = await fetch('/api/auto-digital/topics', { method: 'POST', body: topicForm });
+          const topicData = await topicRes.json();
+          if (!topicRes.ok) throw new Error(topicData.error || '生成选题失败');
+          state.autoDigitalTopics = (topicData.topics || []).map(item => ({
+            topic: item.topic || item.title || '',
+            title: item.topic || item.title || '',
+            angle: item.angle || '',
+          }));
+          renderAutoDigitalTopics();
+          topics = (state.autoDigitalTopics || [])
+            .map(item => ({ topic: (item.topic || item.title || '').trim(), angle: item.angle || '' }))
+            .filter(item => item.topic);
+        }
+        if (!topics.length) {
+          throw new Error('没有生成出可用选题，请稍后重试');
+        }
+        if (!confirm(`确认开始批量生成 ${topics.length} 条数字人视频吗？系统会按顺序一条一条生成。`)) return;
+        const formData = new FormData();
+        formData.append('seed_topic', seed);
+        formData.append('topics_json', JSON.stringify(topics));
+        const res = await fetch('/api/auto-digital/batches', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '创建批量任务失败');
+        renderAutoDigitalBatches([data.batch, ...(state.autoDigitalBatches || []).filter(item => item.batch_id !== data.batch?.batch_id)]);
+        startAutoDigitalBatchPolling();
+        loadActiveTasks();
+        if (els.autoDigitalStatus) els.autoDigitalStatus.textContent = data.reused_existing ? '已有批量任务正在运行。' : '批量任务已开始，系统会顺序生成每条视频。';
+      } catch (error) {
+        alert(error.message || '创建批量任务失败');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '开始批量生成';
+        }
+      }
+    }
+
+    async function cancelAutoDigitalBatch(batchId, button = null) {
+      if (!canUseAutoDigitalBatch()) {
+        alert('只有管理员可以停止批量数字人任务');
+        return;
+      }
+      if (!batchId) return;
+      if (!confirm('确认停止这个批量任务吗？已生成的单条任务会保留。')) return;
+      const original = button?.textContent || '停止批量';
+      if (button) {
+        button.disabled = true;
+        button.textContent = '停止中...';
+      }
+      try {
+        const res = await fetch(`/api/auto-digital/batches/${batchId}/cancel`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '停止批量任务失败');
+        renderAutoDigitalBatches([data.batch, ...(state.autoDigitalBatches || []).filter(item => item.batch_id !== batchId)]);
+        loadActiveTasks();
+      } catch (error) {
+        alert(error.message || '停止批量任务失败');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = original;
+        }
+      }
     }
 
     function renderHistory(items = []) {
@@ -3843,6 +4138,7 @@
         els.sessionUser.style.display = 'none';
         els.logoutBtn.style.display = 'none';
         els.adminDashboardBtn.style.display = 'none';
+        syncAutoDigitalBatchVisibility();
         return;
       }
       const roleLabel = state.currentUser.role === 'admin' ? 'Admin' : 'User';
@@ -3850,6 +4146,7 @@
       els.sessionUser.style.display = 'inline-flex';
       els.logoutBtn.style.display = 'inline-flex';
       els.adminDashboardBtn.style.display = state.currentUser.role === 'admin' ? 'inline-flex' : 'none';
+      syncAutoDigitalBatchVisibility();
     }
 
     function applyUserDefaults(user) {
@@ -3886,6 +4183,7 @@
       await loadHistory();
       await loadMaterialLibrary();
       await loadMaterialHarvest();
+      await loadAutoDigitalBatches();
       await restoreActiveTaskState();
     }
 
@@ -3908,6 +4206,7 @@
       await loadHistory();
       await loadMaterialLibrary();
       await loadMaterialHarvest();
+      await loadAutoDigitalBatches();
       await loadCostSummary();
       await restoreActiveTaskState();
       setAuthVisible(false);
@@ -3954,13 +4253,38 @@
       return (state.options?.voice_presets || []).find(item => item.id === state.selectedVoiceId) || null;
     }
 
+    function canUseAutoDigitalBatch() {
+      return !!state.currentUser && state.currentUser.role === 'admin' && state.options?.can_use_auto_digital_batch !== false;
+    }
+
+    function syncAutoDigitalBatchVisibility() {
+      if (!els.autoDigitalBatchPanel) return;
+      const visible = canUseAutoDigitalBatch();
+      els.autoDigitalBatchPanel.style.display = visible ? '' : 'none';
+      if (visible) return;
+      state.autoDigitalTopics = [];
+      state.autoDigitalBatches = [];
+      stopAutoDigitalBatchPolling();
+      if (els.autoDigitalSeedInput) els.autoDigitalSeedInput.value = '';
+      if (els.autoDigitalTopicList) {
+        els.autoDigitalTopicList.style.display = 'none';
+        els.autoDigitalTopicList.innerHTML = '';
+      }
+      if (els.autoDigitalBatchList) {
+        els.autoDigitalBatchList.innerHTML = '';
+      }
+    }
+
     function visibleVoiceIdsForMarket(marketId) {
       const allPresetIds = (state.options?.voice_presets || []).map(item => item.id);
+      if (state.currentUser?.role === 'admin') {
+        return allPresetIds;
+      }
       if (marketId === 'tw') {
         return allPresetIds;
       }
       if (marketId === 'jp') return ['mandarin_female', 'mandarin_male', 'ricky_clone', 'bin_clone', 'japanese_female'];
-      return ['mandarin_female', 'mandarin_male', 'ricky_clone', 'bin_clone'];
+      return ['mandarin_female', 'mandarin_male', 'ricky_clone', 'bin_clone', 'taiwan_clone'];
     }
 
     function getVisibleAvatars() {
@@ -3973,12 +4297,15 @@
     }
 
     function recommendedAvatarIdForVoice(voiceId) {
-      if (voiceId === 'ricky_clone' || voiceId === 'bin_clone') return 'avatar_host_c.png';
-      if (state.selectedTargetMarket === 'tw' || state.selectedTargetMarket === 'jp') {
-        return 'avatar_test_0cd3d70a.png';
+      const avatars = state.options?.avatars || [];
+      const preferredExisting = (...ids) => ids.find(id => avatars.some(item => item.id === id));
+      if (voiceId === 'ricky_clone' || voiceId === 'bin_clone' || voiceId === 'mandarin_male') {
+        return preferredExisting('avatar_custom_林晨专属_male_manual.png', 'avatar_ultraman.png', 'avatar_host_c.png') || '';
       }
-      if (voiceId === 'mandarin_male') return 'avatar_host_c.png';
-      return 'avatar_test_0cd3d70a.png';
+      if (state.selectedTargetMarket === 'tw' || state.selectedTargetMarket === 'jp') {
+        return preferredExisting('avatar_host_d.png', 'avatar_test_aec9a0f0.png', 'avatar_test_0cd3d70a.png') || '';
+      }
+      return preferredExisting('avatar_host_d.png', 'avatar_test_aec9a0f0.png', 'avatar_test_0cd3d70a.png') || '';
     }
 
     function recommendedVoiceIdForAvatar(avatarId) {
@@ -4480,7 +4807,7 @@
       const intervalText = openNewsBatchIntervalText(config.interval_minutes);
       const nextRun = config.next_run_at ? `｜下次自动启动：${formatHistoryTime(config.next_run_at)}` : '';
       const nextPresenter = presenterState.next_label ? `｜下一批主播：${presenterState.next_label}` : '';
-      const ruleText = '抓取20条热点，按 AI 3、机器人 1、其他热点 2 制作6条；YouTube发布合集和最热Shorts，X发布6条竖屏。';
+      const ruleText = '抓取20条热点，按 AI 3、机器人 1、其他热点 2 制作6条；中/日/英竖屏版同步发布 X 和 Facebook，YouTube 自动发布暂时关闭。';
       const baseMessage = config.last_run_message || '自动化等待下一轮。';
       const enabledStatus = `${intervalText}自动执行：${ruleText}${nextPresenter}${nextRun}`;
       const disabledStatus = `2小时自动化已关闭；现在可以手动开启新批次并逐条审核素材。开启后${ruleText}${nextPresenter}`;
@@ -4808,7 +5135,7 @@
             youtube_auto_publish: false,
             youtube_privacy_status: 'public',
             youtube_aspects: ['horizontal', 'vertical'],
-            x_auto_publish: false,
+            x_auto_publish: true,
             x_aspects: ['vertical'],
             notes: els.openNewsNotesInput?.value || '',
           }),
@@ -4900,10 +5227,45 @@
     function renderOpenNewsOverview() {
       if (!els.openNewsOverviewKpis || !els.openNewsOverviewPlatforms || !els.openNewsOverviewRecent) return;
       const overview = state.openNewsOverview;
+      const publishMode = state.xPublishMode || null;
+      if (els.openNewsPublishModeCard) {
+        if (publishMode) {
+          const browser = publishMode.browser || {};
+          els.openNewsPublishModeCard.innerHTML = `
+            <div class="insight-card">
+              <div class="label">X 发布模式</div>
+              <div class="value">${escapeHtml(publishMode.publish_mode_label || publishMode.publish_mode || '—')}</div>
+              <div class="helper" style="margin-top:8px;">浏览器：${escapeHtml(browser.executable_path || '未设置')}｜Headless：${browser.headless ? '是' : '否'}</div>
+              <div class="helper" style="margin-top:6px;">Profile：${browser.auth_ready ? '已登录' : '未登录'}｜文件数：${escapeHtml(String(browser.file_count || 0))}</div>
+              <div class="helper" style="margin-top:6px;">服务器登录：${(publishMode.login || {}).running ? '运行中' : '未启动'}${(publishMode.login || {}).public_url ? `｜<a href="${escapeHtml((publishMode.login || {}).public_url)}" target="_blank" rel="noopener">打开登录窗口</a>` : ''}</div>
+            </div>
+          `;
+        } else {
+          els.openNewsPublishModeCard.innerHTML = '<div class="empty-box">正在读取 X 浏览器状态...</div>';
+        }
+      }
+      if (els.openNewsXBrowserActions) {
+        const mode = publishMode?.publish_mode || '';
+        const browser = publishMode?.browser || {};
+        const isBrowser = mode === 'browser';
+        els.openNewsXBrowserActions.innerHTML = isBrowser ? `
+          <button class="btn btn-secondary" type="button" id="openNewsXBrowserRefreshBtn">刷新 X 浏览器状态</button>
+          <button class="btn btn-secondary" type="button" id="openNewsXBrowserExportBtn">导出 X 登录 Profile</button>
+          <label class="btn btn-secondary" style="cursor:pointer;">
+            导入 X 登录 Profile
+            <input type="file" id="openNewsXBrowserImportInput" accept=".zip" style="display:none;">
+          </label>
+          <button class="btn btn-secondary" type="button" id="openNewsXBrowserLoginStartBtn">启动服务器端 X 登录</button>
+          <button class="btn btn-secondary" type="button" id="openNewsXBrowserLoginStopBtn">停止服务器端 X 登录</button>
+          <button class="btn btn-secondary" type="button" id="openNewsXBrowserClearBtn">清空 X 登录 Profile</button>
+          <span class="helper" style="align-self:center;">${escapeHtml(browser.auth_ready ? '当前已登录，可直接尝试自动发布。' : '当前未登录；可先启动服务器端登录窗口，在服务器环境里重新登录一次。')}</span>
+        ` : `<div class="helper">当前 X 发布模式不是浏览器自动化，无需管理浏览器 Profile。</div>`;
+      }
       if (!overview) {
         els.openNewsOverviewKpis.innerHTML = '';
         els.openNewsOverviewPlatforms.innerHTML = '';
         els.openNewsOverviewRecent.innerHTML = '<div class="empty-box">暂无平台数据。</div>';
+        bindOpenNewsXBrowserActions();
         return;
       }
       const p = overview.platforms || {};
@@ -4946,6 +5308,136 @@
           </div>
         </div>
       `).join('') : '<div class="empty-box">还没有可展示的平台发布链接。</div>';
+      bindOpenNewsXBrowserActions();
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename || 'download.bin';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    async function refreshOpenNewsXBrowserStatus() {
+      setOpenNewsOverviewStatus('正在刷新 X 浏览器状态...');
+      try {
+        const [xStatusRes, xProfileRes, xLoginRes] = await Promise.all([
+          fetch('/api/x/status'),
+          fetch('/api/x/browser-profile/status'),
+          fetch('/api/x/browser-login/status'),
+        ]);
+        const xStatus = await xStatusRes.json().catch(() => ({}));
+        const xProfileStatus = await xProfileRes.json().catch(() => ({}));
+        const xLoginStatus = await xLoginRes.json().catch(() => ({}));
+        if (!xStatusRes.ok) throw new Error(xStatus.error || '读取 X 状态失败');
+        if (!xProfileRes.ok) throw new Error(xProfileStatus.error || '读取 X 浏览器 Profile 状态失败');
+        if (!xLoginRes.ok) throw new Error(xLoginStatus.error || '读取服务器端 X 登录状态失败');
+        state.xPublishMode = {
+          ...(xStatus || {}),
+          browser: {
+            ...((xStatus || {}).browser || {}),
+            ...((xProfileStatus || {}).browser || {}),
+            auth_ready: Boolean((xProfileStatus || {}).auth_ready ?? (xStatus || {}).browser?.auth_ready),
+            file_count: Number((xProfileStatus || {}).file_count || 0),
+            size_bytes: Number((xProfileStatus || {}).size_bytes || 0),
+          },
+          login: xLoginStatus || {},
+        };
+        renderOpenNewsOverview();
+        setOpenNewsOverviewStatus('X 浏览器状态已刷新。');
+      } catch (error) {
+        setOpenNewsOverviewStatus(friendlyRequestError(error, 'X 浏览器状态刷新失败'), true);
+      }
+    }
+
+    async function exportOpenNewsXBrowserProfile() {
+      setOpenNewsOverviewStatus('正在导出 X 浏览器 Profile...');
+      try {
+        const res = await fetch('/api/x/browser-profile/export');
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || '导出 X 浏览器 Profile 失败');
+        }
+        const blob = await res.blob();
+        const filename = (res.headers.get('content-disposition') || '').match(/filename="?([^"]+)"?/)?.[1] || 'x_browser_profile.zip';
+        downloadBlob(blob, filename);
+        setOpenNewsOverviewStatus('X 浏览器 Profile 已导出。');
+      } catch (error) {
+        setOpenNewsOverviewStatus(friendlyRequestError(error, '导出 X 浏览器 Profile 失败'), true);
+      }
+    }
+
+    async function importOpenNewsXBrowserProfile(file) {
+      if (!file) return;
+      setOpenNewsOverviewStatus('正在导入 X 浏览器 Profile...');
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('/api/x/browser-profile/import', { method: 'POST', body: formData });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '导入 X 浏览器 Profile 失败');
+        await refreshOpenNewsXBrowserStatus();
+        setOpenNewsOverviewStatus(data.message || 'X 浏览器 Profile 已导入。');
+      } catch (error) {
+        setOpenNewsOverviewStatus(friendlyRequestError(error, '导入 X 浏览器 Profile 失败'), true);
+      }
+    }
+
+    async function clearOpenNewsXBrowserProfile() {
+      if (!confirm('确定要清空服务器上的 X 浏览器登录 Profile 吗？清空后需要重新导入或重新登录。')) return;
+      setOpenNewsOverviewStatus('正在清空 X 浏览器 Profile...');
+      try {
+        const res = await fetch('/api/x/browser-profile/clear', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '清空 X 浏览器 Profile 失败');
+        await refreshOpenNewsXBrowserStatus();
+        setOpenNewsOverviewStatus(data.message || 'X 浏览器 Profile 已清空。');
+      } catch (error) {
+        setOpenNewsOverviewStatus(friendlyRequestError(error, '清空 X 浏览器 Profile 失败'), true);
+      }
+    }
+
+    async function startOpenNewsXBrowserLogin() {
+      setOpenNewsOverviewStatus('正在启动服务器端 X 登录窗口...');
+      try {
+        const res = await fetch('/api/x/browser-login/start', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '启动服务器端 X 登录失败');
+        await refreshOpenNewsXBrowserStatus();
+        setOpenNewsOverviewStatus(data.public_url ? `服务器端 X 登录窗口已启动：${data.public_url}` : '服务器端 X 登录窗口已启动。');
+      } catch (error) {
+        setOpenNewsOverviewStatus(friendlyRequestError(error, '启动服务器端 X 登录失败'), true);
+      }
+    }
+
+    async function stopOpenNewsXBrowserLogin() {
+      setOpenNewsOverviewStatus('正在停止服务器端 X 登录窗口...');
+      try {
+        const res = await fetch('/api/x/browser-login/stop', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '停止服务器端 X 登录失败');
+        await refreshOpenNewsXBrowserStatus();
+        setOpenNewsOverviewStatus(data.public_url ? `服务器端 X 登录窗口已停止：${data.public_url}` : '服务器端 X 登录窗口已停止。');
+      } catch (error) {
+        setOpenNewsOverviewStatus(friendlyRequestError(error, '停止服务器端 X 登录失败'), true);
+      }
+    }
+
+    function bindOpenNewsXBrowserActions() {
+      document.getElementById('openNewsXBrowserRefreshBtn')?.addEventListener('click', refreshOpenNewsXBrowserStatus);
+      document.getElementById('openNewsXBrowserExportBtn')?.addEventListener('click', exportOpenNewsXBrowserProfile);
+      document.getElementById('openNewsXBrowserLoginStartBtn')?.addEventListener('click', startOpenNewsXBrowserLogin);
+      document.getElementById('openNewsXBrowserLoginStopBtn')?.addEventListener('click', stopOpenNewsXBrowserLogin);
+      document.getElementById('openNewsXBrowserClearBtn')?.addEventListener('click', clearOpenNewsXBrowserProfile);
+      document.getElementById('openNewsXBrowserImportInput')?.addEventListener('change', event => {
+        const file = event.target?.files?.[0];
+        if (file) importOpenNewsXBrowserProfile(file);
+        event.target.value = '';
+      });
     }
 
     async function loadOpenNewsOverview() {
@@ -4955,15 +5447,32 @@
           fetch('/api/lab/opennews/ready-videos?limit=80'),
           fetch('/api/opennews/collections/jobs?limit=30'),
         ]);
+        const [xStatusRes, xProfileRes] = await Promise.all([
+          fetch('/api/x/status'),
+          fetch('/api/x/browser-profile/status'),
+        ]);
         const videosData = await videosRes.json().catch(() => ({}));
         const jobsData = await jobsRes.json().catch(() => ({}));
+        const xStatus = await xStatusRes.json().catch(() => ({}));
+        const xProfileStatus = await xProfileRes.json().catch(() => ({}));
         if (!videosRes.ok) throw new Error(videosData.error || 'OpenNews 成片数据加载失败');
         if (!jobsRes.ok) throw new Error(jobsData.error || 'OpenNews 合集任务加载失败');
+        state.xPublishMode = {
+          ...(xStatus || {}),
+          browser: {
+            ...((xStatus || {}).browser || {}),
+            ...((xProfileStatus || {}).browser || {}),
+            auth_ready: Boolean((xProfileStatus || {}).auth_ready ?? (xStatus || {}).browser?.auth_ready),
+            file_count: Number((xProfileStatus || {}).file_count || 0),
+            size_bytes: Number((xProfileStatus || {}).size_bytes || 0),
+          },
+        };
         state.openNewsOverview = buildOpenNewsOverview(videosData.videos || [], jobsData.jobs || []);
         renderOpenNewsOverview();
         setOpenNewsOverviewStatus('平台总览已更新。这里汇总的是当前 OpenNews 页面可读取到的整体发布与互动数据。');
       } catch (error) {
         state.openNewsOverview = null;
+        state.xPublishMode = null;
         renderOpenNewsOverview();
         setOpenNewsOverviewStatus(friendlyRequestError(error, 'OpenNews 平台总览加载失败'), true);
       }
@@ -5921,6 +6430,7 @@
       state.selectedScriptModel = (scriptModels.find(item => item.default)?.id || scriptModels[0]?.id || 'api_relay');
       const engines = state.options?.digital_human_engines || [];
       state.selectedDigitalHumanEngine = (engines.find(item => item.default)?.id || engines[0]?.id || 'volc_omnihuman');
+      syncAutoDigitalBatchVisibility();
       renderVoicePresets();
       renderPropertyVideoOptions();
       renderAvatarOptions();
@@ -6200,7 +6710,7 @@
       }
       els.digitalHumanEngineField.style.display = 'grid';
       if (els.digitalHumanEngineHint) {
-        els.digitalHumanEngineHint.textContent = '管理员可测试多种数字人引擎；员工账号会默认走本地 5090 InfiniteTalk，并在失败时自动重试。';
+        els.digitalHumanEngineHint.textContent = '管理员可测试多种数字人引擎；员工账号默认走火山 OmniHuman 生产通道。';
       }
       els.digitalHumanEngineGrid.innerHTML = engines.map(engine => `
         <article class="preset-card ${engine.id === state.selectedDigitalHumanEngine ? 'selected' : ''}" data-digital-human-engine="${engine.id}">
@@ -6605,6 +7115,11 @@
           current: '目前執行帳號',
           none: '目前無',
           idle: '目前沒有排隊中的數位人任務',
+          ttsTitle: '5090 配音佇列狀態',
+          ttsStatus: '5090 配音生成中',
+          ttsIdle: '目前沒有排隊中的 5090 配音任務',
+          ttsWaiting: '配音等待數量',
+          ttsCurrent: '目前配音帳號',
         };
       }
       if (state.selectedInterfaceLanguage === 'ja-JP') {
@@ -6615,6 +7130,11 @@
           current: '現在実行中のアカウント',
           none: 'なし',
           idle: '現在キュー中のデジタルヒューマンはありません',
+          ttsTitle: '5090 音声合成キュー',
+          ttsStatus: '5090 音声合成中',
+          ttsIdle: '現在キュー中の 5090 音声合成タスクはありません',
+          ttsWaiting: '音声合成の待機数',
+          ttsCurrent: '現在の音声合成アカウント',
         };
       }
       return {
@@ -6624,16 +7144,27 @@
         current: '当前执行账号',
         none: '当前无',
         idle: '当前没有排队中的数字人任务',
+        ttsTitle: '5090 配音队列状态',
+        ttsStatus: '5090 配音生成中',
+        ttsIdle: '当前没有排队中的 5090 配音任务',
+        ttsWaiting: '配音等待数量',
+        ttsCurrent: '当前配音账号',
       };
     }
 
     function renderQueueStatus(data = {}) {
       if (!els.queueStatusPanel) return;
       const copy = queueCopy();
-      const runningCount = Number(data.running_count || 0);
-      const waitingCount = Number(data.waiting_count || 0);
-      const currentOwner = data.current_owner_display_name || data.current_owner_username || copy.none;
+      const digitalQueue = data.digital_human || data;
+      const ttsQueue = data.qwen_tts || {};
+      const runningCount = Number(digitalQueue.running_count || 0);
+      const waitingCount = Number(digitalQueue.waiting_count || 0);
+      const currentOwner = digitalQueue.current_owner_display_name || digitalQueue.current_owner_username || copy.none;
+      const ttsRunningCount = Number(ttsQueue.running_count || 0);
+      const ttsWaitingCount = Number(ttsQueue.waiting_count || 0);
+      const ttsCurrentOwner = ttsQueue.current_owner_display_name || ttsQueue.current_owner_username || copy.none;
       const active = runningCount > 0 || waitingCount > 0;
+      const ttsActive = ttsRunningCount > 0 || ttsWaitingCount > 0;
       els.queueStatusPanel.innerHTML = `
         <div class="insight-card">
           <div class="label">${escapeHtml(copy.title)}</div>
@@ -6646,6 +7177,18 @@
         <div class="insight-card">
           <div class="label">${escapeHtml(copy.current)}</div>
           <div class="value">${escapeHtml(currentOwner)}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(copy.ttsTitle)}</div>
+          <div class="value">${escapeHtml(ttsActive ? copy.ttsStatus : copy.ttsIdle)}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(copy.ttsWaiting)}</div>
+          <div class="value">${escapeHtml(String(ttsWaitingCount))}</div>
+        </div>
+        <div class="insight-card">
+          <div class="label">${escapeHtml(copy.ttsCurrent)}</div>
+          <div class="value">${escapeHtml(ttsCurrentOwner)}</div>
         </div>
       `;
     }
@@ -7462,6 +8005,14 @@
     els.openNewsCollectionBuildBtn?.addEventListener('click', buildOpenNewsCollection);
     els.openNewsCollectionBuildAndDistributeBtn?.addEventListener('click', buildAndDistributeOpenNewsCollection);
     els.openNewsOverviewRefreshBtn?.addEventListener('click', loadOpenNewsOverview);
+    els.autoDigitalGenerateTopicsBtn?.addEventListener('click', generateAutoDigitalTopics);
+    els.autoDigitalStartBatchBtn?.addEventListener('click', startAutoDigitalBatch);
+    els.autoDigitalSeedInput?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        generateAutoDigitalTopics();
+      }
+    });
     els.openNewsBatchMarketSelect?.addEventListener('change', renderOpenNewsOptions);
     els.openNewsCategorySelect?.addEventListener('change', () => {
       renderOpenNewsOptions();

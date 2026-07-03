@@ -100,6 +100,13 @@ WHISPER_LANGUAGE_MAP = {
 
 LATIN_SUBTITLE_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*|[^\w\s]", re.UNICODE)
 SUBTITLE_SPOKEN_TEXT_RE = re.compile(r"[\s\W_]+", re.UNICODE)
+MIXED_SUBTITLE_TOKEN_RE = re.compile(
+    r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*"
+    r"|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
+    r"|[，。！？；：、,.!?;:]"
+    r"|[^\s]",
+    re.UNICODE,
+)
 
 
 def _run(cmd: list[str]) -> None:
@@ -648,7 +655,11 @@ def _has_latin_words(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]", str(text or "")))
 
 
-def _split_latin_subtitle_text(text: str, max_words: int = 7, max_chars: int = 38) -> list[str]:
+def _has_cjk_text(text: str) -> bool:
+    return bool(re.search(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", str(text or "")))
+
+
+def _split_latin_subtitle_text(text: str, max_words: int = 6, max_chars: int = 34) -> list[str]:
     tokens = LATIN_SUBTITLE_WORD_RE.findall(text or "")
     if not tokens:
         return []
@@ -687,20 +698,82 @@ def _split_latin_subtitle_text(text: str, max_words: int = 7, max_chars: int = 3
     return chunks
 
 
-def _split_subtitle_text(script: str) -> list[str]:
+def _render_mixed_subtitle_tokens(tokens: list[str]) -> str:
+    rendered: list[str] = []
+    prev_latin = False
+    for token in tokens:
+        is_latin = bool(re.fullmatch(r"[A-Za-z0-9]+(?:['-][A-Za-z0-9]+)*", token or ""))
+        if rendered and is_latin and prev_latin:
+            rendered.append(" ")
+        rendered.append(token)
+        prev_latin = is_latin
+    return "".join(rendered).strip()
+
+
+def _split_mixed_cjk_subtitle_text(text: str, max_chars: int = 16) -> list[str]:
+    tokens = MIXED_SUBTITLE_TOKEN_RE.findall(text or "")
+    if not tokens:
+        return []
+
+    chunks: list[str] = []
+    current: list[str] = []
+    clause_breakers = {"，", "。", "！", "？", "；", "：", "、", ",", ".", "!", "?", ";", ":"}
+
+    def current_text(extra: list[str] | None = None) -> str:
+        return _render_mixed_subtitle_tokens(current + (extra or []))
+
+    def flush() -> None:
+        nonlocal current
+        rendered = current_text()
+        if rendered:
+            chunks.append(rendered)
+        current = []
+
+    for token in tokens:
+        if not current and chunks and token in clause_breakers:
+            chunks[-1] = f"{chunks[-1]}{token}"
+            continue
+        candidate = current_text([token])
+        if current and _subtitle_spoken_length(candidate) > max_chars:
+            flush()
+            if not current and chunks and token in clause_breakers:
+                chunks[-1] = f"{chunks[-1]}{token}"
+                continue
+        current.append(token)
+        rendered = current_text()
+        if token in clause_breakers or _subtitle_spoken_length(rendered) >= max_chars:
+            flush()
+
+    if current:
+        flush()
+    return chunks
+
+
+def _split_subtitle_text(script: str, target_market: str = "") -> list[str]:
     raw_text = (script or "").strip()
-    if _has_latin_words(raw_text):
-        latin_chunks = _split_latin_subtitle_text(re.sub(r"\s+", " ", raw_text))
+    normalized_text = re.sub(r"\s+", " ", raw_text).strip()
+    # Mixed CJK lines often contain a few English terms like "AI", "NATO",
+    # or "shortfall". Those should still use the CJK splitter; otherwise the
+    # regex-based Latin splitter will drop the Chinese/Japanese body text and
+    # leave only the embedded Latin tokens in subtitles.
+    if _has_latin_words(raw_text) and not _has_cjk_text(raw_text):
+        latin_chunks = _split_latin_subtitle_text(normalized_text)
         if latin_chunks:
             return latin_chunks
 
     text = re.sub(r"\s+", "", raw_text)
     if not text:
         return []
-    parts = re.split(r"(?<=[，。！？；：,.!?;:])", text)
     chunks: list[str] = []
+    market = str(target_market or "").strip().lower()
+    max_len = 12 if market == "jp" else 16
+    if _has_cjk_text(raw_text):
+        mixed_chunks = _split_mixed_cjk_subtitle_text(normalized_text, max_chars=max_len)
+        if mixed_chunks:
+            return mixed_chunks
+
+    parts = re.split(r"(?<=[，。！？；：,.!?;:])", text)
     current = ""
-    max_len = 16
     for part in parts:
         part = part.strip()
         if not part:
@@ -726,8 +799,8 @@ def _split_subtitle_text(script: str) -> list[str]:
     return chunks or [text]
 
 
-def _subtitle_chunks_with_timing(text: str, start_sec: float, end_sec: float, max_len: int = 16) -> list[tuple[float, float, str]]:
-    chunks = _split_subtitle_text(text)
+def _subtitle_chunks_with_timing(text: str, start_sec: float, end_sec: float, max_len: int = 16, target_market: str = "") -> list[tuple[float, float, str]]:
+    chunks = _split_subtitle_text(text, target_market=target_market)
     if not chunks:
         return []
     total = max(end_sec - start_sec, 0.6)
@@ -926,7 +999,7 @@ def _write_subtitles_forced_align(segments: list[dict], output_path: Path, targe
         except Exception:
             words = []
 
-        chunks = _split_subtitle_text(script_text)
+        chunks = _split_subtitle_text(script_text, target_market=target_market)
         if not chunks:
             cumulative_offset += seg_duration
             continue
@@ -983,7 +1056,7 @@ def _write_subtitles_from_transcript(audio_path: Path, script_segments: list[dic
             actual_end = overlaps[-1][1] if overlaps else seg_end
             if actual_end <= actual_start:
                 actual_start, actual_end = seg_start, max(seg_end, seg_start + 0.6)
-            for chunk_start, chunk_end, chunk_text in _subtitle_chunks_with_timing(script_text, actual_start, actual_end):
+            for chunk_start, chunk_end, chunk_text in _subtitle_chunks_with_timing(script_text, actual_start, actual_end, target_market=target_market):
                 rows.extend([str(subtitle_index), f"{_format_srt_timestamp(chunk_start)} --> {_format_srt_timestamp(chunk_end)}", chunk_text, ""])
                 subtitle_index += 1
         if subtitle_index == 1:
@@ -994,14 +1067,14 @@ def _write_subtitles_from_transcript(audio_path: Path, script_segments: list[dic
         return False
 
 
-def _write_subtitles(segments: list[dict], output_path: Path) -> None:
+def _write_subtitles(segments: list[dict], output_path: Path, target_market: str = "") -> None:
     lines = []
     subtitle_index = 1
     for seg in segments:
         script = (seg.get("script") or "").strip()
         if not script:
             continue
-        chunks = _split_subtitle_text(script)
+        chunks = _split_subtitle_text(script, target_market=target_market)
         start_sec = _seconds(seg.get("start"))
         end_sec = _seconds(seg.get("end"))
         total = max(end_sec - start_sec, 0.6)
@@ -1175,7 +1248,7 @@ def _compose_history_video_unlocked(
         if not used_forced:
             used_transcript = _write_subtitles_from_transcript(merged_audio, result.get("segments", []), subtitle_file, target_market)
             if not used_transcript:
-                _write_subtitles(result.get("segments", []), subtitle_file)
+                _write_subtitles(result.get("segments", []), subtitle_file, target_market=target_market)
         shutil.copy2(subtitle_file, stored_subtitle)
 
         # ── Build video filter: cover title on first frame + subtitles ──

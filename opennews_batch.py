@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -975,6 +976,7 @@ def start_batch_scheduler(root: Path, *, poll_seconds: int = 20) -> None:
         return
     _SCHEDULER_STARTED = True
     _ensure_root(root)
+    print(f"[OpenNews batch scheduler] started root={root} poll_seconds={poll_seconds}", flush=True)
 
     def loop() -> None:
         while True:
@@ -983,9 +985,15 @@ def start_batch_scheduler(root: Path, *, poll_seconds: int = 20) -> None:
                 if config.get("enabled"):
                     next_run_at = float(config.get("next_run_at") or 0)
                     if not next_run_at or time.time() >= next_run_at:
+                        print(
+                            "[OpenNews batch scheduler] due, running fetch "
+                            f"next_run_at={next_run_at} now={time.time()}",
+                            flush=True,
+                        )
                         run_batch_fetch_once(root, triggered_by="scheduler")
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[OpenNews batch scheduler] loop error: {exc!r}", flush=True)
+                traceback.print_exc()
             time.sleep(max(10, int(poll_seconds)))
 
     threading.Thread(target=loop, name="opennews-batch-scheduler", daemon=True).start()

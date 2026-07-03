@@ -26,7 +26,7 @@ DEFAULT_CONFIG = {
     "last_run_error": "",
 }
 
-VALID_INTERVALS = {5, 30, 60, 180, 360}
+VALID_INTERVALS = {5, 30, 60, 120, 180, 360}
 VALID_TIME_RANGES = {"1h", "6h", "24h"}
 VALID_CATEGORIES = {"all", "military", "politics", "technology", "finance", "ai", "society"}
 VALID_STATUSES = {"pending", "ignored", "drafted", "produced"}

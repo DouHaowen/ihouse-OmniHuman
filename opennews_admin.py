@@ -120,11 +120,23 @@ def _get_opennews_relay_timeout_seconds() -> int:
 
 
 def _get_opennews_model_provider() -> str:
-    return (
+    explicit = (
         os.getenv("OPENNEWS_TEXT_MODEL_PROVIDER")
         or os.getenv("OPENNEWS_MODEL_PROVIDER")
-        or "glm"
-    ).strip().lower() or "glm"
+        or ""
+    ).strip().lower()
+    if explicit:
+        return explicit
+    return "local_only"
+
+
+def _opennews_local_llm_allow_fallbacks() -> bool:
+    raw_value = (
+        os.getenv("OPENNEWS_LOCAL_LLM_ALLOW_FALLBACKS")
+        or os.getenv("OPENNEWS_QWEN_LLM_ALLOW_FALLBACKS")
+        or "0"
+    ).strip().lower()
+    return raw_value in {"1", "true", "yes", "on"}
 
 
 def _get_opennews_local_llm_base_url() -> str:
@@ -159,12 +171,33 @@ def _get_opennews_local_llm_retry_attempts() -> int:
     raw_value = (
         os.getenv("OPENNEWS_LOCAL_LLM_RETRY_ATTEMPTS")
         or os.getenv("OPENNEWS_QWEN_LLM_RETRY_ATTEMPTS")
-        or "1"
+        or "3"
     )
     try:
-        return max(1, min(3, int(float(raw_value))))
+        return max(1, min(10, int(float(raw_value))))
     except (TypeError, ValueError):
-        return 1
+        return 3
+
+
+def _opennews_local_llm_wait_forever() -> bool:
+    raw_value = (
+        os.getenv("OPENNEWS_LOCAL_LLM_WAIT_FOREVER")
+        or os.getenv("OPENNEWS_QWEN_LLM_WAIT_FOREVER")
+        or "1"
+    ).strip().lower()
+    return raw_value not in {"0", "false", "no", "off"}
+
+
+def _get_opennews_local_llm_retry_interval_seconds() -> int:
+    raw_value = (
+        os.getenv("OPENNEWS_LOCAL_LLM_RETRY_INTERVAL_SECONDS")
+        or os.getenv("OPENNEWS_QWEN_LLM_RETRY_INTERVAL_SECONDS")
+        or "30"
+    )
+    try:
+        return max(5, min(300, int(float(raw_value))))
+    except (TypeError, ValueError):
+        return 30
 
 
 def _get_opennews_glm_api_key() -> str:
@@ -458,7 +491,8 @@ def _request_opennews_local_llm_json(prompt: str, *, max_output_tokens: int = 40
         raise RuntimeError("未配置 OpenNews 本地文案模型 base_url 或 model")
     endpoint = f"{base_url}/chat/completions"
     last_error: Exception | None = None
-    for retry_index in range(_get_opennews_local_llm_retry_attempts()):
+    retry_index = 0
+    while True:
         raw = ""
         try:
             response = requests.post(
@@ -482,8 +516,18 @@ def _request_opennews_local_llm_json(prompt: str, *, max_output_tokens: int = 40
             )
             if response.status_code >= 400:
                 last_error = RuntimeError(f"OpenNews 本地文案模型失败：{response.status_code} {response.text[:500]}")
-                if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_local_llm_retry_attempts():
-                    time.sleep(1.5 * (retry_index + 1))
+                retry_index += 1
+                if response.status_code in {429, 500, 502, 503, 504} and (
+                    _opennews_local_llm_wait_forever()
+                    or retry_index < _get_opennews_local_llm_retry_attempts()
+                ):
+                    wait_seconds = _get_opennews_local_llm_retry_interval_seconds()
+                    print(
+                        f"[opennews_local_llm_retry] 本地文案模型暂不可用，{wait_seconds} 秒后重试"
+                        f"（第 {retry_index} 次）：{last_error}",
+                        flush=True,
+                    )
+                    time.sleep(wait_seconds)
                     continue
                 break
             raw = _extract_chat_completion_text(response.json())
@@ -507,11 +551,28 @@ def _request_opennews_local_llm_json(prompt: str, *, max_output_tokens: int = 40
                         last_error = RuntimeError("OpenNews 本地文案模型 JSON 提取结果不是对象")
                     except json.JSONDecodeError as parse_exc:
                         last_error = parse_exc
+                retry_index += 1
+                if _opennews_local_llm_wait_forever() or retry_index < _get_opennews_local_llm_retry_attempts():
+                    wait_seconds = _get_opennews_local_llm_retry_interval_seconds()
+                    print(
+                        f"[opennews_local_llm_retry] 本地文案模型返回不可解析内容，{wait_seconds} 秒后重试"
+                        f"（第 {retry_index} 次）：{last_error}",
+                        flush=True,
+                    )
+                    time.sleep(wait_seconds)
+                    continue
                 break
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_error = exc
-            if retry_index + 1 < _get_opennews_local_llm_retry_attempts():
-                time.sleep(1.5 * (retry_index + 1))
+            retry_index += 1
+            if _opennews_local_llm_wait_forever() or retry_index < _get_opennews_local_llm_retry_attempts():
+                wait_seconds = _get_opennews_local_llm_retry_interval_seconds()
+                print(
+                    f"[opennews_local_llm_retry] 本地文案模型连接失败，{wait_seconds} 秒后重试"
+                    f"（第 {retry_index} 次）：{exc}",
+                    flush=True,
+                )
+                time.sleep(wait_seconds)
                 continue
             break
     raise RuntimeError(f"OpenNews 本地文案模型生成失败：{last_error}")
@@ -629,11 +690,33 @@ def _request_opennews_model_json(prompt: str, *, max_output_tokens: int = 4096) 
         try:
             return _request_opennews_local_llm_json(prompt, max_output_tokens=max_output_tokens)
         except Exception as exc:
-            print(f"[opennews_local_llm_fallback] 本地文案模型不可用，回退 GLM-5.2：{exc!r}")
-            fallback = _request_opennews_glm_json(prompt, max_output_tokens=max_output_tokens)
-            fallback["_opennews_model_provider"] = "glm_fallback_after_local_qwen"
-            fallback["_opennews_local_error"] = str(exc)
-            return fallback
+            if not _opennews_local_llm_allow_fallbacks():
+                raise RuntimeError(f"OpenNews 本地文案模型生成失败，且已禁用备用模型回退：{exc}") from exc
+            if _get_openai_relay_api_key():
+                try:
+                    print(f"[opennews_local_llm_fallback] 本地文案模型不可用，回退 API relay：{exc!r}")
+                    fallback = _request_opennews_relay_json(prompt, max_output_tokens=max_output_tokens)
+                    fallback["_opennews_model_provider"] = "relay_fallback_after_local_qwen"
+                    fallback["_opennews_local_error"] = str(exc)
+                    return fallback
+                except Exception as relay_exc:
+                    print(f"[opennews_local_llm_fallback] API relay 不可用，继续尝试其他备用模型：{relay_exc!r}")
+            if ANTHROPIC_CLIENT:
+                try:
+                    print(f"[opennews_local_llm_fallback] 本地文案模型不可用，回退 Claude：{exc!r}")
+                    fallback = _request_opennews_claude_json(prompt, max_output_tokens=max_output_tokens)
+                    fallback["_opennews_model_provider"] = "claude_fallback_after_local_qwen"
+                    fallback["_opennews_local_error"] = str(exc)
+                    return fallback
+                except Exception as claude_exc:
+                    print(f"[opennews_local_llm_fallback] Claude 不可用，继续尝试其他备用模型：{claude_exc!r}")
+            if _get_opennews_glm_api_key():
+                print(f"[opennews_local_llm_fallback] 本地文案模型不可用，回退 GLM-5.2：{exc!r}")
+                fallback = _request_opennews_glm_json(prompt, max_output_tokens=max_output_tokens)
+                fallback["_opennews_model_provider"] = "glm_fallback_after_local_qwen"
+                fallback["_opennews_local_error"] = str(exc)
+                return fallback
+            raise RuntimeError(f"OpenNews 本地文案模型生成失败，且没有可用备用模型：{exc}") from exc
     if provider in {"local_only", "qwen_only", "ollama_only"}:
         return _request_opennews_local_llm_json(prompt, max_output_tokens=max_output_tokens)
     if provider in {"relay", "api_relay", "openai_relay", "claude_relay"}:

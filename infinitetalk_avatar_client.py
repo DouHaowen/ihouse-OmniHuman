@@ -121,15 +121,22 @@ def _probe_audio_duration_seconds(path: Path) -> float:
     return 0.0
 
 
-def _resolve_generation_timeout_seconds(audio: Path) -> int:
-    min_timeout = int(os.getenv("INFINITETALK_AVATAR_MIN_TIMEOUT_SECONDS", "900"))
-    max_timeout = int(os.getenv("INFINITETALK_AVATAR_MAX_TIMEOUT_SECONDS", "2400"))
+def _resolve_generation_timeout_seconds(audio: Path) -> int | None:
+    min_timeout = int(os.getenv("INFINITETALK_AVATAR_MIN_TIMEOUT_SECONDS", "0"))
+    max_timeout = int(os.getenv("INFINITETALK_AVATAR_MAX_TIMEOUT_SECONDS", "0"))
+    default_timeout = int(os.getenv("INFINITETALK_AVATAR_TIMEOUT_SECONDS", "0"))
     per_audio_second = float(os.getenv("INFINITETALK_AVATAR_TIMEOUT_PER_AUDIO_SECOND", "120"))
+    if default_timeout <= 0 and min_timeout <= 0 and max_timeout <= 0:
+        return None
     audio_duration = _probe_audio_duration_seconds(audio)
     if audio_duration <= 0:
-        return int(os.getenv("INFINITETALK_AVATAR_TIMEOUT_SECONDS", "1800"))
+        return max(60, default_timeout) if default_timeout > 0 else None
     dynamic_timeout = int(math.ceil(audio_duration * per_audio_second))
-    return max(min_timeout, min(max_timeout, dynamic_timeout))
+    if max_timeout > 0:
+        dynamic_timeout = min(max_timeout, dynamic_timeout)
+    if min_timeout > 0:
+        dynamic_timeout = max(min_timeout, dynamic_timeout)
+    return max(60, dynamic_timeout) if dynamic_timeout > 0 else None
 
 
 def generate_infinitetalk_avatar_video(
@@ -153,8 +160,10 @@ def generate_infinitetalk_avatar_video(
 
     merged_settings = dict(DEFAULT_SETTINGS)
     merged_settings.update(settings or {})
-    if not merged_settings.get("timeout_seconds"):
-        merged_settings["timeout_seconds"] = _resolve_generation_timeout_seconds(audio)
+    if "timeout_seconds" not in merged_settings:
+        resolved_timeout = _resolve_generation_timeout_seconds(audio)
+        if resolved_timeout is not None:
+            merged_settings["timeout_seconds"] = resolved_timeout
     base_url = _base_url()
     timeout = _request_timeout()
     verify_tls = _verify_tls()
@@ -166,7 +175,8 @@ def generate_infinitetalk_avatar_video(
     if configured_max_wait:
         max_wait = max(300, int(configured_max_wait))
     else:
-        max_wait = int(merged_settings["timeout_seconds"]) + 300
+        timeout_seconds = int(merged_settings.get("timeout_seconds") or 0)
+        max_wait = timeout_seconds + 300 if timeout_seconds > 0 else None
     last_error: Exception | None = None
 
     for attempt in range(1, _retry_attempts() + 1):
@@ -203,7 +213,7 @@ def generate_infinitetalk_avatar_video(
             start = time.time()
             last_message = ""
             status_failures = 0
-            while time.time() - start < max_wait:
+            while max_wait is None or time.time() - start < max_wait:
                 try:
                     status_response = requests.get(f"{base_url}/status/{job_id}", timeout=timeout, verify=verify_tls)
                     if status_response.status_code >= 400:

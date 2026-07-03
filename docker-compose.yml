@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     ports:
       - "3010:3010"
+      - "6090:6090"
     env_file:
       - .env
     volumes:

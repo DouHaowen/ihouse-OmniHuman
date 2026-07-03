@@ -92,6 +92,7 @@ from opennews_scheduler import (
     load_auto_config as load_opennews_auto_config,
     run_auto_fetch_once,
     save_auto_config as save_opennews_auto_config,
+    start_opennews_auto_scheduler,
     update_auto_candidate_status,
 )
 from opennews_batch import (
@@ -175,6 +176,20 @@ from x_publisher import (
     upload_video_to_x,
     x_env_config,
 )
+from x_browser_publisher import (
+    XBrowserPublishError,
+    x_browser_auth_ready,
+    x_browser_profile_dir,
+    publish_video_to_x_browser,
+    x_browser_env_config,
+)
+from x_browser_login_manager import (
+    XBrowserLoginError,
+    start_x_browser_login,
+    stop_x_browser_login,
+    x_browser_login_env_config,
+    x_browser_login_status,
+)
 
 app = FastAPI(title="iHouse 内容工作台")
 SESSION_SAME_SITE = os.getenv("SESSION_SAME_SITE", "lax").strip().lower()
@@ -202,6 +217,8 @@ JCLAW_HANDOFF_CONSUMED_JTIS: dict[str, float] = {}
 JCLAW_HANDOFF_USER_MAP: dict[str, str] = {}
 
 tasks = {}
+AUTO_DIGITAL_BATCH_JOBS: dict[str, dict[str, Any]] = {}
+AUTO_DIGITAL_BATCH_LOCK = threading.Lock()
 OPENNEWS_DRAFT_JOBS: dict[str, dict[str, Any]] = {}
 OPENNEWS_DRAFT_LOCK = threading.Lock()
 YOUTUBE_UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
@@ -226,6 +243,7 @@ AVATAR_DISPLAY_NAME_MAP = {
     "avatar_host_d.png": "女主播C",
     "avatar_ultraman.png": "奥特曼",
     "avatar_test_new_01.png": "男主播B",
+    "avatar_test_aec9a0f0.png": "女主播B",
     "avatar_custom_林晨专属_male_manual.png": "男主播B",
 }
 AVATAR_OPTION_EXCLUDE_FILENAMES = {"ihouse-logo.webp"}
@@ -260,8 +278,8 @@ AVATAR_RULES = {
         "allowed_target_markets": ["cn", "tw", "jp"],
         "preferred_voice_by_market": {
             "cn": "mandarin_male",
-            "tw": "taiwan_clone",
-            "jp": "japanese_female",
+            "tw": "mandarin_male",
+            "jp": "mandarin_male",
         },
     },
     "avatar_test_new_01.png": {
@@ -281,6 +299,7 @@ AVATAR_RULES = {
 }
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
+AUTO_DIGITAL_BATCH_DIR = OUTPUT_DIR / "auto_digital_batches"
 FLOORPLAN_NAV_JOBS_DIR = OUTPUT_DIR / "admin_floorplan_nav_jobs"
 OPENNEWS_ADMIN_DIR = OUTPUT_DIR / "admin_opennews"
 OPENNEWS_AUTO_DIR = OUTPUT_DIR / "opennews_auto"
@@ -295,6 +314,7 @@ X_AUTH_DIR = OUTPUT_DIR / "x_auth"
 X_TOKEN_STORE_PATH = X_AUTH_DIR / "x_token.json"
 FACEBOOK_AUTH_DIR = OUTPUT_DIR / "facebook_auth"
 FACEBOOK_TOKEN_STORE_PATH = FACEBOOK_AUTH_DIR / "facebook_token.json"
+AUTO_DIGITAL_BATCH_DIR.mkdir(parents=True, exist_ok=True)
 FLOORPLAN_NAV_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_AUTO_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_BATCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -336,7 +356,7 @@ def _env_flag(name: str, default: str = "0") -> bool:
 
 
 def _opennews_x_auto_publish_default() -> bool:
-    return _env_flag("OPENNEWS_X_AUTO_PUBLISH_ENABLED", "0")
+    return _env_flag("OPENNEWS_X_AUTO_PUBLISH_ENABLED", "1")
 
 
 def _opennews_x_auto_publish_disabled() -> bool:
@@ -375,8 +395,23 @@ def _opennews_x_publish_language_versions_enabled() -> bool:
     return _env_flag("OPENNEWS_X_PUBLISH_LANGUAGE_VERSIONS_ENABLED", "1")
 
 
+def _opennews_x_publish_mode() -> str:
+    mode = (os.getenv("OPENNEWS_X_PUBLISH_MODE", "browser") or "browser").strip().lower()
+    if mode not in {"browser", "api"}:
+        mode = "browser"
+    return mode
+
+
+def _opennews_x_publish_mode_label() -> str:
+    return "浏览器自动化" if _opennews_x_publish_mode() == "browser" else "API"
+
+
 def _opennews_facebook_publish_language_versions_enabled() -> bool:
     return _env_flag("OPENNEWS_FACEBOOK_PUBLISH_LANGUAGE_VERSIONS_ENABLED", "1")
+
+
+def _opennews_material_review_blocks_publish() -> bool:
+    return _env_flag("OPENNEWS_MATERIAL_REVIEW_BLOCKS_AUTO_PUBLISH", "0")
 
 
 def _youtube_thumbnail_error_is_rate_limited(error: str) -> bool:
@@ -606,9 +641,11 @@ async def _start_opennews_batch_scheduler() -> None:
     _cleanup_stale_opennews_batch_jobs()
     _start_youtube_thumbnail_retry_worker()
     set_opennews_batch_after_fetch_callback(_handle_opennews_batch_after_fetch)
+    start_opennews_auto_scheduler(OPENNEWS_AUTO_DIR, poll_seconds=20)
     start_opennews_batch_scheduler(OPENNEWS_BATCH_DIR, poll_seconds=20)
     _recover_stuck_opennews_collection_intro_jobs()
     _recover_pending_opennews_direct_collections()
+    _recover_pending_auto_digital_batches()
 
 VOICE_PRESETS = [
     {
@@ -687,12 +724,16 @@ VOICE_PRESETS = [
         "gender": "female",
         "language": "zh-TW",
         "style": "使用台湾同事真实声音克隆，适合台湾市场口播与生活资讯内容。",
-        "voice_id": os.getenv("VOICE_TAIWAN_CLONE", ""),
+        "voice_id": (
+            os.getenv("VOICE_TAIWAN_CLONE", "").strip()
+            or os.getenv("VOICE_TAIWAN_FEMALE", "").strip()
+            or "Chinese (Mandarin)_Warm_Bestie"
+        ),
         "default_speed": 1.1,
         "default_volume": 1.0,
         "tags": ["女声", "台湾", "克隆"],
         "sample_text": "嗨，今天用更自然亲切的语气，陪你快速看懂这个主题。",
-        "enabled": bool(os.getenv("VOICE_TAIWAN_CLONE", "").strip()),
+        "enabled": True,
         "availability_note": "已启用",
     },
     {
@@ -910,11 +951,17 @@ OMNIHUMAN_QUEUE_CONDITION = threading.Condition()
 OMNIHUMAN_WAITING_JOBS: list[dict] = []
 OMNIHUMAN_RUNNING_JOBS = 0
 OMNIHUMAN_RUNNING_ITEMS: list[dict] = []
+QWEN_TTS_MAX_CONCURRENT = max(1, int(os.getenv("OPENNEWS_QWEN_TTS_MAX_CONCURRENT", "1") or "1"))
+QWEN_TTS_QUEUE_CONDITION = threading.Condition()
+QWEN_TTS_WAITING_JOBS: list[dict] = []
+QWEN_TTS_RUNNING_JOBS = 0
+QWEN_TTS_RUNNING_ITEMS: list[dict] = []
 HUNYUAN_ENGINE_ID = "hunyuan_local"
 INFINITETALK_ENGINE_ID = "infinitetalk_local"
 VOLC_ENGINE_ID = "volc_omnihuman"
 SCRIPT_MODEL_CLAUDE = "claude"
 SCRIPT_MODEL_API_RELAY = "api_relay"
+SCRIPT_MODEL_LOCAL_QWEN = "local_qwen"
 DIGITAL_HUMAN_ENGINES = [
     {
         "id": VOLC_ENGINE_ID,
@@ -945,6 +992,13 @@ SCRIPT_MODEL_OPTIONS = [
         "description": "恢复为主文案模型：中文口播和新闻转写更自然，支持实时联网检索。",
         "admin_only": False,
         "default": True,
+    },
+    {
+        "id": SCRIPT_MODEL_LOCAL_QWEN,
+        "name": "5090 本地 Qwen",
+        "description": "本地 5090 文案模型，适合批量选题与中国市场短视频文案。",
+        "admin_only": True,
+        "default": False,
     },
     {
         "id": SCRIPT_MODEL_API_RELAY,
@@ -997,7 +1051,14 @@ OPENNEWS_QWEN_TTS_ENGLISH_MALE_SPEAKER = os.getenv(
 ).strip() or OPENNEWS_QWEN_TTS_MALE_SPEAKER
 OPENNEWS_QWEN_TTS_LANGUAGE = os.getenv("OPENNEWS_QWEN_TTS_LANGUAGE", "chinese").strip() or "chinese"
 OPENNEWS_QWEN_TTS_TIMEOUT = max(15, int(os.getenv("OPENNEWS_QWEN_TTS_TIMEOUT", "180") or "180"))
-OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX = (os.getenv("OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+OPENNEWS_QWEN_TTS_RETRY_INTERVAL_SECONDS = max(5, int(os.getenv("OPENNEWS_QWEN_TTS_RETRY_INTERVAL_SECONDS", "30") or "30"))
+OPENNEWS_QWEN_TTS_HEALTH_TIMEOUT = max(3, int(os.getenv("OPENNEWS_QWEN_TTS_HEALTH_TIMEOUT", "8") or "8"))
+OPENNEWS_QWEN_TTS_RESTART_ON_FAILURE = (
+    os.getenv("OPENNEWS_QWEN_TTS_RESTART_ON_FAILURE", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+OPENNEWS_QWEN_TTS_MAX_CHARS = max(40, int(os.getenv("OPENNEWS_QWEN_TTS_MAX_CHARS", "80") or "80"))
+OPENNEWS_QWEN_TTS_CHUNK_PAUSE_SECONDS = max(0.0, float(os.getenv("OPENNEWS_QWEN_TTS_CHUNK_PAUSE_SECONDS", "1.5") or "1.5"))
 OPENNEWS_QWEN_TTS_INSTRUCT = os.getenv(
     "OPENNEWS_QWEN_TTS_INSTRUCT",
     "用自然、清晰、专业的中文新闻女主播语气朗读，节奏稳定，声音有亲和力。",
@@ -1252,8 +1313,6 @@ def _default_preferred_voices_for_gender(gender: str, allowed_target_markets: li
             "mandarin_female"
             if market == "cn"
             else "taiwan_clone"
-            if market == "tw" and os.getenv("VOICE_TAIWAN_CLONE", "").strip()
-            else "taiwan_female"
             if market == "tw"
             else "japanese_female"
             if market == "jp"
@@ -1649,7 +1708,7 @@ def _get_visible_voice_preset_ids(target_market_id: Optional[str]) -> set[str]:
         return {"mandarin_female", "mandarin_male", "japanese_female", "english_female"} | base_ids
     if target_market_id == "en":
         return {"english_female", "japanese_female", "mandarin_female", "mandarin_male"} | base_ids
-    return {"mandarin_female", "mandarin_male", "english_female"} | base_ids
+    return {"mandarin_female", "mandarin_male", "taiwan_clone", "english_female"} | base_ids
 
 
 def _is_avatar_voice_compatible(avatar_option: Optional[dict], voice_preset: Optional[dict]) -> bool:
@@ -1662,15 +1721,23 @@ def _is_avatar_voice_compatible(avatar_option: Optional[dict], voice_preset: Opt
     return avatar_gender == voice_gender
 
 
+def _allows_local_digital_human_engine(user: Optional[dict]) -> bool:
+    if not isinstance(user, dict):
+        return False
+    workflow_config = user.get("workflow_config") or {}
+    return bool(user.get("allow_local_digital_human") or workflow_config.get("allow_local_digital_human"))
+
+
 def _normalize_digital_human_engine(engine_id: str | None, user: Optional[dict] = None) -> str:
     requested = (engine_id or VOLC_ENGINE_ID).strip()
     if requested == "opennews_material_only":
         return "opennews_material_only"
-    if not _is_admin(user):
-        return INFINITETALK_ENGINE_ID
-    if requested == HUNYUAN_ENGINE_ID and _is_admin(user):
+    allow_local = _is_admin(user) or _allows_local_digital_human_engine(user)
+    if not allow_local:
+        return VOLC_ENGINE_ID
+    if requested == HUNYUAN_ENGINE_ID and allow_local:
         return HUNYUAN_ENGINE_ID
-    if requested == INFINITETALK_ENGINE_ID and _is_admin(user):
+    if requested == INFINITETALK_ENGINE_ID and allow_local:
         return INFINITETALK_ENGINE_ID
     return VOLC_ENGINE_ID
 
@@ -1691,17 +1758,33 @@ def _digital_human_engine_options_for_user(user: Optional[dict]) -> list[dict]:
         return DIGITAL_HUMAN_ENGINES
     return [
         {
-            "id": INFINITETALK_ENGINE_ID,
-            "name": "5090 本地 InfiniteTalk",
-            "description": "员工默认：走本地 5090 数字人队列，按整段音频时长生成，默认小嘴型并带自动重试。",
+            "id": VOLC_ENGINE_ID,
+            "name": "火山 OmniHuman",
+            "description": "员工默认：走火山 OmniHuman 生产通道，优先保证出片速度与稳定性。",
             "admin_only": False,
             "default": True,
         }
     ]
 
 
+def _local_qwen_script_model_available() -> bool:
+    disabled = str(os.getenv("LOCAL_QWEN_DISABLED") or "").strip().lower()
+    if disabled in {"1", "true", "yes", "on"}:
+        return False
+    return bool(
+        str(
+            os.getenv("LOCAL_QWEN_BASE_URL")
+            or os.getenv("OPENNEWS_LOCAL_LLM_BASE_URL")
+            or os.getenv("OPENNEWS_QWEN_LLM_BASE_URL")
+            or "http://192.168.0.34:11434/v1"
+        ).strip()
+    )
+
+
 def _normalize_script_model(model_id: str | None, user: Optional[dict] = None) -> str:
     requested = str(model_id or "").strip().lower()
+    if requested == SCRIPT_MODEL_LOCAL_QWEN and _is_admin(user) and _local_qwen_script_model_available():
+        return SCRIPT_MODEL_LOCAL_QWEN
     if requested == SCRIPT_MODEL_API_RELAY and _is_admin(user):
         return SCRIPT_MODEL_API_RELAY
     return SCRIPT_MODEL_CLAUDE
@@ -1716,9 +1799,14 @@ def _script_model_label(model_id: str | None) -> str:
 
 
 def _script_model_options_for_user(user: Optional[dict]) -> list[dict]:
-    if _is_admin(user):
-        return SCRIPT_MODEL_OPTIONS
-    return [item for item in SCRIPT_MODEL_OPTIONS if not item.get("admin_only")]
+    items: list[dict] = []
+    for item in SCRIPT_MODEL_OPTIONS:
+        if item["id"] == SCRIPT_MODEL_LOCAL_QWEN and not _local_qwen_script_model_available():
+            continue
+        if item.get("admin_only") and not _is_admin(user):
+            continue
+        items.append(dict(item))
+    return items
 
 
 def _get_avatar_option(avatar_id: Optional[str], target_market_id: Optional[str] = None) -> Optional[dict]:
@@ -2030,6 +2118,7 @@ def run_pipeline_with_progress(
                 "source": workflow_config.get("source") or {},
                 "opennews": bool(workflow_config.get("opennews")),
                 "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
+                "allow_local_digital_human": bool(workflow_config.get("allow_local_digital_human")),
                 "digital_human_engine": digital_human_engine,
                 "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
             },
@@ -2063,6 +2152,7 @@ def run_pipeline_with_progress(
                 workflow_config=workflow_config,
                 generate_audio_fn=generate_audio,
                 log=tracker.log,
+                task_id=task_id,
             )
             seg_with_audio = dict(seg)
             seg_with_audio["audio_path"] = audio_path
@@ -2122,6 +2212,7 @@ def run_pipeline_with_progress(
                 "source": workflow_config.get("source") or {},
                 "opennews": bool(workflow_config.get("opennews")),
                 "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
+                "allow_local_digital_human": bool(workflow_config.get("allow_local_digital_human")),
                 "digital_human_engine": digital_human_engine,
                 "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
             },
@@ -2199,9 +2290,17 @@ def run_pipeline_with_progress(
             raise
         except Exception as exc:
             if workflow_config.get("opennews") or workflow_config.get("opennews_material_only") or digital_human_engine == "opennews_material_only":
-                raise RuntimeError(f"OpenNews 素材匹配失败，已中止成片：{exc}") from exc
-            tracker.log(f"素材匹配失败：{exc}，已跳过该步骤")
-            final_segments = segments_with_dh
+                tracker.log(f"OpenNews 素材匹配异常：{exc}；已按宽松策略继续成片，避免影响 X/Facebook 自动发布。")
+                final_segments = segments_with_dh
+                for seg in final_segments:
+                    if isinstance(seg, dict):
+                        seg["material_warning"] = str(exc)
+                        seg.setdefault("material_paths", [])
+                material_group_count = 0
+                tracker.log(f"素材匹配降级完成，共 {material_group_count} 组素材")
+            else:
+                tracker.log(f"素材匹配失败：{exc}，已跳过该步骤")
+                final_segments = segments_with_dh
 
         result_data = {
             "topic": topic,
@@ -2233,6 +2332,16 @@ def run_pipeline_with_progress(
                 },
                 "compose_transition_id": workflow_config.get("compose_transition_id", "fade"),
                 "subtitle_template_id": workflow_config.get("subtitle_template_id", "classic"),
+                "compose_aspect_ratio": workflow_config.get("compose_aspect_ratio") or workflow_config.get("aspect_ratio") or "vertical",
+                "source": workflow_config.get("source") or {},
+                "opennews": bool(workflow_config.get("opennews")),
+                "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
+                "auto_publish_to_x_and_facebook": bool(workflow_config.get("auto_publish_to_x_and_facebook")),
+                "allow_local_digital_human": bool(workflow_config.get("allow_local_digital_human")),
+                "x_auto_publish": _parse_bool_form(workflow_config.get("x_auto_publish")) if "x_auto_publish" in workflow_config else _opennews_x_auto_publish_default(),
+                "facebook_auto_publish": _parse_bool_form(workflow_config.get("facebook_auto_publish")) if "facebook_auto_publish" in workflow_config else _opennews_facebook_auto_publish_default(),
+                "x_aspects": workflow_config.get("x_aspects") or ["vertical"],
+                "facebook_aspects": workflow_config.get("facebook_aspects") or ["vertical"],
                 "digital_human_engine": digital_human_engine,
                 "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
             },
@@ -2282,9 +2391,17 @@ def run_pipeline_with_progress(
                 result_data["language_version_group_id"] = _language_version_group_id()
                 result_data["language_versions"] = language_versions
 
+
         task["result"] = result_data
         _persist_task_result(task)
         tracker.finish(result_data)
+        if (
+            result_data.get("workflow_config", {}).get("opennews")
+            or result_data.get("workflow_config", {}).get("opennews_material_only")
+            or result_data.get("workflow_config", {}).get("digital_human_engine") == "opennews_material_only"
+        ):
+            tracker.log("OpenNews 成片已保存，正在后台自动发布到 X / Facebook...")
+            _schedule_opennews_post_compose_publish(task_id, output_dir, result_data)
     except TaskCancelled as exc:
         tracker.cancel(str(exc) or "任务已停止")
     except Exception as exc:
@@ -2445,6 +2562,7 @@ def run_resume_pipeline_with_progress(task_id: str):
                     workflow_config=workflow_config,
                     generate_audio_fn=generate_audio,
                     log=tracker.log,
+                    task_id=task_id,
                 )
                 seg["audio_path"] = audio_path
                 seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
@@ -2607,6 +2725,12 @@ def run_resume_pipeline_with_progress(task_id: str):
             "source": workflow_config.get("source") or {},
             "opennews": bool(workflow_config.get("opennews")),
             "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
+            "allow_local_digital_human": bool(workflow_config.get("allow_local_digital_human")),
+            "auto_publish_to_x_and_facebook": bool(workflow_config.get("auto_publish_to_x_and_facebook")) or bool(workflow_config.get("opennews")) or bool(workflow_config.get("opennews_material_only")),
+            "x_auto_publish": _parse_bool_form(workflow_config.get("x_auto_publish")) if "x_auto_publish" in workflow_config else _opennews_x_auto_publish_default(),
+            "facebook_auto_publish": _parse_bool_form(workflow_config.get("facebook_auto_publish")) if "facebook_auto_publish" in workflow_config else _opennews_facebook_auto_publish_default(),
+            "x_aspects": workflow_config.get("x_aspects") or ["vertical"],
+            "facebook_aspects": workflow_config.get("facebook_aspects") or ["vertical"],
             "digital_human_engine": digital_human_engine,
             "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
         }
@@ -2616,6 +2740,13 @@ def run_resume_pipeline_with_progress(task_id: str):
         task["result"] = result
         _persist_task_result(task)
         tracker.finish(result)
+        if (
+            result.get("workflow_config", {}).get("opennews")
+            or result.get("workflow_config", {}).get("opennews_material_only")
+            or result.get("workflow_config", {}).get("digital_human_engine") == "opennews_material_only"
+        ):
+            tracker.log("OpenNews 继续生产已完成，正在后台自动发布到 X / Facebook...")
+            _schedule_opennews_post_compose_publish(task_id, output_dir, result)
     except TaskCancelled as exc:
         tracker.cancel(str(exc) or "任务已停止")
     except Exception as exc:
@@ -2713,6 +2844,121 @@ def _omnihuman_queue_snapshot() -> dict:
         "current_owner_username": running[0].get("owner_username") if running else "",
         "current_owner_display_name": running[0].get("owner_display_name") if running else "",
     }
+
+
+def _qwen_tts_queue_snapshot() -> dict:
+    with QWEN_TTS_QUEUE_CONDITION:
+        running = [dict(item) for item in QWEN_TTS_RUNNING_ITEMS]
+        waiting = [dict(item) for item in QWEN_TTS_WAITING_JOBS]
+    return {
+        "max_concurrent": QWEN_TTS_MAX_CONCURRENT,
+        "running_count": len(running),
+        "waiting_count": len(waiting),
+        "running": running,
+        "waiting": waiting,
+        "current_owner_username": running[0].get("owner_username") if running else "",
+        "current_owner_display_name": running[0].get("owner_display_name") if running else "",
+    }
+
+
+def _cancel_waiting_qwen_tts_jobs(task_id: str) -> int:
+    normalized = str(task_id or "")
+    if not normalized:
+        return 0
+    with QWEN_TTS_QUEUE_CONDITION:
+        before = len(QWEN_TTS_WAITING_JOBS)
+        QWEN_TTS_WAITING_JOBS[:] = [
+            item for item in QWEN_TTS_WAITING_JOBS if str(item.get("task_id") or "") != normalized
+        ]
+        removed = before - len(QWEN_TTS_WAITING_JOBS)
+        if removed:
+            QWEN_TTS_QUEUE_CONDITION.notify_all()
+        return removed
+
+
+def _qwen_tts_health_check() -> dict:
+    if not OPENNEWS_QWEN_TTS_BASE_URL:
+        raise RuntimeError("OpenNews Qwen3-TTS 未配置 base_url")
+    response = requests.get(
+        f"{OPENNEWS_QWEN_TTS_BASE_URL}/health",
+        headers={"X-Token": OPENNEWS_QWEN_TTS_TOKEN},
+        timeout=OPENNEWS_QWEN_TTS_HEALTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("ok"):
+        raise RuntimeError(f"Qwen3-TTS health returned not ok: {payload}")
+    return payload
+
+
+def _recover_qwen_tts_service(reason: str = "") -> dict:
+    if not OPENNEWS_QWEN_TTS_RESTART_ON_FAILURE:
+        return {"ok": False, "skipped": True, "reason": "restart_disabled"}
+    profile_result = _switch_5090_gpu_profile("idle", reason=f"qwen3-tts recovery: {reason[:120]}")
+    if profile_result.get("ok"):
+        return profile_result
+    return _switch_5090_gpu_profile("material", reason=f"qwen3-tts recovery fallback: {reason[:120]}")
+
+
+def _run_qwen_tts_job(
+    *,
+    task_id: str,
+    label: str,
+    target_market: str,
+    speaker: str,
+    runner,
+    log=None,
+):
+    global QWEN_TTS_RUNNING_JOBS
+    task_key = str(task_id or "")
+    task = tasks.get(task_key, {}) if task_key and isinstance(tasks, dict) else {}
+    job_id = f"qwen-tts:{task_key or 'manual'}:{time.time_ns()}"
+    queue_item = {
+        "job_id": job_id,
+        "task_id": task_key,
+        "label": label,
+        "target_market": target_market,
+        "speaker": speaker,
+        "topic": task.get("topic", ""),
+        "mode": task.get("mode", "opennews"),
+        "owner_username": task.get("owner_username", ""),
+        "owner_display_name": task.get("owner_display_name") or task.get("owner_username") or "",
+        "created_at": time.time(),
+    }
+    waiting_logged = False
+    with QWEN_TTS_QUEUE_CONDITION:
+        QWEN_TTS_WAITING_JOBS.append(queue_item)
+        while True:
+            if task_key and _is_task_cancel_requested(task_key):
+                QWEN_TTS_WAITING_JOBS[:] = [item for item in QWEN_TTS_WAITING_JOBS if item.get("job_id") != job_id]
+                QWEN_TTS_QUEUE_CONDITION.notify_all()
+                raise TaskCancelled("已停止当前任务，未继续等待 5090 Qwen3-TTS 配音")
+            try:
+                ahead = next((idx for idx, item in enumerate(QWEN_TTS_WAITING_JOBS) if item.get("job_id") == job_id), 0)
+            except ValueError:
+                ahead = 0
+            can_run = ahead == 0 and QWEN_TTS_RUNNING_JOBS < QWEN_TTS_MAX_CONCURRENT
+            if can_run:
+                QWEN_TTS_WAITING_JOBS.pop(0)
+                QWEN_TTS_RUNNING_JOBS += 1
+                QWEN_TTS_RUNNING_ITEMS.append(queue_item)
+                break
+            if log and not waiting_logged:
+                log(f"5090 Qwen3-TTS 配音排队中，前方还有 {ahead} 个配音任务")
+                waiting_logged = True
+            QWEN_TTS_QUEUE_CONDITION.wait(timeout=2)
+    try:
+        if log and waiting_logged:
+            log("5090 Qwen3-TTS 配音开始执行")
+        if task_key:
+            _raise_if_task_cancel_requested(task_key, "已停止当前任务，未继续生成配音")
+        _qwen_tts_health_check()
+        return runner()
+    finally:
+        with QWEN_TTS_QUEUE_CONDITION:
+            QWEN_TTS_RUNNING_JOBS = max(0, QWEN_TTS_RUNNING_JOBS - 1)
+            QWEN_TTS_RUNNING_ITEMS[:] = [item for item in QWEN_TTS_RUNNING_ITEMS if item.get("job_id") != job_id]
+            QWEN_TTS_QUEUE_CONDITION.notify_all()
 
 
 def _run_script_ai_job(job_id: str, label: str, runner):
@@ -2885,6 +3131,358 @@ def _persist_production_checkpoint(task: dict, result: dict, stage: Optional[str
     _persist_task_result(task)
 
 
+def _auto_digital_batch_path(batch_id: str) -> Path:
+    return AUTO_DIGITAL_BATCH_DIR / f"{batch_id}.json"
+
+
+def _save_auto_digital_batch_job(job: dict) -> None:
+    batch_id = str(job.get("batch_id") or "").strip()
+    if not batch_id:
+        return
+    path = _auto_digital_batch_path(batch_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+    with AUTO_DIGITAL_BATCH_LOCK:
+        AUTO_DIGITAL_BATCH_JOBS[batch_id] = copy.deepcopy(job)
+
+
+def _load_auto_digital_batch_job(batch_id: str) -> Optional[dict]:
+    normalized = str(batch_id or "").strip()
+    if not normalized:
+        return None
+    with AUTO_DIGITAL_BATCH_LOCK:
+        cached = AUTO_DIGITAL_BATCH_JOBS.get(normalized)
+    if cached:
+        return copy.deepcopy(cached)
+    path = _auto_digital_batch_path(normalized)
+    if not path.exists():
+        return None
+    try:
+        job = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    with AUTO_DIGITAL_BATCH_LOCK:
+        AUTO_DIGITAL_BATCH_JOBS[normalized] = copy.deepcopy(job)
+    return job
+
+
+def _list_auto_digital_batch_jobs_for_user(user: Optional[dict], limit: int = 12) -> list[dict]:
+    if not AUTO_DIGITAL_BATCH_DIR.exists():
+        return []
+    jobs: list[dict] = []
+    for path in sorted(AUTO_DIGITAL_BATCH_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not _is_admin(user) and str(job.get("owner_username") or "") != str((user or {}).get("username") or ""):
+            continue
+        jobs.append(job)
+        if len(jobs) >= max(1, min(limit, 50)):
+            break
+    return jobs
+
+
+def _find_running_auto_digital_batch_for_user(user: dict) -> Optional[dict]:
+    for job in _list_auto_digital_batch_jobs_for_user(user, limit=50):
+        if str(job.get("status") or "") in {"queued", "running"}:
+            return job
+    return None
+
+
+def _auto_digital_batch_payload(job: Optional[dict]) -> Optional[dict]:
+    if not isinstance(job, dict):
+        return None
+    items = []
+    for item in job.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            {
+                "index": int(item.get("index") or len(items) + 1),
+                "topic": str(item.get("topic") or ""),
+                "angle": str(item.get("angle") or ""),
+                "status": str(item.get("status") or "queued"),
+                "task_id": str(item.get("task_id") or ""),
+                "history_id": str(item.get("history_id") or ""),
+                "error": str(item.get("error") or ""),
+                "updated_at": float(item.get("updated_at") or 0),
+            }
+        )
+    done_count = sum(1 for item in items if item.get("status") == "done")
+    failed_count = sum(1 for item in items if item.get("status") == "error")
+    running_count = sum(1 for item in items if item.get("status") == "running")
+    return {
+        "batch_id": str(job.get("batch_id") or ""),
+        "seed_topic": str(job.get("seed_topic") or ""),
+        "status": str(job.get("status") or "queued"),
+        "message": str(job.get("message") or ""),
+        "created_at": float(job.get("created_at") or 0),
+        "updated_at": float(job.get("updated_at") or 0),
+        "owner_username": str(job.get("owner_username") or ""),
+        "owner_display_name": str(job.get("owner_display_name") or ""),
+        "voice_preset_id": str(job.get("voice_preset_id") or ""),
+        "avatar_id": str(job.get("avatar_id") or ""),
+        "digital_human_engine": str(job.get("digital_human_engine") or ""),
+        "script_model": str(job.get("script_model") or ""),
+        "task_count": len(items),
+        "done_count": done_count,
+        "failed_count": failed_count,
+        "running_count": running_count,
+        "items": items,
+    }
+
+
+def _create_auto_digital_single_task(
+    *,
+    owner: dict,
+    request: Request,
+    topic: str,
+    voice_preset: dict,
+    avatar_option: dict,
+    speed: float,
+    target_market: str,
+    department_id: str,
+    script_model: str,
+    digital_human_engine: str,
+    batch_id: str,
+    batch_index: int,
+) -> str:
+    task_id = str(uuid.uuid4())[:8]
+    tracker = ProgressTracker(task_id)
+    image_path = avatar_option.get("image_path", "")
+    voice_preset = dict(voice_preset or {})
+    voice_preset["selected_speed"] = speed
+    qwen_presenter = _opennews_presenter_config_for_market(target_market, "female")
+    task_user = {
+        "username": owner.get("username"),
+        "display_name": owner.get("display_name"),
+        "role": owner.get("role"),
+        "workflow_config": {"allow_local_digital_human": True},
+        "allow_local_digital_human": True,
+    }
+    tasks[task_id] = {
+        "owner_username": owner.get("username"),
+        "owner_display_name": owner.get("display_name"),
+        "owner_role": owner.get("role"),
+        "id": task_id,
+        "mode": "auto_digital_batch",
+        "topic": topic,
+        "image_path": image_path,
+        "tracker": tracker,
+        "output_dir": None,
+        "result": None,
+        "public_base_url": _get_public_base_url(request),
+        "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "workflow_config": {
+            "voice_preset_id": voice_preset.get("id"),
+            "avatar_id": avatar_option.get("id"),
+            "speed": speed,
+            "web_search_enabled": False,
+            "target_market": target_market,
+            "department_id": department_id,
+            "compose_transition_id": "fade",
+            "subtitle_template_id": "classic",
+            "compose_aspect_ratio": "vertical",
+            "script_model": script_model,
+            "digital_human_engine": _normalize_digital_human_engine(digital_human_engine, task_user),
+            "allow_local_digital_human": True,
+            "force_qwen_tts": True,
+            "opennews_presenter": qwen_presenter,
+            "auto_digital_batch_id": batch_id,
+            "auto_digital_batch_index": batch_index,
+        },
+        "allow_local_digital_human": True,
+        "cost_entries": [],
+        "cost_summary": _empty_cost_summary(),
+    }
+    tracker.log(f"批量数字人任务已创建，准备开始第 {batch_index} 条...")
+    _push_live_event("task_created", f"创建了批量数字人任务第 {batch_index} 条", tasks[task_id])
+    thread = threading.Thread(
+        target=run_pipeline_with_progress,
+        args=(task_id, topic, image_path, tasks[task_id]["public_base_url"], None, dict(voice_preset), dict(avatar_option)),
+        daemon=True,
+    )
+    thread.start()
+    return task_id
+
+
+def _wait_for_task_terminal_state(task_id: str, timeout_seconds: Optional[int] = None) -> tuple[str, Optional[dict]]:
+    start_time = time.time()
+    while True:
+        task = tasks.get(task_id)
+        tracker = task.get("tracker") if task else None
+        if tracker and tracker.status in {"done", "error", "cancelled"}:
+            return tracker.status, task
+        if timeout_seconds is not None and time.time() - start_time >= timeout_seconds:
+            return "timeout", task
+        time.sleep(2)
+
+
+def _run_auto_digital_batch(batch_id: str) -> None:
+    job = _load_auto_digital_batch_job(batch_id)
+    if not job:
+        return
+    owner = {
+        "username": job.get("owner_username"),
+        "display_name": job.get("owner_display_name"),
+        "role": job.get("owner_role", "user"),
+    }
+    voice_preset = _get_voice_preset(job.get("voice_preset_id"), job.get("target_market"))
+    avatar_option = _get_avatar_option(job.get("avatar_id"), target_market_id=job.get("target_market"))
+    if not avatar_option:
+        job["status"] = "error"
+        job["message"] = "默认主播不存在，批量任务无法启动"
+        job["updated_at"] = time.time()
+        _save_auto_digital_batch_job(job)
+        return
+    speed = float(job.get("speed") or voice_preset.get("default_speed") or 1.1)
+    request_data = job.get("request_context") or {}
+
+    job["status"] = "running"
+    job["message"] = "批量任务开始顺序生产"
+    job["updated_at"] = time.time()
+    _save_auto_digital_batch_job(job)
+
+    class _BatchRequest:
+        def __init__(self, base_url: str):
+            parsed = urlparse(base_url)
+            self.headers = {"host": parsed.netloc}
+            self.url = type("URL", (), {"scheme": parsed.scheme or "https", "netloc": parsed.netloc})()
+
+    batch_request = _BatchRequest(str(request_data.get("public_base_url") or "https://aiagent.office.ihousejapan.cn"))
+
+    total_items = len(job.get("items") or [])
+    for position in range(total_items):
+        latest_job = _load_auto_digital_batch_job(batch_id) or job
+        if str(latest_job.get("status") or "") == "cancelled":
+            latest_job["message"] = "批量任务已停止"
+            latest_job["updated_at"] = time.time()
+            _save_auto_digital_batch_job(latest_job)
+            return
+        job = latest_job
+        items = job.get("items") or []
+        if position >= len(items):
+            break
+        item = items[position]
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "") == "done":
+            continue
+        item["status"] = "running"
+        item["updated_at"] = time.time()
+        job["message"] = f"正在生成第 {item.get('index')} / {len(job.get('items') or [])} 条"
+        job["updated_at"] = time.time()
+        _save_auto_digital_batch_job(job)
+        try:
+            task_id = _create_auto_digital_single_task(
+                owner=owner,
+                request=batch_request,
+                topic=str(item.get("topic") or ""),
+                voice_preset=voice_preset,
+                avatar_option=avatar_option,
+                speed=speed,
+                target_market=str(job.get("target_market") or "cn"),
+                department_id=str(job.get("department_id") or "real_estate"),
+                script_model=str(job.get("script_model") or SCRIPT_MODEL_LOCAL_QWEN),
+                digital_human_engine=str(job.get("digital_human_engine") or INFINITETALK_ENGINE_ID),
+                batch_id=batch_id,
+                batch_index=int(item.get("index") or 0),
+            )
+            item["task_id"] = task_id
+            _save_auto_digital_batch_job(job)
+            status, task = _wait_for_task_terminal_state(task_id)
+            output_dir = Path(str((task or {}).get("output_dir") or ""))
+            if status == "done":
+                item["status"] = "done"
+                item["updated_at"] = time.time()
+                item["history_id"] = output_dir.name if output_dir.exists() else ""
+                item["error"] = ""
+            elif status == "cancelled":
+                item["status"] = "cancelled"
+                item["updated_at"] = time.time()
+                item["error"] = "任务已停止"
+                job["status"] = "cancelled"
+                job["message"] = "批量任务已停止"
+                _save_auto_digital_batch_job(job)
+                return
+            else:
+                tracker = (task or {}).get("tracker")
+                error_message = ""
+                if tracker and getattr(tracker, "messages", None):
+                    error_message = str(tracker.messages[-1].get("message") or "")
+                item["status"] = "error"
+                item["updated_at"] = time.time()
+                item["history_id"] = output_dir.name if output_dir.exists() else ""
+                item["error"] = error_message or ("批量任务超时" if status == "timeout" else "生成失败")
+        except Exception as exc:
+            item["status"] = "error"
+            item["updated_at"] = time.time()
+            item["error"] = str(exc)
+        _save_auto_digital_batch_job(job)
+
+    statuses = [str(item.get("status") or "") for item in job.get("items") or [] if isinstance(item, dict)]
+    if statuses and all(status == "done" for status in statuses):
+        job["status"] = "done"
+        job["message"] = f"{len(statuses)} 条批量数字人视频已全部生成完成"
+    elif any(status == "running" for status in statuses):
+        job["status"] = "running"
+        job["message"] = "批量任务仍在运行中"
+    elif any(status == "done" for status in statuses):
+        job["status"] = "partial"
+        job["message"] = "部分视频已生成完成，请查看失败条目"
+    else:
+        job["status"] = "error"
+        job["message"] = "批量任务未成功生成可用视频"
+    job["updated_at"] = time.time()
+    _save_auto_digital_batch_job(job)
+
+
+def _recover_pending_auto_digital_batches(max_recovered: int = 3) -> None:
+    if not AUTO_DIGITAL_BATCH_DIR.exists():
+        return
+    recovered = 0
+    for path in sorted(AUTO_DIGITAL_BATCH_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        batch_id = str(job.get("batch_id") or path.stem).strip()
+        if not batch_id or str(job.get("status") or "") not in {"queued", "running"}:
+            continue
+        touched = False
+        for item in job.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") == "running":
+                if item.get("task_id"):
+                    item["previous_task_id"] = item.get("task_id")
+                item["task_id"] = ""
+                item["status"] = "queued"
+                item["error"] = "服务重启后已恢复排队"
+                item["updated_at"] = time.time()
+                touched = True
+        job["status"] = "queued"
+        job["message"] = "服务启动后已恢复批量数字人任务，继续从未完成条目生产"
+        job["updated_at"] = time.time()
+        _save_auto_digital_batch_job(job)
+        threading.Thread(
+            target=_run_auto_digital_batch,
+            args=(batch_id,),
+            daemon=True,
+            name=f"auto-digital-recover-{batch_id[:12]}",
+        ).start()
+        recovered += 1
+        if recovered >= max(1, int(max_recovered or 1)):
+            break
+    if recovered:
+        print(f"🔁 已恢复批量数字人自动生成任务：{recovered} 个")
+
+
 def _push_live_event(event_type: str, message: str, task: Optional[dict] = None, extra: Optional[dict] = None):
     payload = {
         "time": time.time(),
@@ -3019,13 +3617,16 @@ def _probe_media_duration(file_path: str) -> float:
 
 
 def _should_use_qwen_tts_for_workflow(workflow_config: dict) -> bool:
+    if bool(workflow_config.get("force_qwen_tts")):
+        return True
     if not OPENNEWS_QWEN_TTS_ENABLED:
         return False
     source = workflow_config.get("source") or {}
     source_kind = str(source.get("kind") or "").strip().lower() if isinstance(source, dict) else ""
     engine = str(workflow_config.get("digital_human_engine") or "").strip().lower()
     return (
-        bool(workflow_config.get("opennews"))
+        bool(workflow_config.get("force_qwen_tts"))
+        or bool(workflow_config.get("opennews"))
         or bool(workflow_config.get("opennews_material_only"))
         or engine == "opennews_material_only"
         or source_kind == "opennews"
@@ -3046,73 +3647,174 @@ def _opennews_qwen_tts_language_for_market(target_market: str) -> str:
     return OPENNEWS_QWEN_TTS_LANGUAGE
 
 
+def _sanitize_opennews_qwen_tts_text(script_text: str, target_market: str) -> str:
+    text = str(script_text or "").strip()
+    if not text:
+        return ""
+    if target_market in {"cn", "tw"}:
+        replacements = {
+            "H-1B": "H一1B",
+            "h-1b": "H一1B",
+            "AI": "A I",
+            "2026至2027": "2026年到2027年",
+            "2026-2027": "2026年到2027年",
+            "75%到80%": "百分之七十五到百分之八十",
+            "21%到33%": "百分之二十一到百分之三十三",
+            "10万美元": "十万美元",
+        }
+        for source, target in replacements.items():
+            text = text.replace(source, target)
+        text = re.sub(r"(\d{4})-(\d{4})", r"\1年到\2年", text)
+        text = re.sub(r"([A-Za-z])\-([A-Za-z0-9])", r"\1 \2", text)
+    elif target_market == "jp":
+        text = text.replace("H-1B", "H 1 B")
+    elif target_market == "en":
+        text = text.replace("H-1B", "H 1 B")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _split_opennews_qwen_tts_text(script_text: str, target_market: str, max_chars: int = 120) -> list[str]:
+    text = _sanitize_opennews_qwen_tts_text(script_text, target_market)
+    if not text:
+        return []
+    separators = "。！？!?；;：:"
+    chunks: list[str] = []
+    buffer = ""
+    for char in text:
+        buffer += char
+        if len(buffer) >= max_chars and char in separators:
+            chunks.append(buffer.strip())
+            buffer = ""
+    if buffer.strip():
+        chunks.append(buffer.strip())
+    normalized: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= max_chars:
+            normalized.append(chunk)
+            continue
+        start = 0
+        while start < len(chunk):
+            normalized.append(chunk[start:start + max_chars].strip())
+            start += max_chars
+    return [item for item in normalized if item]
+
+
 def _generate_opennews_qwen_tts_audio(
     script_text: str,
     output_path: str,
     presenter_config: Optional[dict] = None,
     *,
     target_market: str = "cn",
+    task_id: str = "",
+    log=None,
 ) -> str:
     if not OPENNEWS_QWEN_TTS_BASE_URL or not OPENNEWS_QWEN_TTS_TOKEN:
         raise RuntimeError("OpenNews Qwen3-TTS 未配置 base_url 或 token")
     presenter = _normalize_opennews_presenter_config(presenter_config)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    chunks = _split_opennews_qwen_tts_text(script_text, target_market, max_chars=OPENNEWS_QWEN_TTS_MAX_CHARS)
+    if not chunks:
+        raise RuntimeError("OpenNews Qwen3-TTS 文本为空")
     headers = {
         "X-Token": OPENNEWS_QWEN_TTS_TOKEN,
         "Content-Type": "application/json",
     }
-    payload = {
-        "text": script_text,
-        "language": _opennews_qwen_tts_language_for_market(target_market),
-        "speaker": presenter.get("qwen_speaker") or OPENNEWS_QWEN_TTS_SPEAKER,
-        "instruct": presenter.get("qwen_instruct") or OPENNEWS_QWEN_TTS_INSTRUCT,
-    }
-    response = requests.post(
-        f"{OPENNEWS_QWEN_TTS_BASE_URL}/tts",
-        headers=headers,
-        json=payload,
-        timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
-    if not data.get("ok") or not data.get("url"):
-        raise RuntimeError(f"Qwen3-TTS 返回异常：{data}")
-    audio_url = str(data["url"])
-    if audio_url.startswith("/"):
-        audio_url = f"{OPENNEWS_QWEN_TTS_BASE_URL}{audio_url}"
-    wav_response = requests.get(
-        audio_url,
-        headers={"X-Token": OPENNEWS_QWEN_TTS_TOKEN},
-        timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
-    )
-    wav_response.raise_for_status()
-    wav_path = output.with_suffix(output.suffix + ".qwen.wav")
-    wav_path.write_bytes(wav_response.content)
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(wav_path),
-            "-vn",
-            "-ar",
-            "32000",
-            "-ac",
-            "1",
-            "-b:a",
-            "128k",
-            str(output),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    try:
-        wav_path.unlink()
-    except Exception:
-        pass
+    wav_paths: list[Path] = []
+    for index, chunk_text in enumerate(chunks, start=1):
+        if task_id:
+            _raise_if_task_cancel_requested(task_id, "已停止当前任务，未继续生成配音")
+        if log and len(chunks) > 1:
+            log(f"5090 Qwen3-TTS 分片配音中（{index}/{len(chunks)}）")
+        payload = {
+            "text": chunk_text,
+            "language": _opennews_qwen_tts_language_for_market(target_market),
+            "speaker": presenter.get("qwen_speaker") or OPENNEWS_QWEN_TTS_SPEAKER,
+            "instruct": presenter.get("qwen_instruct") or OPENNEWS_QWEN_TTS_INSTRUCT,
+        }
+        response = requests.post(
+            f"{OPENNEWS_QWEN_TTS_BASE_URL}/tts",
+            headers=headers,
+            json=payload,
+            timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not data.get("ok") or not data.get("url"):
+            raise RuntimeError(f"Qwen3-TTS 返回异常：{data}")
+        audio_url = str(data["url"])
+        if audio_url.startswith("/"):
+            audio_url = f"{OPENNEWS_QWEN_TTS_BASE_URL}{audio_url}"
+        wav_response = requests.get(
+            audio_url,
+            headers={"X-Token": OPENNEWS_QWEN_TTS_TOKEN},
+            timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
+        )
+        wav_response.raise_for_status()
+        wav_path = output.with_suffix(f".qwen.part{index:02d}.wav")
+        wav_path.write_bytes(wav_response.content)
+        wav_paths.append(wav_path)
+        if OPENNEWS_QWEN_TTS_CHUNK_PAUSE_SECONDS > 0 and index < len(chunks):
+            time.sleep(OPENNEWS_QWEN_TTS_CHUNK_PAUSE_SECONDS)
+    if len(wav_paths) == 1:
+        merge_input = wav_paths[0]
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(merge_input),
+                "-vn",
+                "-ar",
+                "32000",
+                "-ac",
+                "1",
+                "-b:a",
+                "128k",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    else:
+        concat_list = output.with_suffix(".qwen.concat.txt")
+        concat_list.write_text("".join(f"file '{path.name}'\n" for path in wav_paths), encoding="utf-8")
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_list),
+                "-vn",
+                "-ar",
+                "32000",
+                "-ac",
+                "1",
+                "-b:a",
+                "128k",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            cwd=str(output.parent),
+        )
+        try:
+            concat_list.unlink()
+        except Exception:
+            pass
+    for wav_path in wav_paths:
+        try:
+            wav_path.unlink()
+        except Exception:
+            pass
     return str(output)
 
 
@@ -3138,32 +3840,56 @@ def _generate_audio_for_workflow(
     workflow_config: dict,
     generate_audio_fn,
     log=None,
+    task_id: str = "",
 ) -> tuple[str, str]:
     target_market = str(workflow_config.get("target_market") or "cn").strip().lower() or "cn"
-    opennews_tts = _should_use_qwen_tts_for_workflow(workflow_config) and _opennews_qwen_tts_language_enabled(target_market)
-    if opennews_tts:
+    opennews_workflow = _should_use_qwen_tts_for_workflow(workflow_config)
+    if opennews_workflow:
+        if not OPENNEWS_QWEN_TTS_ENABLED:
+            raise RuntimeError("OpenNews 已配置为只使用 5090 Qwen3-TTS，但 OPENNEWS_QWEN_TTS_ENABLED 当前未开启")
+        if not _opennews_qwen_tts_language_enabled(target_market):
+            raise RuntimeError(f"OpenNews 只允许使用 5090 Qwen3-TTS，当前市场不支持：{target_market}")
         presenter_config = _normalize_opennews_presenter_config(workflow_config.get("opennews_presenter"))
-        try:
-            if log:
-                log(
-                    f"OpenNews 使用 5090 Qwen3-TTS 本地配音："
-                    f"{presenter_config.get('qwen_speaker')} / {_opennews_qwen_tts_language_for_market(target_market)}"
+        status_task_id = str(task_id or workflow_config.get("task_id") or workflow_config.get("source_task_id") or "").strip()
+        speaker = str(presenter_config.get("qwen_speaker") or OPENNEWS_QWEN_TTS_SPEAKER)
+        workflow_label = "批量数字人" if workflow_config.get("auto_digital_batch_id") else "OpenNews"
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                if log:
+                    log(
+                        f"{workflow_label} 使用 5090 Qwen3-TTS 本地配音："
+                        f"{presenter_config.get('qwen_speaker')} / {_opennews_qwen_tts_language_for_market(target_market)}"
+                        f"（第 {attempt} 次）"
+                    )
+                _run_qwen_tts_job(
+                    task_id=status_task_id,
+                    label=f"OpenNews Qwen3-TTS {target_market}",
+                    target_market=target_market,
+                    speaker=speaker,
+                    log=log,
+                    runner=lambda: _generate_opennews_qwen_tts_audio(
+                        script_text,
+                        audio_path,
+                        presenter_config=presenter_config,
+                        target_market=target_market,
+                        task_id=status_task_id,
+                        log=log,
+                    ),
                 )
-            _generate_opennews_qwen_tts_audio(
-                script_text,
-                audio_path,
-                presenter_config=presenter_config,
-                target_market=target_market,
-            )
-            return audio_path, "qwen3-tts"
-        except Exception as exc:
-            if not OPENNEWS_QWEN_TTS_FALLBACK_MINIMAX:
+                return audio_path, "qwen3-tts"
+            except TaskCancelled:
                 raise
-            if log:
-                log(f"Qwen3-TTS 配音失败，已回退 MiniMax：{exc}")
-        voice, language, fallback_preset_id = _opennews_minimax_fallback_voice(presenter_config)
-        if log:
-            log(f"OpenNews MiniMax 兜底固定{presenter_config.get('label', '主播')}音色：{fallback_preset_id}")
+            except Exception as exc:
+                recover_result = _recover_qwen_tts_service(str(exc))
+                if log:
+                    log(
+                        f"Qwen3-TTS 配音失败，不使用 MiniMax 兜底；"
+                        f"{OPENNEWS_QWEN_TTS_RETRY_INTERVAL_SECONDS} 秒后继续重试：{exc}"
+                        + (f"；恢复动作：{recover_result.get('profile') or recover_result.get('reason') or recover_result.get('error') or '已触发'}" if isinstance(recover_result, dict) else "")
+                    )
+                time.sleep(OPENNEWS_QWEN_TTS_RETRY_INTERVAL_SECONDS)
     generate_audio_fn(
         script_text,
         audio_path,
@@ -3864,6 +4590,15 @@ def _require_user(request: Request) -> tuple[Optional[dict], Optional[JSONRespon
     return user, None
 
 
+def _require_admin_user(request: Request, message: str = "只有管理员可以使用该功能") -> tuple[Optional[dict], Optional[JSONResponse]]:
+    user, error = _require_user(request)
+    if error:
+        return None, error
+    if not _is_admin(user):
+        return None, _forbidden_error(message)
+    return user, None
+
+
 def _external_news_token_candidates() -> list[str]:
     candidates = [
         os.getenv("EXTERNAL_NEWS_API_TOKEN", ""),
@@ -3975,6 +4710,60 @@ def _find_reusable_running_task(*, owner_username: str, submission_key: str, ded
         return task
     return None
 
+
+
+def _schedule_opennews_post_compose_publish(task_id: str, output_dir: str, result_data: dict) -> None:
+    """在 OpenNews 流水线尾部自动发布到 X 与 Facebook。"""
+    def _runner() -> None:
+        try:
+            path = Path(output_dir)
+            result = _load_result_from_output_dir(path) or result_data
+            x_records: list[dict] = []
+            facebook_records: list[dict] = []
+            x_error = ""
+            facebook_error = ""
+            publish_x = _opennews_x_auto_publish_default() and not _opennews_x_auto_publish_disabled()
+            publish_facebook = _opennews_facebook_auto_publish_default() and not _opennews_facebook_auto_publish_disabled()
+            material_review = _opennews_material_review_status(result, path)
+            if material_review.get("reason"):
+                result["material_review"] = material_review
+            if publish_x:
+                try:
+                    x_records = _publish_opennews_result_to_x(
+                        path,
+                        result,
+                        aspects=["vertical"],
+                        include_language_versions=_opennews_x_publish_language_versions_enabled(),
+                    )
+                except Exception as exc:
+                    x_error = str(exc)
+            if publish_facebook:
+                try:
+                    facebook_records = _publish_opennews_result_to_facebook(
+                        path,
+                        result,
+                        aspects=["vertical"],
+                        include_language_versions=_opennews_facebook_publish_language_versions_enabled(),
+                    )
+                except Exception as exc:
+                    facebook_error = str(exc)
+            final = _load_result_from_output_dir(path) or result
+            if material_review:
+                final["material_review"] = material_review
+            final["x_auto_publish_error"] = x_error
+            final["facebook_auto_publish_error"] = facebook_error
+            _save_result_to_output_dir(path, final)
+            try:
+                task = tasks.get(task_id)
+                if task is not None:
+                    task["result"] = final
+                    _persist_task_result(task)
+            except Exception:
+                pass
+        except Exception as exc:
+            print(f"[opennews_auto_publish] task {task_id} failed: {exc!r}")
+
+    threading.Thread(target=_runner, name=f"opennews-auto-publish-{task_id}", daemon=True).start()
 
 def _persist_task_result(task: dict):
     output_dir = task.get("output_dir")
@@ -4840,8 +5629,7 @@ def _run_x_upload_job(job_id: str) -> None:
         result = _load_result_from_output_dir(output_dir)
         if not result:
             raise XPublishError("历史结果不存在，无法上传 X")
-        upload_result = upload_video_to_x(
-            X_TOKEN_STORE_PATH,
+        upload_result = _upload_video_to_opennews_x(
             Path(job.get("video_path") or ""),
             text=str(job.get("text") or ""),
             made_with_ai=bool(job.get("made_with_ai", True)),
@@ -4873,6 +5661,31 @@ def _run_x_upload_job(job_id: str) -> None:
         _update_x_upload_job(job_id, status="failed", message=str(exc), error=str(exc))
 
 
+def _upload_video_to_opennews_x(video_path: Path, *, text: str, made_with_ai: bool = True) -> dict:
+    mode = _opennews_x_publish_mode()
+    if mode == "browser":
+        try:
+            result = publish_video_to_x_browser(
+                video_path,
+                text=text,
+                made_with_ai=made_with_ai,
+            )
+            result["publish_mode"] = "browser"
+            return result
+        except XBrowserPublishError:
+            raise
+        except Exception as exc:
+            raise XBrowserPublishError(f"X 浏览器自动发布失败：{exc}") from exc
+    result = upload_video_to_x(
+        X_TOKEN_STORE_PATH,
+        video_path,
+        text=text,
+        made_with_ai=made_with_ai,
+    )
+    result["publish_mode"] = "api"
+    return result
+
+
 def _publish_opennews_result_to_x(
     output_dir: Path,
     result: dict,
@@ -4891,8 +5704,7 @@ def _publish_opennews_result_to_x(
             continue
         video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_key)
         post_text = str(text or "").strip() or _build_default_x_post_text(result)
-        upload_result = upload_video_to_x(
-            X_TOKEN_STORE_PATH,
+        upload_result = _upload_video_to_opennews_x(
             video_path,
             text=post_text,
             made_with_ai=True,
@@ -4928,8 +5740,7 @@ def _publish_opennews_result_to_x(
                     continue
                 video_path = _resolve_youtube_publish_video(output_dir, version, aspect_ratio=aspect_key)
                 post_text = str(text or "").strip() or _build_default_x_post_text(version, title=str(version.get("title") or ""))
-                upload_result = upload_video_to_x(
-                    X_TOKEN_STORE_PATH,
+                upload_result = _upload_video_to_opennews_x(
                     video_path,
                     text=post_text,
                     made_with_ai=True,
@@ -5135,20 +5946,27 @@ def _opennews_material_review_status(result: dict, output_dir: Path | None = Non
                     "reason": item.get("fallback_reason") or "使用了严格新闻源兜底素材",
                 })
     duplicate_image_blocking = _env_flag("OPENNEWS_AUTO_PUBLISH_DUPLICATE_IMAGE_BLOCKING", "0")
+    review_blocks_publish = _opennews_material_review_blocks_publish()
     duplicate_images_detected = not bool(duplicate_image_audit.get("ok", True))
-    auto_publish_allowed = (not unsafe_items) and (not duplicate_images_detected or not duplicate_image_blocking)
+    blocking_issue_detected = bool(unsafe_items) or (duplicate_images_detected and duplicate_image_blocking)
+    auto_publish_allowed = (not blocking_issue_detected) or (not review_blocks_publish)
     review_reason = ""
-    if unsafe_items:
+    if unsafe_items and review_blocks_publish:
         review_reason = "网络新闻源素材缺少 Qwen3-VL 审核，已禁止自动发布。"
-    elif duplicate_images_detected and duplicate_image_blocking:
+    elif unsafe_items:
+        review_reason = "网络新闻源素材缺少 Qwen3-VL 审核记录，已按宽松策略记录警告但不阻断自动发布。"
+    elif duplicate_images_detected and duplicate_image_blocking and review_blocks_publish:
         review_reason = "素材审核发现重复图片，已禁止自动发布。"
+    elif duplicate_images_detected and duplicate_image_blocking:
+        review_reason = "素材审核发现重复图片，已按宽松策略记录警告但不阻断自动发布。"
     elif duplicate_images_detected:
         review_reason = "素材审核发现重复图片，已按宽松策略记录警告但不阻断自动发布。"
     elif fallback_items:
         review_reason = "5090 AI图片完全不可用，成片使用了严格新闻源兜底素材，且已通过 Qwen3-VL 审核。"
     return {
-        "requires_human_review": bool(unsafe_items) or (duplicate_images_detected and duplicate_image_blocking),
+        "requires_human_review": blocking_issue_detected and review_blocks_publish,
         "auto_publish_allowed": auto_publish_allowed,
+        "review_blocks_publish": review_blocks_publish,
         "uses_strict_source_fallback": bool(fallback_items),
         "reason": review_reason,
         "fallback_items": fallback_items[:30],
@@ -6611,9 +7429,11 @@ def _create_opennews_collection_intro_video(job: dict, output_root: Path) -> dic
             "digital_human_engine": "opennews_material_only",
             "source": {"kind": "opennews"},
             "opennews_presenter": presenter_config,
+            "source_task_id": job_id,
         },
         generate_audio_fn=generate_audio,
         log=lambda message: print(f"[opennews_collection_intro] {message}"),
+        task_id=job_id,
     )
     image_url = upload_file_and_get_url(str(anchor_path), key_prefix="opennews/collection_intro/image")
     audio_url = upload_file_and_get_url(str(audio_path), key_prefix="opennews/collection_intro/audio")
@@ -6791,8 +7611,7 @@ def _publish_opennews_collection_to_x(job_id: str) -> dict:
             thumbnail_path=Path(str(thumbnail_path)),
         )
     post_text = _build_opennews_collection_x_post_text(items, aspect_ratio)
-    upload_result = upload_video_to_x(
-        X_TOKEN_STORE_PATH,
+    upload_result = _upload_video_to_opennews_x(
         video_path,
         text=post_text,
         made_with_ai=True,
@@ -7330,6 +8149,8 @@ def _recover_stuck_opennews_collection_intro_jobs() -> None:
 
 
 def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bool = False) -> list[dict]:
+    from PIL import Image
+
     items = []
     manifest = _load_avatar_library_manifest()
     preferred_order = {
@@ -7338,7 +8159,8 @@ def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bo
         "avatar_host_d.png": 2,
         "avatar_ultraman.png": 3,
         "avatar_test_new_01.png": 4,
-        "avatar_custom_林晨专属_male_manual.png": 5,
+        "avatar_test_aec9a0f0.png": 5,
+        "avatar_custom_林晨专属_male_manual.png": 6,
     }
     for path in sorted(ASSETS_DIR.iterdir() if ASSETS_DIR.exists() else [], key=lambda p: (preferred_order.get(p.name, 999), p.name)):
         if not path.is_file():
@@ -7347,7 +8169,15 @@ def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bo
             continue
         if path.name in AVATAR_OPTION_EXCLUDE_FILENAMES or path.stem in {"ihouse-logo"}:
             continue
-        if re.fullmatch(r"avatar_test_[0-9a-f]{8}", path.stem) and path.name not in AVATAR_DISPLAY_NAME_MAP:
+        lower_name = path.name.lower()
+        if lower_name.startswith("opennews_anchor_daily"):
+            continue
+        try:
+            with Image.open(path) as image:
+                width, height = image.size
+            if width >= height:
+                continue
+        except Exception:
             continue
         rule = AVATAR_RULES.get(path.name, {})
         allowed_target_markets = list(rule.get("allowed_target_markets") or [])
@@ -7370,6 +8200,7 @@ def _list_avatar_options(target_market_id: Optional[str] = None, include_all: bo
 
 def _build_admin_live_status() -> dict:
     queue = _omnihuman_queue_snapshot()
+    tts_queue = _qwen_tts_queue_snapshot()
     users = []
     active_tasks = []
     completed_today = 0
@@ -7394,10 +8225,16 @@ def _build_admin_live_status() -> dict:
             status = "任务处理中"
             waiting_hit = next((item for item in queue.get("waiting", []) if item.get("owner_username") == username), None)
             running_hit = next((item for item in queue.get("running", []) if item.get("owner_username") == username), None)
+            tts_waiting_hit = next((item for item in tts_queue.get("waiting", []) if item.get("owner_username") == username), None)
+            tts_running_hit = next((item for item in tts_queue.get("running", []) if item.get("owner_username") == username), None)
             if running_hit:
                 status = "数字人生成中"
             elif waiting_hit:
                 status = "数字人排队中"
+            elif tts_running_hit:
+                status = "5090 配音生成中"
+            elif tts_waiting_hit:
+                status = "5090 配音排队中"
         users.append({
             "username": username,
             "display_name": display_name,
@@ -7420,16 +8257,23 @@ def _build_admin_live_status() -> dict:
                 "step": getattr(tracker, "step", 0),
                 "total_steps": getattr(tracker, "total_steps", 0),
                 "latest_message": tracker.messages[-1]["message"] if tracker and tracker.messages else "处理中",
+                "qwen_tts_queue": {
+                    "waiting": bool(next((item for item in tts_queue.get("waiting", []) if item.get("task_id") == current_task.get("id")), None)),
+                    "running": bool(next((item for item in tts_queue.get("running", []) if item.get("task_id") == current_task.get("id")), None)),
+                },
             })
     return {
         "summary": {
             "running_task_count": len(active_tasks),
             "waiting_queue_count": queue.get("waiting_count", 0),
+            "qwen_tts_waiting_count": tts_queue.get("waiting_count", 0),
+            "qwen_tts_running_count": tts_queue.get("running_count", 0),
             "current_owner_username": queue.get("current_owner_username", ""),
             "current_owner_display_name": queue.get("current_owner_display_name", ""),
             "completed_today": completed_today,
         },
         "queue": queue,
+        "qwen_tts_queue": tts_queue,
         "users": users,
         "active_tasks": active_tasks,
         "recent_events": _recent_live_events(),
@@ -7455,8 +8299,12 @@ def _build_current_task_payload(user: Optional[dict]) -> Optional[dict]:
     latest_message = tracker.messages[-1]["message"] if tracker and tracker.messages else "处理中"
     workflow_config = current_task.get("workflow_config", {}) or {}
     engine_id = _normalize_digital_human_engine(workflow_config.get("digital_human_engine"), current_task)
+    tts_queue = _qwen_tts_queue_snapshot()
+    task_id = str(current_task.get("id", ""))
+    tts_waiting_hit = next((item for item in tts_queue.get("waiting", []) if item.get("task_id") == task_id), None)
+    tts_running_hit = next((item for item in tts_queue.get("running", []) if item.get("task_id") == task_id), None)
     return {
-        "task_id": current_task.get("id", ""),
+        "task_id": task_id,
         "topic": current_task.get("topic", ""),
         "mode": current_task.get("mode", "full"),
         "digital_human_engine": engine_id,
@@ -7466,6 +8314,12 @@ def _build_current_task_payload(user: Optional[dict]) -> Optional[dict]:
         "status": getattr(tracker, "status", "running"),
         "latest_message": latest_message,
         "output_dir": current_task.get("output_dir") or "",
+        "qwen_tts_queue": {
+            "waiting": bool(tts_waiting_hit),
+            "running": bool(tts_running_hit),
+            "waiting_count": tts_queue.get("waiting_count", 0),
+            "running_count": tts_queue.get("running_count", 0),
+        },
     }
 
 
@@ -7474,8 +8328,11 @@ def _build_active_tasks_payload(user: Optional[dict]) -> list[dict]:
         return []
     username = user.get("username", "")
     queue = _omnihuman_queue_snapshot()
+    tts_queue = _qwen_tts_queue_snapshot()
     waiting_task_ids = {str(item.get("task_id", "")) for item in (queue.get("waiting") or []) if item.get("task_id")}
     running_task_ids = {str(item.get("task_id", "")) for item in (queue.get("running") or []) if item.get("task_id")}
+    tts_waiting_task_ids = {str(item.get("task_id", "")) for item in (tts_queue.get("waiting") or []) if item.get("task_id")}
+    tts_running_task_ids = {str(item.get("task_id", "")) for item in (tts_queue.get("running") or []) if item.get("task_id")}
     items = []
     for task in sorted(tasks.values(), key=lambda item: float(item.get("created_at") or 0), reverse=True):
         tracker = task.get("tracker")
@@ -7496,6 +8353,12 @@ def _build_active_tasks_payload(user: Optional[dict]) -> list[dict]:
         elif task_id in running_task_ids:
             status_group = "running"
             stage_key = "digital_human_running"
+        elif task_id in tts_waiting_task_ids:
+            status_group = "queued"
+            stage_key = "qwen_tts_waiting"
+        elif task_id in tts_running_task_ids:
+            status_group = "running"
+            stage_key = "qwen_tts_running"
         elif int(getattr(tracker, "step", 0) or 0) <= 1:
             status_group = "running"
             stage_key = "script"
@@ -7512,6 +8375,8 @@ def _build_active_tasks_payload(user: Optional[dict]) -> list[dict]:
             "task_id": task_id,
             "topic": task.get("topic", ""),
             "mode": task.get("mode", "full"),
+            "auto_digital_batch_id": str(workflow_config.get("auto_digital_batch_id") or ""),
+            "auto_digital_batch_index": int(workflow_config.get("auto_digital_batch_index") or 0),
             "step": getattr(tracker, "step", 0),
             "total_steps": getattr(tracker, "total_steps", 0),
             "status": getattr(tracker, "status", "running"),
@@ -7522,6 +8387,12 @@ def _build_active_tasks_payload(user: Optional[dict]) -> list[dict]:
             "latest_message": latest_message,
             "created_at": float(task.get("created_at") or 0),
             "output_dir": task.get("output_dir") or "",
+            "qwen_tts_queue": {
+                "waiting": task_id in tts_waiting_task_ids,
+                "running": task_id in tts_running_task_ids,
+                "waiting_count": tts_queue.get("waiting_count", 0),
+                "running_count": tts_queue.get("running_count", 0),
+            },
         })
     return items
 
@@ -8216,9 +9087,16 @@ async def x_status(request: Request):
     if not _is_admin(user):
         return _forbidden_error()
     config = x_env_config()
-    configured = bool(config.get("client_id") and config.get("redirect_uri") and (config.get("refresh_token") or X_TOKEN_STORE_PATH.exists()))
+    publish_mode = _opennews_x_publish_mode()
+    configured = x_browser_auth_ready() if publish_mode == "browser" else bool(config.get("client_id") and config.get("redirect_uri") and (config.get("refresh_token") or X_TOKEN_STORE_PATH.exists()))
     payload = {
         "configured": configured,
+        "publish_mode": publish_mode,
+        "publish_mode_label": _opennews_x_publish_mode_label(),
+        "browser": {
+            **x_browser_env_config(),
+            "auth_ready": x_browser_auth_ready(),
+        },
         "consumer_key_configured": bool(config.get("consumer_key")),
         "consumer_secret_configured": bool(config.get("consumer_secret")),
         "bearer_token_configured": bool(config.get("bearer_token")),
@@ -8232,12 +9110,175 @@ async def x_status(request: Request):
         "user": None,
         "error": "",
     }
-    if configured:
+    if configured and publish_mode != "browser":
         try:
             payload["user"] = get_x_user(X_TOKEN_STORE_PATH)
         except Exception as exc:
             payload["error"] = str(exc)
     return payload
+
+
+@app.get("/api/x/browser-profile/export")
+async def x_browser_profile_export(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    profile_dir = x_browser_profile_dir()
+    if not profile_dir.exists():
+        return JSONResponse({"error": "X 浏览器 profile 不存在"}, status_code=404)
+    temp_dir = OUTPUT_DIR / "_tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = temp_dir / f"x_browser_profile_{int(time.time())}.zip"
+    if archive_path.exists():
+        archive_path.unlink()
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in profile_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(profile_dir)
+            zf.write(path, rel.as_posix())
+    return FileResponse(str(archive_path), media_type="application/zip", filename=archive_path.name)
+
+
+@app.post("/api/x/browser-profile/import")
+async def x_browser_profile_import(request: Request, file: UploadFile = File(...)):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    filename = str(file.filename or "").lower()
+    if not filename.endswith(".zip"):
+        return JSONResponse({"error": "请上传 zip 文件"}, status_code=400)
+    profile_dir = x_browser_profile_dir()
+    temp_dir = OUTPUT_DIR / "_tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_zip = temp_dir / f"x_browser_profile_import_{uuid.uuid4().hex}.zip"
+    import_dir = temp_dir / f"x_browser_profile_import_{uuid.uuid4().hex}"
+    data = await file.read()
+    temp_zip.write_bytes(data)
+    extracted = 0
+    try:
+        import_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(temp_zip, "r") as zf:
+            for member in zf.infolist():
+                name = member.filename or ""
+                if not name or name.startswith("/") or ".." in PurePosixPath(name).parts:
+                    continue
+                zf.extract(member, import_dir)
+        if profile_dir.exists():
+            shutil.rmtree(profile_dir, ignore_errors=True)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        for path in import_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(import_dir)
+            target = profile_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+            extracted += 1
+    except zipfile.BadZipFile:
+        return JSONResponse({"error": "无效的 zip 文件"}, status_code=400)
+    finally:
+        try:
+            temp_zip.unlink()
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(import_dir, ignore_errors=True)
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "message": "X 浏览器 profile 已导入",
+        "file_count": extracted,
+        "auth_ready": x_browser_auth_ready(),
+        "profile_dir": str(profile_dir),
+    }
+
+
+@app.post("/api/x/browser-profile/clear")
+async def x_browser_profile_clear(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    profile_dir = x_browser_profile_dir()
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir, ignore_errors=True)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return {"ok": True, "message": "X 浏览器 profile 已清空", "auth_ready": x_browser_auth_ready()}
+
+
+@app.get("/api/x/browser-profile/status")
+async def x_browser_profile_status(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    profile_dir = x_browser_profile_dir()
+    file_count = 0
+    total_bytes = 0
+    for path in profile_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        file_count += 1
+        try:
+            total_bytes += path.stat().st_size
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "auth_ready": x_browser_auth_ready(),
+        "profile_dir": str(profile_dir),
+        "file_count": file_count,
+        "size_bytes": total_bytes,
+        "publish_mode": _opennews_x_publish_mode(),
+        "publish_mode_label": _opennews_x_publish_mode_label(),
+        "browser": x_browser_env_config(),
+    }
+
+
+@app.get("/api/x/browser-login/status")
+async def x_browser_login_status_api(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    return {"ok": True, **x_browser_login_status(), "env": x_browser_login_env_config()}
+
+
+@app.post("/api/x/browser-login/start")
+async def x_browser_login_start_api(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        status = start_x_browser_login()
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return {"ok": True, **status, "env": x_browser_login_env_config()}
+
+
+@app.post("/api/x/browser-login/stop")
+async def x_browser_login_stop_api(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        status = stop_x_browser_login()
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return {"ok": True, **status, "env": x_browser_login_env_config()}
 
 
 @app.get("/api/x/oauth/start")
@@ -8359,6 +9400,58 @@ async def x_upload_job(job_id: str, request: Request):
     if not job:
         return JSONResponse({"error": "X 发布任务不存在"}, status_code=404)
     return {"job": job}
+
+
+@app.post("/api/x/browser-publish-test")
+async def x_browser_publish_test(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    if _opennews_x_publish_mode() != "browser":
+        return JSONResponse({"error": "当前 X 发布模式不是 browser"}, status_code=400)
+    if not x_browser_auth_ready():
+        return JSONResponse({"error": "当前服务器 X 浏览器 profile 未登录，请先导入已登录 profile"}, status_code=400)
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    history_id = str(payload.get("history_id") or "").strip()
+    if not history_id:
+        return JSONResponse({"error": "缺少 history_id"}, status_code=400)
+    aspect_ratio = str(payload.get("aspect_ratio") or "vertical").strip().lower()
+    output_dir, result, resolve_error = _resolve_history_for_user(history_id, user)
+    if resolve_error:
+        return resolve_error
+    assert output_dir is not None and result is not None
+    try:
+        video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_ratio)
+    except Exception as exc:
+        return JSONResponse({"error": f"找不到可发布视频：{exc}"}, status_code=400)
+    text = str(payload.get("text") or "").strip() or _build_default_x_post_text(result)
+    try:
+        upload_result = publish_video_to_x_browser(video_path, text=text, made_with_ai=True)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    publish_record = {
+        "job_id": f"x_browser_test_{aspect_ratio}_{int(time.time())}",
+        "history_id": output_dir.name,
+        "aspect_ratio": aspect_ratio,
+        "language_version": "primary",
+        "target_market": str((result.get("workflow_config") or {}).get("target_market") or "cn"),
+        "video_path": str(video_path),
+        "created_at": time.time(),
+        **upload_result,
+    }
+    records = result.get("x_publish_records")
+    if not isinstance(records, list):
+        records = []
+    records.insert(0, publish_record)
+    result["x_publish_records"] = records[:20]
+    result["x_publish_latest"] = publish_record
+    _save_result_to_output_dir(output_dir, result)
+    return {"ok": True, "record": publish_record, "history_id": output_dir.name}
 
 
 @app.get("/api/opennews/sources")
@@ -8803,7 +9896,7 @@ async def opennews_batches_produce(request: Request):
     else:
         youtube_aspects = ["horizontal", "vertical"]
     x_auto_publish = payload.get("x_auto_publish")
-    x_auto_publish = False if x_auto_publish is None else _parse_bool_form(x_auto_publish)
+    x_auto_publish = _opennews_x_auto_publish_default() if x_auto_publish is None else _parse_bool_form(x_auto_publish)
     if _opennews_x_auto_publish_disabled():
         x_auto_publish = False
     x_aspects = payload.get("x_aspects") or ["vertical"]
@@ -8828,6 +9921,8 @@ async def opennews_batches_produce(request: Request):
             "youtube_aspects": youtube_aspects or ["horizontal", "vertical"],
             "x_auto_publish": x_auto_publish,
             "x_aspects": x_aspects or ["vertical"],
+            "facebook_auto_publish": _opennews_facebook_auto_publish_default(),
+            "facebook_aspects": ["vertical"],
             "material_strategy": "free_library_script_match",
         },
     )
@@ -9077,7 +10172,7 @@ async def lab_opennews_produce_selected(request: Request):
     else:
         youtube_aspects = ["horizontal", "vertical"]
     youtube_auto_publish = payload.get("youtube_auto_publish")
-    youtube_auto_publish = True if youtube_auto_publish is None else bool(youtube_auto_publish)
+    youtube_auto_publish = False if youtube_auto_publish is None else bool(youtube_auto_publish)
     x_auto_publish = payload.get("x_auto_publish")
     x_auto_publish = _opennews_x_auto_publish_default() if x_auto_publish is None else _parse_bool_form(x_auto_publish)
     if _opennews_x_auto_publish_disabled():
@@ -9104,6 +10199,8 @@ async def lab_opennews_produce_selected(request: Request):
             "youtube_aspects": youtube_aspects or ["horizontal", "vertical"],
             "x_auto_publish": x_auto_publish,
             "x_aspects": x_aspects or ["vertical"],
+            "facebook_auto_publish": _opennews_facebook_auto_publish_default(),
+            "facebook_aspects": ["vertical"],
             "lab_trigger": True,
             "lab_sub": user.get("lab_sub") or "",
             "material_strategy": "free_library_script_match",
@@ -10906,7 +12003,7 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
                 "department_id": user.get("department_id") or "real_estate",
                 "voice_preset_id": presenter_config.get("voice_preset_id") or os.getenv("OPENNEWS_BATCH_AUTO_VOICE_PRESET_ID", ""),
                 "aspect_ratio": os.getenv("OPENNEWS_BATCH_AUTO_PREVIEW_ASPECT", "vertical"),
-                "notes": "自动抓取批次：最高热度单条发布竖屏 Shorts；同时按 AI 3、机器人 1、其他热点 2 的比例生成横屏新闻合集，X 同步发布本批 6 条竖屏视频。",
+                "notes": "自动抓取批次：按 AI 3、机器人 1、其他热点 2 的比例生成 6 条 OpenNews 竖屏新闻视频，中/日/英版本同步发布 X 与 Facebook；YouTube 暂停自动发布。",
                 "youtube_auto_publish": False,
                 "youtube_privacy_status": os.getenv("OPENNEWS_BATCH_AUTO_YOUTUBE_PRIVACY", "public"),
                 "youtube_aspects": ["vertical"],
@@ -10914,6 +12011,8 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
                 "x_publish_single_shorts": _opennews_x_auto_publish_default(),
                 "x_collection_auto_publish": False,
                 "x_aspects": ["vertical"],
+                "facebook_auto_publish": _opennews_facebook_auto_publish_default(),
+                "facebook_aspects": ["vertical"],
                 "opennews_presenter": presenter_config,
                 "auto_collection_batch_id": payload.get("batch_id") or "",
                 "auto_collection_item_ids": selected_ids,
@@ -11042,14 +12141,13 @@ def _wait_for_opennews_task_done(task_id: str, *, timeout_seconds: int = 5400, e
                 return recovered_task
         if tracker_status == "done" and task.get("result") and task.get("output_dir"):
             return task
-        # Some long OpenNews jobs can finish writing result.json before the
-        # in-memory tracker flips to done. Only continue once material files
-        # are present, otherwise compose can race ahead of material download.
+        # Some OpenNews jobs finish writing result.json before the in-memory
+        # tracker flips to done. Return as soon as the intermediate result is
+        # available; the compose step performs the final material validation.
         if (
             task.get("result")
             and task.get("output_dir")
             and tracker_status not in {"error", "cancelled"}
-            and _opennews_result_has_material_assets(task.get("result") or {}, Path(str(task.get("output_dir"))))
         ):
             return task
         if tracker_status in {"error", "cancelled"}:
@@ -11088,10 +12186,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
     presenter_config = _normalize_opennews_presenter_config(options.get("opennews_presenter"))
     external_request = dict(options.get("external_request") or {})
     callback_url = str(external_request.get("callback_url") or options.get("callback_url") or "").strip()
-    youtube_auto_publish = bool(options.get("youtube_auto_publish") or external_request.get("youtube_auto_publish"))
-    youtube_publish_disabled = os.getenv("OPENNEWS_YOUTUBE_AUTO_PUBLISH_DISABLED", "0").strip().lower() not in {"0", "false", "no", "off"}
-    if youtube_publish_disabled:
-        youtube_auto_publish = False
+    youtube_auto_publish = False
+    youtube_publish_disabled = True
     youtube_privacy_status = str(options.get("youtube_privacy_status") or external_request.get("youtube_privacy_status") or "public")
     youtube_aspects_raw = options.get("youtube_aspects") or external_request.get("youtube_aspects") or ["horizontal", "vertical"]
     if isinstance(youtube_aspects_raw, str):
@@ -11127,8 +12223,7 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
         for item_id in (options.get("auto_single_shorts_item_ids") or [])
         if str(item_id or "").strip()
     }
-    if youtube_publish_disabled:
-        auto_single_shorts_ids = set()
+    auto_single_shorts_ids = set()
     auto_collection_item_ids = {
         str(item_id or "").strip()
         for item_id in (options.get("auto_collection_item_ids") or [])
@@ -11211,45 +12306,15 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             x_error = ""
             facebook_records: list[dict] = []
             facebook_error = ""
-            publish_this_item = youtube_auto_publish or item_id in auto_single_shorts_ids
-            x_publish_this_item = x_auto_publish or (item_id in auto_single_shorts_ids and x_single_shorts_publish)
+            publish_this_item = False
+            x_publish_this_item = x_auto_publish
             facebook_publish_this_item = _opennews_facebook_auto_publish_default()
             if _opennews_facebook_auto_publish_disabled():
                 facebook_publish_this_item = False
-            if publish_this_item and not material_review.get("auto_publish_allowed", True):
-                publish_this_item = False
-                youtube_error = material_review.get("reason") or "素材审查未通过，已跳过 YouTube 自动发布"
-                mark_item(status="completed", message=f"成片已完成，但 YouTube 自动发布已跳过：{youtube_error}", material_review=material_review)
-            if x_publish_this_item and not material_review.get("auto_publish_allowed", True):
-                x_publish_this_item = False
-                x_error = material_review.get("reason") or "素材审查未通过，已跳过 X 自动发布"
-            if facebook_publish_this_item and not material_review.get("auto_publish_allowed", True):
-                facebook_publish_this_item = False
-                facebook_error = material_review.get("reason") or "素材审查未通过，已跳过 Facebook 自动发布"
-            item_youtube_aspects = ["vertical"] if item_id in auto_single_shorts_ids else youtube_aspects
-            if publish_this_item:
-                try:
-                    publish_message = "成片完成，正在自动发布到 YouTube..."
-                    if item_id in auto_single_shorts_ids:
-                        publish_message = "本批次最高热度新闻成片完成，正在发布竖屏 Shorts..."
-                    if material_review.get("uses_strict_source_fallback"):
-                        publish_message = "成片使用严格新闻源兜底素材，安全过滤通过，正在自动发布到 YouTube..."
-                    mark_item(status="publishing_youtube", message=publish_message, material_review=material_review)
-                    youtube_records = _publish_opennews_result_to_youtube(
-                        output_dir,
-                        composed_result,
-                        aspects=item_youtube_aspects,
-                        privacy_status=youtube_privacy_status,
-                        include_language_versions=_opennews_youtube_publish_language_versions_enabled(),
-                    )
-                except Exception as youtube_exc:
-                    youtube_error = str(youtube_exc)
-            item_x_aspects = ["vertical"] if item_id in auto_single_shorts_ids else x_aspects
+            item_x_aspects = x_aspects or ["vertical"]
             if x_publish_this_item:
                 try:
                     publish_message = "成片完成，正在自动发布到 X..."
-                    if item_id in auto_single_shorts_ids:
-                        publish_message = "本批次最高热度新闻成片完成，正在发布到 X..."
                     mark_item(status="publishing_x", message=publish_message, material_review=material_review)
                     x_records = _publish_opennews_result_to_x(
                         output_dir,
@@ -11274,13 +12339,6 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             published_platforms = []
             failed_parts = []
             skipped_parts = []
-            if publish_this_item:
-                if youtube_error:
-                    failed_parts.append(f"YouTube 发布失败：{youtube_error}")
-                else:
-                    published_platforms.append("YouTube")
-            elif youtube_error:
-                skipped_parts.append(f"YouTube 自动发布已跳过：{youtube_error}")
             if x_publish_this_item:
                 if x_error:
                     failed_parts.append(f"X 发布失败：{x_error}")
@@ -11392,7 +12450,13 @@ async def external_opennews_health(request: Request):
             "publish_language_versions_enabled": _opennews_youtube_publish_language_versions_enabled(),
         },
         "x": {
-            "configured": bool(x_config.get("client_id") and x_config.get("redirect_uri") and (x_config.get("refresh_token") or X_TOKEN_STORE_PATH.exists())),
+            "configured": x_browser_auth_ready() if _opennews_x_publish_mode() == "browser" else bool(x_config.get("client_id") and x_config.get("redirect_uri") and (x_config.get("refresh_token") or X_TOKEN_STORE_PATH.exists())),
+            "publish_mode": _opennews_x_publish_mode(),
+            "publish_mode_label": _opennews_x_publish_mode_label(),
+            "browser": {
+                **x_browser_env_config(),
+                "auth_ready": x_browser_auth_ready(),
+            },
             "client_id_configured": bool(x_config.get("client_id")),
             "client_secret_configured": bool(x_config.get("client_secret")),
             "redirect_uri": x_config.get("redirect_uri") or "",
@@ -11561,6 +12625,8 @@ async def external_opennews_produce_selected(request: Request):
             "youtube_aspects": youtube_aspects or ["horizontal", "vertical"],
             "x_auto_publish": x_auto_publish,
             "x_aspects": x_aspects or ["vertical"],
+            "facebook_auto_publish": _opennews_facebook_auto_publish_default(),
+            "facebook_aspects": ["vertical"],
             "external_trigger": True,
             "external_request": {
                 "item_ids": item_ids,
@@ -11568,6 +12634,8 @@ async def external_opennews_produce_selected(request: Request):
                 "callback_url": callback_url,
                 "x_auto_publish": x_auto_publish,
                 "x_aspects": x_aspects or ["vertical"],
+                "facebook_auto_publish": _opennews_facebook_auto_publish_default(),
+                "facebook_aspects": ["vertical"],
             },
         },
     )
@@ -12152,8 +13220,49 @@ def _build_opennews_language_version(
     compose_videos: bool = True,
 ) -> dict:
     from generate_audio import generate_audio
-    from generate_script import translate_script_data
     from tos_uploader import upload_file_and_get_url
+
+    def _coerce_localized_opennews_script(localized_script: dict) -> dict:
+        source_timeline_segments = list(source_script.get("segments", []) or [])
+        localized_segments = list(localized_script.get("segments", []) or []) if isinstance(localized_script, dict) else []
+        payload = {
+            "title": str((localized_script or {}).get("title") or (localized_script or {}).get("video_title") or source_script.get("title") or "").strip(),
+            "cover_title": str((localized_script or {}).get("cover_title") or source_script.get("cover_title") or "").strip(),
+            "total_duration": int(source_script.get("total_duration") or (localized_script or {}).get("total_duration") or 0),
+            "segment_count": len(source_timeline_segments),
+            "segments": [],
+            "social_post": str((localized_script or {}).get("social_post") or source_script.get("social_post") or "").strip(),
+        }
+        for index, source_seg in enumerate(source_timeline_segments):
+            localized_seg = localized_segments[index] if index < len(localized_segments) and isinstance(localized_segments[index], dict) else {}
+            seg_type = str(source_seg.get("type") or localized_seg.get("type") or "material")
+            normalized = {
+                "type": seg_type,
+                "start": source_seg.get("start"),
+                "end": source_seg.get("end"),
+                "duration": source_seg.get("duration"),
+                "script": str(localized_seg.get("script") or source_seg.get("script") or "").strip(),
+            }
+            if seg_type == "digital_human":
+                normalized["action"] = str(localized_seg.get("action") or source_seg.get("action") or "").strip()
+            else:
+                normalized["material_keyword"] = str(
+                    localized_seg.get("material_keyword")
+                    or source_seg.get("material_keyword")
+                    or normalized["script"]
+                ).strip()
+                normalized["material_search_keyword"] = str(
+                    localized_seg.get("material_search_keyword")
+                    or source_seg.get("material_search_keyword")
+                    or ""
+                ).strip()
+                normalized["material_desc"] = str(
+                    localized_seg.get("material_desc")
+                    or source_seg.get("material_desc")
+                    or ""
+                ).strip()
+            payload["segments"].append(normalized)
+        return payload
 
     output_path = Path(output_dir)
     market = _get_target_market(target_market)
@@ -12163,14 +13272,38 @@ def _build_opennews_language_version(
         raise RuntimeError(f"{market.get('name') or target_market} 缺少可用配音方案")
     tts_speed = float(voice_preset.get("default_speed") or 1.05)
     tts_volume = float(voice_preset.get("default_volume") or 1.0)
-    translated_script = translate_script_data(
-        source_topic,
-        source_script,
-        target_market=target_market,
-        department_id=department_id,
-        provider=provider,
-    )
-    translated_meta = translated_script.pop("_meta", {}) if isinstance(translated_script, dict) else {}
+    source_article = {}
+    source_cfg = (primary_workflow_config or {}).get("source") or {}
+    if isinstance(source_cfg, dict):
+        source_article = dict(source_cfg.get("article") or {})
+    localized_meta: dict[str, Any] = {}
+    if source_article:
+        localized_draft = generate_opennews_draft(
+            article=source_article,
+            target_market=target_market,
+            notes="",
+        )
+        localized_raw_script = build_opennews_script_data(
+            draft=localized_draft,
+            article=source_article,
+            target_market=target_market,
+        )
+        translated_script = _coerce_localized_opennews_script(localized_raw_script)
+        localized_meta = {
+            "generation_mode": "market_native",
+            "draft_title": str(localized_draft.get("video_title") or "").strip(),
+        }
+    else:
+        from generate_script import translate_script_data
+
+        translated_script = translate_script_data(
+            source_topic,
+            source_script,
+            target_market=target_market,
+            department_id=department_id,
+            provider=provider,
+        )
+        localized_meta = translated_script.pop("_meta", {}) if isinstance(translated_script, dict) else {}
     primary_presenter = _normalize_opennews_presenter_config((primary_workflow_config or {}).get("opennews_presenter"))
     presenter_for_market = _opennews_presenter_config_for_market(
         target_market=target_market,
@@ -12222,8 +13355,10 @@ def _build_opennews_language_version(
                     "selected_volume": tts_volume,
                     "language": market.get("content_language", ""),
                 },
+                "source_task_id": str((primary_workflow_config or {}).get("task_id") or ""),
             },
             generate_audio_fn=generate_audio,
+            task_id=str((primary_workflow_config or {}).get("task_id") or ""),
         )
         seg_copy["audio_path"] = audio_path_str
         try:
@@ -12277,7 +13412,8 @@ def _build_opennews_language_version(
         compose_input.update(
             {
                 "target_market": target_market,
-                "translation_usage": translated_meta.get("usage", {}),
+                "translation_usage": localized_meta.get("usage", {}),
+                "script_generation_mode": localized_meta.get("generation_mode") or "market_native",
             }
         )
         return compose_input
@@ -12304,7 +13440,8 @@ def _build_opennews_language_version(
             "workflow_config": compose_input.get("workflow_config"),
             "script": translated_script,
             "segments": translated_segments,
-            "translation_usage": translated_meta.get("usage", {}),
+            "translation_usage": localized_meta.get("usage", {}),
+            "script_generation_mode": localized_meta.get("generation_mode") or "market_native",
         }
     )
     return composed
@@ -12616,17 +13753,15 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
         return
     options = dict(job.get("options") or {})
     preferred_aspect_ratio = str(options.get("aspect_ratio") or "vertical")
-    youtube_auto_publish = bool(options.get("youtube_auto_publish"))
-    youtube_publish_disabled = os.getenv("OPENNEWS_YOUTUBE_AUTO_PUBLISH_DISABLED", "0").strip().lower() not in {"0", "false", "no", "off"}
-    if youtube_publish_disabled:
-        youtube_auto_publish = False
+    youtube_auto_publish = False
+    youtube_publish_disabled = True
     youtube_privacy_status = str(options.get("youtube_privacy_status") or "public")
     youtube_aspects_raw = options.get("youtube_aspects") or ["horizontal", "vertical"]
     if isinstance(youtube_aspects_raw, str):
         youtube_aspects = ["horizontal", "vertical"] if youtube_aspects_raw == "both" else [part.strip() for part in youtube_aspects_raw.split(",") if part.strip()]
     else:
         youtube_aspects = [str(part).strip() for part in (youtube_aspects_raw or []) if str(part).strip()] or ["horizontal", "vertical"]
-    x_auto_publish = _parse_bool_form(options.get("x_auto_publish")) if "x_auto_publish" in options else False
+    x_auto_publish = _parse_bool_form(options.get("x_auto_publish")) if "x_auto_publish" in options else _opennews_x_auto_publish_default()
     if _opennews_x_auto_publish_disabled():
         x_auto_publish = False
     x_aspects_raw = options.get("x_aspects") or ["vertical"]
@@ -12639,8 +13774,7 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
         for item_id in (options.get("auto_single_shorts_item_ids") or [])
         if str(item_id or "").strip()
     }
-    if youtube_publish_disabled:
-        auto_single_shorts_ids = set()
+    auto_single_shorts_ids = set()
     set_job_status("running", "人工审核已确认，正在继续合成成片并发布...")
 
     total_items = len(job.get("items") or [])
@@ -12694,33 +13828,11 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
             x_error = ""
             facebook_records: list[dict] = []
             facebook_error = ""
-            publish_this_item = youtube_auto_publish or item_id in auto_single_shorts_ids
+            publish_this_item = False
             x_publish_this_item = x_auto_publish
             facebook_publish_this_item = _opennews_facebook_auto_publish_default()
             if _opennews_facebook_auto_publish_disabled():
                 facebook_publish_this_item = False
-            if publish_this_item and not material_review.get("auto_publish_allowed", True):
-                publish_this_item = False
-                youtube_error = material_review.get("reason") or "素材审查未通过，已跳过 YouTube 自动发布"
-            if x_publish_this_item and not material_review.get("auto_publish_allowed", True):
-                x_publish_this_item = False
-                x_error = material_review.get("reason") or "素材审查未通过，已跳过 X 自动发布"
-            if facebook_publish_this_item and not material_review.get("auto_publish_allowed", True):
-                facebook_publish_this_item = False
-                facebook_error = material_review.get("reason") or "素材审查未通过，已跳过 Facebook 自动发布"
-            item_youtube_aspects = ["vertical"] if item_id in auto_single_shorts_ids else youtube_aspects
-            if publish_this_item:
-                try:
-                    mark_item(item_id, status="publishing_youtube", message="成片完成，正在自动发布到 YouTube...", material_review=material_review)
-                    youtube_records = _publish_opennews_result_to_youtube(
-                        output_dir,
-                        composed_result,
-                        aspects=item_youtube_aspects,
-                        privacy_status=youtube_privacy_status,
-                        include_language_versions=_opennews_youtube_publish_language_versions_enabled(),
-                    )
-                except Exception as youtube_exc:
-                    youtube_error = str(youtube_exc)
             if x_publish_this_item:
                 try:
                     mark_item(item_id, status="publishing_x", message="成片完成，正在自动发布到 X...", material_review=material_review)
@@ -12746,13 +13858,6 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
             published_platforms = []
             failed_parts = []
             skipped_parts = []
-            if publish_this_item:
-                if youtube_error:
-                    failed_parts.append(f"YouTube 发布失败：{youtube_error}")
-                else:
-                    published_platforms.append("YouTube")
-            elif youtube_error:
-                skipped_parts.append(f"YouTube 自动发布已跳过：{youtube_error}")
             if x_publish_this_item:
                 if x_error:
                     failed_parts.append(f"X 发布失败：{x_error}")
@@ -12943,12 +14048,17 @@ def _localtok_choice_index(choice: str) -> int:
 
 def _opennews_result_has_material_assets(result: dict, output_path: Path) -> bool:
     material_segment_count = 0
+    usable_asset_count = 0
     for segment in result.get("segments") or []:
-        if not isinstance(segment, dict) or segment.get("type") != "material":
+        if not isinstance(segment, dict):
+            continue
+        segment_items = segment.get("material_items") or []
+        segment_paths = segment.get("material_paths") or []
+        if str(segment.get("type") or "") != "material" and not segment_items and not segment_paths:
             continue
         material_segment_count += 1
         segment_has_asset = False
-        for item in segment.get("material_items") or []:
+        for item in segment_items:
             if not isinstance(item, dict):
                 continue
             raw_path = str(item.get("path") or "").strip()
@@ -12959,19 +14069,19 @@ def _opennews_result_has_material_assets(result: dict, output_path: Path) -> boo
                 path = output_path / raw_path
             if path.exists() and path.stat().st_size > 0:
                 segment_has_asset = True
+                usable_asset_count += 1
                 break
         if segment_has_asset:
             continue
-        for raw_path in segment.get("material_paths") or []:
+        for raw_path in segment_paths:
             path = Path(str(raw_path))
             if not path.is_absolute():
                 path = output_path / str(raw_path)
             if path.exists() and path.stat().st_size > 0:
                 segment_has_asset = True
+                usable_asset_count += 1
                 break
-        if not segment_has_asset:
-            return False
-    return material_segment_count > 0
+    return material_segment_count > 0 and usable_asset_count > 0
 
 
 def _compose_opennews_result(
@@ -13056,6 +14166,79 @@ def _compose_opennews_task_video(task_id: str, *, preferred_aspect_ratio: str = 
     _persist_task_result(task)
     _sync_live_task_result(str(output_path), result)
     return result
+
+
+def _auto_publish_opennews_task_result(task_id: str) -> dict:
+    task = tasks.get(task_id) or {}
+    result = task.get("result") or {}
+    output_dir_value = str(task.get("output_dir") or "").strip()
+    if not output_dir_value or not isinstance(result, dict):
+        return {"x_records": [], "facebook_records": [], "x_error": "missing_result", "facebook_error": "missing_result"}
+    output_dir = Path(output_dir_value)
+    workflow_config = result.get("workflow_config") or task.get("workflow_config") or {}
+    material_review = _opennews_material_review_status(result, output_dir)
+    if material_review.get("uses_strict_source_fallback"):
+        result["material_review"] = material_review
+    x_records: list[dict] = []
+    facebook_records: list[dict] = []
+    x_error = ""
+    facebook_error = ""
+    x_auto_publish = _parse_bool_form(workflow_config.get("x_auto_publish")) if "x_auto_publish" in workflow_config else _opennews_x_auto_publish_default()
+    facebook_auto_publish = _parse_bool_form(workflow_config.get("facebook_auto_publish")) if "facebook_auto_publish" in workflow_config else _opennews_facebook_auto_publish_default()
+    if _opennews_x_auto_publish_disabled():
+        x_auto_publish = False
+    if _opennews_facebook_auto_publish_disabled():
+        facebook_auto_publish = False
+    x_aspects_raw = workflow_config.get("x_aspects") or ["vertical"]
+    if isinstance(x_aspects_raw, str):
+        x_aspects = ["horizontal", "vertical"] if x_aspects_raw == "both" else [part.strip() for part in x_aspects_raw.split(",") if part.strip()]
+    else:
+        x_aspects = [str(part).strip() for part in (x_aspects_raw or []) if str(part).strip()] or ["vertical"]
+    facebook_aspects_raw = workflow_config.get("facebook_aspects") or ["vertical"]
+    if isinstance(facebook_aspects_raw, str):
+        facebook_aspects = ["horizontal", "vertical"] if facebook_aspects_raw == "both" else [part.strip() for part in facebook_aspects_raw.split(",") if part.strip()]
+    else:
+        facebook_aspects = [str(part).strip() for part in (facebook_aspects_raw or []) if str(part).strip()] or ["vertical"]
+    if x_auto_publish:
+        try:
+            x_records = _publish_opennews_result_to_x(
+                output_dir,
+                result,
+                aspects=x_aspects,
+                include_language_versions=_opennews_x_publish_language_versions_enabled(),
+            )
+        except Exception as exc:
+            x_error = str(exc)
+    if facebook_auto_publish:
+        try:
+            facebook_records = _publish_opennews_result_to_facebook(
+                output_dir,
+                result,
+                aspects=facebook_aspects,
+                include_language_versions=_opennews_facebook_publish_language_versions_enabled(),
+            )
+        except Exception as exc:
+            facebook_error = str(exc)
+    if x_records:
+        result["x_publish_records"] = x_records + list(result.get("x_publish_records") or [])[len(x_records):]
+        result["x_publish_latest"] = x_records[0]
+    if facebook_records:
+        result["facebook_publish_records"] = facebook_records + list(result.get("facebook_publish_records") or [])[len(facebook_records):]
+        result["facebook_publish_latest"] = facebook_records[0]
+    if x_error:
+        result["x_publish_error"] = x_error
+    if facebook_error:
+        result["facebook_publish_error"] = facebook_error
+    task["result"] = result
+    _persist_task_result(task)
+    _sync_live_task_result(str(output_dir), result)
+    return {
+        "x_records": x_records,
+        "facebook_records": facebook_records,
+        "x_error": x_error,
+        "facebook_error": facebook_error,
+        "material_review": material_review,
+    }
 
 
 def _run_localtok_decided_production(local_proposal_id: str, *, user: dict, public_base_url: str) -> None:
@@ -13246,6 +14429,7 @@ async def admin_opennews_produce(request: Request):
             "digital_human_engine": "opennews_material_only",
             "opennews": True,
             "opennews_material_only": True,
+            "auto_publish_to_x_and_facebook": True,
         },
         "cost_entries": [],
         "cost_summary": _empty_cost_summary(),
@@ -13333,14 +14517,19 @@ async def opennews_produce(request: Request):
             "web_search_enabled": False,
             "target_market": target_market,
             "department_id": department_id,
-                "compose_transition_id": "fade",
-                "subtitle_template_id": "property_clear",
-                "compose_aspect_ratio": aspect_ratio,
-                "source": {"kind": "opennews", "article": article},
+            "compose_transition_id": "fade",
+            "subtitle_template_id": "property_clear",
+            "compose_aspect_ratio": aspect_ratio,
+            "source": {"kind": "opennews", "article": article},
             "script_model": SCRIPT_MODEL_CLAUDE,
             "digital_human_engine": "opennews_material_only",
             "opennews": True,
             "opennews_material_only": True,
+            "auto_publish_to_x_and_facebook": True,
+            "x_auto_publish": _opennews_x_auto_publish_default(),
+            "facebook_auto_publish": _opennews_facebook_auto_publish_default(),
+            "x_aspects": ["vertical"],
+            "facebook_aspects": ["vertical"],
         },
         "cost_entries": [],
         "cost_summary": _empty_cost_summary(),
@@ -14004,6 +15193,12 @@ async def workbench_options(request: Request):
         "current_user": user,
         "current_task": _build_current_task_payload(user),
         "active_tasks": _build_active_tasks_payload(user),
+        "can_use_auto_digital_batch": _is_admin(user),
+        "auto_digital_batch": (
+            _auto_digital_batch_payload(_find_running_auto_digital_batch_for_user(user))
+            if _is_admin(user)
+            else None
+        ),
     }
 
 
@@ -14373,6 +15568,203 @@ async def delete_avatar_library_item(request: Request, filename: str):
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return {"ok": True, "deleted": deleted}
+
+
+@app.post("/api/auto-digital/topics")
+async def auto_digital_generate_topics(
+    request: Request,
+    seed_topic: str = Form(""),
+    count: int = Form(10),
+):
+    user, error = _require_admin_user(request, "只有管理员可以使用批量数字人自动生成")
+    if error:
+        return error
+    seed = str(seed_topic or "").strip()
+    if not seed:
+        return JSONResponse({"error": "请先输入一个批量主题方向"}, status_code=400)
+    from generate_script import generate_topic_ideas
+
+    try:
+        payload = _run_script_ai_job(
+            job_id=f"auto-digital-topics:{user.get('username', 'guest')}:{time.time_ns()}",
+            label="批量选题生成",
+            runner=lambda: generate_topic_ideas(
+                seed,
+                count=max(1, min(int(count or 10), 10)),
+                target_market="cn",
+                department_id="real_estate",
+                provider=SCRIPT_MODEL_LOCAL_QWEN,
+            ),
+        )
+    except Exception as exc:
+        message, status_code = _friendly_ai_error_message(exc, "批量选题生成")
+        return JSONResponse({"error": f"{message}：{exc}"}, status_code=status_code)
+    return {
+        "ok": True,
+        "seed_topic": payload.get("seed_topic") or seed,
+        "topics": payload.get("topics") or [],
+    }
+
+
+@app.post("/api/auto-digital/batches")
+async def auto_digital_create_batch(
+    request: Request,
+    seed_topic: str = Form(""),
+    topics_json: str = Form(""),
+):
+    user, error = _require_admin_user(request, "只有管理员可以创建批量数字人任务")
+    if error:
+        return error
+    running_job = _find_running_auto_digital_batch_for_user(user)
+    if running_job:
+        return {
+            "ok": True,
+            "reused_existing": True,
+            "batch": _auto_digital_batch_payload(running_job),
+            "message": "当前账号已有批量数字人任务在运行",
+        }
+    seed = str(seed_topic or "").strip()
+    try:
+        raw_topics = json.loads(topics_json or "[]")
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "选题数据格式错误"}, status_code=400)
+    if not isinstance(raw_topics, list):
+        return JSONResponse({"error": "选题数据必须是数组"}, status_code=400)
+    if not raw_topics:
+        if not seed:
+            return JSONResponse({"error": "请先输入一个批量主题方向"}, status_code=400)
+        from generate_script import generate_topic_ideas
+
+        try:
+            generated_payload = _run_script_ai_job(
+                job_id=f"auto-digital-batch-topics:{user.get('username', 'guest')}:{time.time_ns()}",
+                label="批量选题生成",
+                runner=lambda: generate_topic_ideas(
+                    seed,
+                    count=10,
+                    target_market="cn",
+                    department_id="real_estate",
+                    provider=SCRIPT_MODEL_LOCAL_QWEN,
+                ),
+            )
+        except Exception as exc:
+            message, status_code = _friendly_ai_error_message(exc, "批量选题生成")
+            return JSONResponse({"error": f"{message}：{exc}"}, status_code=status_code)
+        raw_topics = generated_payload.get("topics") or []
+    items: list[dict] = []
+    seen: set[str] = set()
+    for raw in raw_topics:
+        if isinstance(raw, str):
+            topic = raw.strip()
+            angle = ""
+        elif isinstance(raw, dict):
+            topic = str(raw.get("topic") or raw.get("title") or "").strip()
+            angle = str(raw.get("angle") or "").strip()
+        else:
+            continue
+        topic = re.sub(r"\s+", " ", topic).strip()
+        if not topic:
+            continue
+        key = re.sub(r"\s+", "", topic).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            {
+                "index": len(items) + 1,
+                "topic": topic[:100],
+                "angle": angle[:160],
+                "status": "queued",
+                "task_id": "",
+                "history_id": "",
+                "error": "",
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            }
+        )
+        if len(items) >= 10:
+            break
+    if not items:
+        return JSONResponse({"error": "请至少保留 1 条有效选题"}, status_code=400)
+    voice_preset = _get_voice_preset("mandarin_female", "cn")
+    avatar_option = _get_avatar_option("avatar_host_d.png", target_market_id="cn")
+    if not avatar_option:
+        return JSONResponse({"error": "默认女主播C不存在，请先恢复 avatar_host_d.png"}, status_code=400)
+    batch_id = f"adb_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    public_base_url = _get_public_base_url(request)
+    job = {
+        "batch_id": batch_id,
+        "seed_topic": seed,
+        "status": "queued",
+        "message": "批量任务已创建，等待启动",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "owner_username": user.get("username"),
+        "owner_display_name": user.get("display_name"),
+        "owner_role": user.get("role"),
+        "target_market": "cn",
+        "department_id": "real_estate",
+        "voice_preset_id": voice_preset.get("id"),
+        "avatar_id": avatar_option.get("id"),
+        "speed": float(voice_preset.get("default_speed") or 1.1),
+        "script_model": SCRIPT_MODEL_LOCAL_QWEN,
+        "digital_human_engine": INFINITETALK_ENGINE_ID,
+        "request_context": {"public_base_url": public_base_url},
+        "items": items,
+    }
+    _save_auto_digital_batch_job(job)
+    threading.Thread(target=_run_auto_digital_batch, args=(batch_id,), daemon=True).start()
+    return {"ok": True, "reused_existing": False, "batch": _auto_digital_batch_payload(job)}
+
+
+@app.get("/api/auto-digital/batches")
+async def auto_digital_batches(request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以查看批量数字人任务")
+    if error:
+        return error
+    return {"items": [_auto_digital_batch_payload(job) for job in _list_auto_digital_batch_jobs_for_user(user, limit=12)]}
+
+
+@app.get("/api/auto-digital/batches/{batch_id}")
+async def auto_digital_batch_status(batch_id: str, request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以查看批量数字人任务")
+    if error:
+        return error
+    job = _load_auto_digital_batch_job(batch_id)
+    if not job:
+        return JSONResponse({"error": "批量任务不存在"}, status_code=404)
+    if not _is_admin(user) and str(job.get("owner_username") or "") != str(user.get("username") or ""):
+        return _forbidden_error()
+    return {"batch": _auto_digital_batch_payload(job)}
+
+
+@app.post("/api/auto-digital/batches/{batch_id}/cancel")
+async def auto_digital_cancel_batch(batch_id: str, request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以停止批量数字人任务")
+    if error:
+        return error
+    job = _load_auto_digital_batch_job(batch_id)
+    if not job:
+        return JSONResponse({"error": "批量任务不存在"}, status_code=404)
+    if not _is_admin(user) and str(job.get("owner_username") or "") != str(user.get("username") or ""):
+        return _forbidden_error()
+    job["status"] = "cancelled"
+    job["message"] = "已请求停止批量任务"
+    job["updated_at"] = time.time()
+    for item in job.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status") or "") == "running" and item.get("task_id"):
+            task = tasks.get(str(item.get("task_id")))
+            if task and _user_can_access_task(user, task):
+                task["cancel_requested"] = True
+                task["cancel_requested_at"] = time.time()
+                _cancel_waiting_omnihuman_jobs(str(item.get("task_id")))
+        if str(item.get("status") or "") in {"queued", "running"}:
+            item["status"] = "cancelled"
+            item["updated_at"] = time.time()
+    _save_auto_digital_batch_job(job)
+    return {"ok": True, "batch": _auto_digital_batch_payload(job)}
 
 
 @app.get("/api/tasks/active")
@@ -14839,7 +16231,12 @@ async def omnihuman_queue_status(request: Request):
     user, error = _require_user(request)
     if error:
         return error
-    return _omnihuman_queue_snapshot()
+    digital_human_queue = _omnihuman_queue_snapshot()
+    qwen_tts_queue = _qwen_tts_queue_snapshot()
+    payload = dict(digital_human_queue)
+    payload["digital_human"] = digital_human_queue
+    payload["qwen_tts"] = qwen_tts_queue
+    return payload
 
 
 @app.get("/api/tasks/{task_id}/progress")
@@ -14987,7 +16384,11 @@ def _start_resume_task_for_result(user: dict, result: dict, output_dir: Path, re
             "opennews_material_only": bool(workflow_config.get("opennews_material_only")),
             "voice_preset": voice_cfg,
             "avatar": avatar_cfg,
-            "digital_human_engine": _normalize_digital_human_engine(workflow_config.get("digital_human_engine"), user),
+            "allow_local_digital_human": bool(workflow_config.get("allow_local_digital_human")),
+            "digital_human_engine": _normalize_digital_human_engine(
+                workflow_config.get("digital_human_engine"),
+                {**user, "workflow_config": workflow_config},
+            ),
         },
         "cost_entries": list(result.get("cost_entries", [])),
         "cost_summary": result.get("cost_summary", _empty_cost_summary()),
@@ -15340,6 +16741,7 @@ async def regenerate_history_segment_audio(history_id: str, segment_index: int, 
             language=tts_language,
             workflow_config=workflow_config,
             generate_audio_fn=generate_audio,
+            task_id="",
         )
     except Exception as exc:
         return JSONResponse({"error": f"重新生成配音失败：{exc}"}, status_code=500)

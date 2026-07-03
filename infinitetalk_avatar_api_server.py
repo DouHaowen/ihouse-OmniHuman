@@ -12,6 +12,7 @@ import json
 import math
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -28,9 +29,9 @@ BASE_DIR = Path(os.getenv("INFINITETALK_AVATAR_BASE_DIR", "/home/saita/InfiniteT
 JOBS_DIR = Path(os.getenv("INFINITETALK_AVATAR_JOBS_DIR", str(BASE_DIR / "api_jobs"))).resolve()
 CONDA_SH = os.getenv("INFINITETALK_AVATAR_CONDA_SH", "/home/saita/miniforge3/etc/profile.d/conda.sh")
 CONDA_ENV = os.getenv("INFINITETALK_AVATAR_CONDA_ENV", "infinitetalk5090")
-DEFAULT_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_TIMEOUT_SECONDS", "1800"))
-DEFAULT_MIN_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_MIN_TIMEOUT_SECONDS", "900"))
-DEFAULT_MAX_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_MAX_TIMEOUT_SECONDS", "2400"))
+DEFAULT_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_TIMEOUT_SECONDS", "0"))
+DEFAULT_MIN_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_MIN_TIMEOUT_SECONDS", "0"))
+DEFAULT_MAX_TIMEOUT_SECONDS = int(os.getenv("INFINITETALK_AVATAR_MAX_TIMEOUT_SECONDS", "0"))
 DEFAULT_TIMEOUT_PER_AUDIO_SECOND = float(os.getenv("INFINITETALK_AVATAR_TIMEOUT_PER_AUDIO_SECOND", "120"))
 DEFAULT_RETRIES = int(os.getenv("INFINITETALK_AVATAR_RETRIES", "1"))
 DEFAULT_FRAME_NUM = int(os.getenv("INFINITETALK_AVATAR_FRAME_NUM", "81"))
@@ -44,6 +45,7 @@ app = FastAPI(title="iHouse InfiniteTalk Worker")
 job_queue: "queue.Queue[str]" = queue.Queue()
 queue_lock = threading.Lock()
 worker_started = False
+ACTIVE_JOB_PATTERN = re.compile(r"/api_jobs/(it_[a-z0-9]+)/input\.json")
 
 
 def _now() -> float:
@@ -107,6 +109,75 @@ def _find_reusable_job(external_task_id: str, segment_index: int) -> dict[str, A
             continue
         return job
     return None
+
+
+def _active_generation_job_id() -> str:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-af", "generate_infinitetalk.py"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return ""
+    for line in (result.stdout or "").splitlines():
+        match = ACTIVE_JOB_PATTERN.search(line)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _result_mp4_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "result" / "segment.mp4"
+
+
+def _complete_job(job: dict[str, Any], output_mp4: Path, expected_duration: float) -> None:
+    if not output_mp4.exists():
+        raise RuntimeError(f"InfiniteTalk finished but output was not found: {output_mp4}")
+    actual_duration = _probe_media_duration_seconds(output_mp4) or 0
+    duration_ratio = actual_duration / expected_duration if expected_duration > 0 else 1.0
+    if expected_duration > 0 and actual_duration <= 0:
+        raise RuntimeError("InfiniteTalk 输出视频缺少有效时长")
+    if expected_duration > 0 and duration_ratio < 0.85:
+        raise RuntimeError(
+            f"InfiniteTalk 输出时长明显短于音频：audio={expected_duration:.2f}s, video={actual_duration:.2f}s"
+        )
+    job["status"] = "done"
+    job["message"] = "生成完成"
+    job["result_path"] = str(output_mp4)
+    job["expected_duration"] = expected_duration
+    job["video_duration"] = actual_duration
+    job["finished_at"] = _now()
+    _write_job(job)
+
+
+def _wait_for_generation_slot(job: dict[str, Any]) -> None:
+    job_id = str(job["job_id"])
+    while True:
+        active_job_id = _active_generation_job_id()
+        if not active_job_id or active_job_id == job_id:
+            return
+        job = _read_job(job_id) or job
+        job["status"] = "queued"
+        job["message"] = f"5090 正在处理其他 InfiniteTalk 任务（{active_job_id}），当前任务继续排队等待"
+        _write_job(job)
+        time.sleep(5)
+
+
+def _resume_existing_generation(job: dict[str, Any]) -> None:
+    job_id = str(job["job_id"])
+    output_mp4 = _result_mp4_path(job_id)
+    expected_duration = float(job.get("expected_duration") or (_probe_media_duration_seconds(Path(job["audio_path"])) or 0))
+    while _active_generation_job_id() == job_id:
+        job = _read_job(job_id) or job
+        job["status"] = "running"
+        job["message"] = "检测到已有 InfiniteTalk 进程正在运行，持续等待完成"
+        _write_job(job)
+        time.sleep(5)
+    job = _read_job(job_id) or job
+    _complete_job(job, output_mp4, expected_duration)
 
 
 def _enqueue(job_id: str) -> None:
@@ -209,15 +280,24 @@ def _build_input_json(job: dict[str, Any], input_json_path: Path) -> None:
     input_json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _resolve_timeout_seconds(audio_path: Path, settings: dict[str, Any]) -> int:
+def _resolve_timeout_seconds(audio_path: Path, settings: dict[str, Any]) -> int | None:
     configured = settings.get("timeout_seconds")
-    if configured:
-        return max(60, int(configured))
+    if configured is not None:
+        configured_int = int(configured)
+        if configured_int <= 0:
+            return None
+        return max(60, configured_int)
+    if DEFAULT_TIMEOUT_SECONDS <= 0 and DEFAULT_MIN_TIMEOUT_SECONDS <= 0 and DEFAULT_MAX_TIMEOUT_SECONDS <= 0:
+        return None
     audio_duration = _probe_media_duration_seconds(audio_path) or 0
     if audio_duration <= 0:
-        return max(60, DEFAULT_TIMEOUT_SECONDS)
+        return max(60, DEFAULT_TIMEOUT_SECONDS) if DEFAULT_TIMEOUT_SECONDS > 0 else None
     dynamic_timeout = int(math.ceil(audio_duration * DEFAULT_TIMEOUT_PER_AUDIO_SECOND))
-    return max(DEFAULT_MIN_TIMEOUT_SECONDS, min(DEFAULT_MAX_TIMEOUT_SECONDS, dynamic_timeout))
+    if DEFAULT_MAX_TIMEOUT_SECONDS > 0:
+        dynamic_timeout = min(DEFAULT_MAX_TIMEOUT_SECONDS, dynamic_timeout)
+    if DEFAULT_MIN_TIMEOUT_SECONDS > 0:
+        dynamic_timeout = max(DEFAULT_MIN_TIMEOUT_SECONDS, dynamic_timeout)
+    return max(60, dynamic_timeout) if dynamic_timeout > 0 else None
 
 
 def _run_generation(job: dict[str, Any]) -> None:
@@ -241,11 +321,14 @@ def _run_generation(job: dict[str, Any]) -> None:
     save_prefix = result_dir / "segment"
     output_mp4 = Path(f"{save_prefix}.mp4")
     job["expected_duration"] = expected_duration
-    job["timeout_seconds"] = timeout_seconds
-    job["message"] = (
-        f"正在生成 InfiniteTalk 数字人视频，音频 {expected_duration:.1f}s，"
-        f"本次最多等待 {timeout_seconds}s"
-    )
+    job["timeout_seconds"] = int(timeout_seconds or 0)
+    if timeout_seconds:
+        job["message"] = (
+            f"正在生成 InfiniteTalk 数字人视频，音频 {expected_duration:.1f}s，"
+            f"本次最多等待 {timeout_seconds}s"
+        )
+    else:
+        job["message"] = f"正在生成 InfiniteTalk 数字人视频，音频 {expected_duration:.1f}s，不设超时，持续等待完成"
     _write_job(job)
 
     setup_parts = [
@@ -292,76 +375,79 @@ def _run_generation(job: dict[str, Any]) -> None:
             cwd=str(BASE_DIR),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
-            timeout=timeout_seconds,
+            timeout=timeout_seconds if timeout_seconds and timeout_seconds > 0 else None,
             check=False,
         )
     if process.returncode != 0:
         raise RuntimeError(f"InfiniteTalk generation failed with exit code {process.returncode}; see {log_path}")
-    if not output_mp4.exists():
-        raise RuntimeError(f"InfiniteTalk finished but output was not found: {output_mp4}")
-
-    actual_duration = _probe_media_duration_seconds(output_mp4) or 0
-    duration_ratio = actual_duration / expected_duration if expected_duration > 0 else 1.0
-    if expected_duration > 0 and actual_duration <= 0:
-        raise RuntimeError("InfiniteTalk 输出视频缺少有效时长")
-    if expected_duration > 0 and duration_ratio < 0.85:
-        raise RuntimeError(
-            f"InfiniteTalk 输出时长明显短于音频：audio={expected_duration:.2f}s, video={actual_duration:.2f}s"
-        )
-
-    job["status"] = "done"
-    job["message"] = "生成完成"
-    job["result_path"] = str(output_mp4)
-    job["expected_duration"] = expected_duration
-    job["video_duration"] = actual_duration
-    job["finished_at"] = _now()
-    _write_job(job)
+    _complete_job(job, output_mp4, expected_duration)
 
 
 def _worker_loop() -> None:
     while True:
         job_id = job_queue.get()
         try:
-            job = _read_job(job_id)
-            if not job or job.get("status") == "done":
-                continue
-            max_attempts = max(1, int((job.get("settings") or {}).get("retries") or DEFAULT_RETRIES))
-            attempt = int(job.get("attempt") or 0) + 1
-            job["attempt"] = attempt
-            job["status"] = "running"
-            job["message"] = f"正在生成 InfiniteTalk 数字人视频（第 {attempt}/{max_attempts} 次）"
-            job["started_at"] = job.get("started_at") or _now()
-            _write_job(job)
-            generation_error: Exception | None = None
             try:
-                _run_generation(job)
-            except subprocess.TimeoutExpired as exc:
-                generation_error = RuntimeError(f"InfiniteTalk generation timed out after {exc.timeout} seconds")
-            except Exception as exc:
-                generation_error = exc
-            if generation_error:
-                job = _read_job(job_id) or job
-                job["error"] = str(generation_error)
-                if attempt < max_attempts:
-                    job["status"] = "queued"
-                    job["message"] = f"生成失败，已进入重试队列：{generation_error}"
-                    _write_job(job)
-                    _enqueue(job_id)
-                else:
-                    job["status"] = "error"
-                    job["message"] = "生成失败"
+                job = _read_job(job_id)
+                if not job or job.get("status") == "done":
+                    continue
+                if job.get("status") == "running" and _active_generation_job_id() == str(job_id):
+                    _resume_existing_generation(job)
+                    continue
+                _wait_for_generation_slot(job)
+                max_attempts = max(1, int((job.get("settings") or {}).get("retries") or DEFAULT_RETRIES))
+                attempt = int(job.get("attempt") or 0) + 1
+                job["attempt"] = attempt
+                job["status"] = "running"
+                job["message"] = f"正在生成 InfiniteTalk 数字人视频（第 {attempt}/{max_attempts} 次）"
+                job["started_at"] = job.get("started_at") or _now()
+                _write_job(job)
+                generation_error: Exception | None = None
+                try:
+                    _run_generation(job)
+                except subprocess.TimeoutExpired as exc:
+                    generation_error = RuntimeError(f"InfiniteTalk generation timed out after {exc.timeout} seconds")
+                except Exception as exc:
+                    generation_error = exc
+                if generation_error:
+                    job = _read_job(job_id) or job
+                    job["error"] = str(generation_error)
                     job["finished_at"] = _now()
-                    _write_job(job)
+                    if attempt < max_attempts:
+                        job["status"] = "queued"
+                        job["message"] = f"生成失败，已进入重试队列：{generation_error}"
+                        _write_job(job)
+                        _enqueue(job_id)
+                    else:
+                        job["status"] = "error"
+                        job["message"] = "生成失败"
+                        _write_job(job)
+            except Exception as loop_exc:
+                # Keep the worker alive even if a single job hits an unexpected edge case.
+                job = _read_job(job_id) or {"job_id": job_id}
+                job["status"] = "error"
+                job["message"] = "生成失败"
+                job["error"] = str(loop_exc)
+                job["finished_at"] = _now()
+                _write_job(job)
         finally:
             job_queue.task_done()
 
 
 def _recover_jobs() -> None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    active_job_id = _active_generation_job_id()
     for path in sorted(JOBS_DIR.glob("*/job.json")):
         try:
             job = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
+            continue
+        if str(job.get("job_id")) == active_job_id and job.get("status") != "done":
+            job["status"] = "running"
+            job.pop("error", None)
+            job["message"] = "服务重启后检测到已有 InfiniteTalk 进程，继续等待结果"
+            _write_job(job)
+            _enqueue(str(job["job_id"]))
             continue
         if job.get("status") in {"queued", "running"}:
             job["status"] = "queued"

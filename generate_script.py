@@ -19,6 +19,7 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 SCRIPT_MODEL_API_RELAY = "api_relay"
 SCRIPT_MODEL_CLAUDE = "claude"
+SCRIPT_MODEL_LOCAL_QWEN = "local_qwen"
 
 MAX_DIGITAL_HUMAN_TOTAL_SECONDS = 35
 TARGET_DIGITAL_HUMAN_TOTAL_SECONDS = 30
@@ -710,15 +711,30 @@ def _get_openai_compat_fallback_model() -> str:
 
 
 def _get_local_qwen_api_key() -> str:
-    return (os.getenv("LOCAL_QWEN_API_KEY") or "").strip()
+    return (
+        os.getenv("LOCAL_QWEN_API_KEY")
+        or os.getenv("OPENNEWS_LOCAL_LLM_API_KEY")
+        or os.getenv("OPENNEWS_QWEN_LLM_API_KEY")
+        or ""
+    ).strip()
 
 
 def _get_local_qwen_base_url() -> str:
-    return (os.getenv("LOCAL_QWEN_BASE_URL") or "https://ihouse-mix.office.ihousejapan.cn/v1/chat/completions").strip()
+    return (
+        os.getenv("LOCAL_QWEN_BASE_URL")
+        or os.getenv("OPENNEWS_LOCAL_LLM_BASE_URL")
+        or os.getenv("OPENNEWS_QWEN_LLM_BASE_URL")
+        or "http://192.168.0.34:11434/v1"
+    ).strip()
 
 
 def _get_local_qwen_model() -> str:
-    return (os.getenv("LOCAL_QWEN_MODEL") or "Qwen/Qwen3.5-122B-A10B-GPTQ-Int4").strip()
+    return (
+        os.getenv("LOCAL_QWEN_MODEL")
+        or os.getenv("OPENNEWS_LOCAL_LLM_MODEL")
+        or os.getenv("OPENNEWS_QWEN_LLM_MODEL")
+        or "hf.co/bartowski/Qwen_Qwen3-30B-A3B-Instruct-2507-GGUF:Q4_K_M"
+    ).strip()
 
 
 def _get_local_qwen_verify_ssl() -> bool:
@@ -737,10 +753,23 @@ def _get_local_qwen_public_base_url() -> str:
     return "https://ihouse-mix.office.ihousejapan.cn/v1/chat/completions"
 
 
+def _normalize_local_qwen_chat_endpoint(base_url: str) -> str:
+    url = str(base_url or "").strip().rstrip("/")
+    if not url:
+        return url
+    if url.endswith("/chat/completions"):
+        return url
+    if url.endswith("/v1"):
+        return f"{url}/chat/completions"
+    return f"{url}/v1/chat/completions"
+
+
 def _get_local_qwen_candidate_configs() -> list[tuple[str, bool]]:
-    primary_url = _get_local_qwen_base_url()
+    primary_url = _normalize_local_qwen_chat_endpoint(_get_local_qwen_base_url())
     configs: list[tuple[str, bool]] = [(primary_url, _get_local_qwen_verify_ssl())]
-    fallback_url = _get_local_qwen_public_base_url()
+    if not _get_local_qwen_api_key():
+        return configs
+    fallback_url = _normalize_local_qwen_chat_endpoint(_get_local_qwen_public_base_url())
     if fallback_url and fallback_url != primary_url:
         configs.append((fallback_url, True))
     return configs
@@ -809,16 +838,24 @@ def _extract_openai_text(payload: dict) -> str:
         raise ValueError("OpenAI 未返回 choices")
     message = choices[0].get("message") or {}
     content = message.get("content", "")
+    chunks: list[str] = []
     if isinstance(content, str):
-        text = content.strip()
+        chunks.append(content)
     elif isinstance(content, list):
-        text = "\n".join(
-            item.get("text", "").strip()
-            for item in content
-            if isinstance(item, dict) and item.get("type") in {"text", "output_text"} and item.get("text")
-        ).strip()
-    else:
-        text = ""
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text") or item.get("content")
+            if isinstance(text, str) and (not item.get("type") or item.get("type") in {"text", "output_text"}):
+                chunks.append(text)
+    for key in ("reasoning", "reasoning_content", "thinking"):
+        value = message.get(key)
+        if isinstance(value, str):
+            chunks.append(value)
+    choice_text = choices[0].get("text")
+    if isinstance(choice_text, str):
+        chunks.append(choice_text)
+    text = "\n".join(part.strip() for part in chunks if part and part.strip()).strip()
     if not text:
         raise ValueError("OpenAI 未返回可解析的文本内容")
     return text
@@ -1240,8 +1277,6 @@ def _request_json_from_local_qwen(
     department_id: str = "real_estate",
 ) -> tuple[dict, dict]:
     api_key = _get_local_qwen_api_key()
-    if not api_key:
-        raise ValueError("未配置 LOCAL_QWEN_API_KEY")
 
     effective_prompt = user_prompt
     if enable_web_search:
@@ -1254,46 +1289,73 @@ def _request_json_from_local_qwen(
     payload = {
         "model": _get_local_qwen_model(),
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)},
+            {
+                "role": "system",
+                "content": (
+                    "你是 iHouse 短视频选题策划。只输出可解析 JSON，不输出解释、markdown 或代码块。"
+                    + _build_context_guidance(target_market, department_id)
+                    if '"topics"' in user_prompt and "选题" in user_prompt
+                    else SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)
+                ),
+            },
             {"role": "user", "content": effective_prompt},
         ],
         "max_tokens": max_tokens,
         "temperature": 0.7,
-        "response_format": {"type": "json_object"},
+        "stream": False,
     }
+    if (os.getenv("LOCAL_QWEN_RESPONSE_FORMAT_JSON") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        payload["response_format"] = {"type": "json_object"}
     last_error: Exception | None = None
-    response = None
-    for base_url, verify_ssl in _get_local_qwen_candidate_configs():
-        try:
-            response = requests.post(
-                base_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
+    attempts = max(1, int(os.getenv("LOCAL_QWEN_RETRY_ATTEMPTS", "3") or "3"))
+    for attempt in range(1, attempts + 1):
+        response = None
+        for base_url, verify_ssl in _get_local_qwen_candidate_configs():
+            try:
+                headers = {
                     "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=180,
-                verify=verify_ssl,
-            )
-            if response.status_code >= 400:
-                raise requests.HTTPError(response.text[:500], response=response)
-            break
+                }
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                response = requests.post(
+                    base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=180,
+                    verify=verify_ssl,
+                )
+                if response.status_code >= 400:
+                    raise requests.HTTPError(response.text[:500], response=response)
+                break
+            except Exception as exc:
+                last_error = exc
+                response = None
+                continue
+        if response is None:
+            if attempt < attempts:
+                time.sleep(1.5 * attempt)
+                continue
+            if last_error:
+                raise last_error
+            raise ValueError("本地 Qwen 请求失败")
+        try:
+            body = response.json()
+            raw = _extract_openai_text(body)
+            data, repair_usage = _parse_json_response(raw)
+            usage = _merge_usage(_extract_usage_from_openai_payload(body), repair_usage)
+            if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
+                data, schema_usage = _ensure_script_schema(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+                usage = _merge_usage(usage, schema_usage)
+            return data, usage
         except Exception as exc:
             last_error = exc
-            response = None
-            continue
-    if response is None:
-        if last_error:
-            raise last_error
-        raise ValueError("本地 Qwen 请求失败")
-    body = response.json()
-    raw = _extract_openai_text(body)
-    data, repair_usage = _parse_json_response(raw)
-    usage = _merge_usage(_extract_usage_from_openai_payload(body), repair_usage)
-    if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
-        data, schema_usage = _ensure_script_schema(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
-        usage = _merge_usage(usage, schema_usage)
-    return data, usage
+            if attempt < attempts:
+                time.sleep(1.5 * attempt)
+                continue
+            raise
+    if last_error:
+        raise last_error
+    raise ValueError("本地 Qwen 请求失败")
 
 
 def _request_json_from_glm(user_prompt: str, max_tokens: int, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
@@ -1519,6 +1581,8 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
 
 def _normalize_script_model_provider(provider: str | None) -> str:
     requested = str(provider or "").strip().lower()
+    if requested == SCRIPT_MODEL_LOCAL_QWEN:
+        return SCRIPT_MODEL_LOCAL_QWEN
     if requested == SCRIPT_MODEL_API_RELAY:
         return SCRIPT_MODEL_API_RELAY
     return SCRIPT_MODEL_CLAUDE
@@ -1534,9 +1598,85 @@ def _request_json_by_provider(
     department_id: str = "real_estate",
 ) -> tuple[dict, dict]:
     normalized = _normalize_script_model_provider(provider)
+    if normalized == SCRIPT_MODEL_LOCAL_QWEN:
+        return _request_json_from_local_qwen(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     if normalized == SCRIPT_MODEL_API_RELAY:
         return _request_json_from_openai_relay(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
     return _request_json_from_claude(user_prompt, max_tokens=max_tokens, enable_web_search=enable_web_search, target_market=target_market, department_id=department_id)
+
+
+def _coerce_topic_ideas(payload: dict, count: int) -> list[dict]:
+    raw_items = payload.get("topics") if isinstance(payload, dict) else None
+    if not isinstance(raw_items, list):
+        raw_items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(raw_items, list):
+        raw_items = []
+    topics: list[dict] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, str):
+            title = item
+            angle = ""
+        elif isinstance(item, dict):
+            title = str(item.get("title") or item.get("topic") or item.get("name") or "").strip()
+            angle = str(item.get("angle") or item.get("reason") or item.get("summary") or "").strip()
+        else:
+            continue
+        title = re.sub(r"\s+", " ", title).strip(" -—\t\r\n")
+        if not title:
+            continue
+        dedupe_key = re.sub(r"\s+", "", title).lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        topics.append({"title": title[:80], "angle": angle[:120]})
+        if len(topics) >= count:
+            break
+    return topics
+
+
+def generate_topic_ideas(seed_topic: str, count: int = 10, target_market: str = "cn", department_id: str = "real_estate", provider: str = SCRIPT_MODEL_LOCAL_QWEN) -> dict:
+    """
+    根据一个大方向生成一组可直接进入视频生产的选题。
+    """
+    safe_count = max(1, min(int(count or 10), 10))
+    seed = re.sub(r"\s+", " ", str(seed_topic or "").strip())
+    if not seed:
+        raise ValueError("请输入批量生成的大方向")
+    prompt = f"""
+请围绕下面的大方向，生成 {safe_count} 条适合 iHouse 中国市场短视频数字人口播的选题。
+
+大方向：{seed}
+
+只返回合法 JSON，不要输出 markdown 或解释文字。JSON 格式如下：
+{{
+  "topics": [
+    {{
+      "title": "可以直接放入视频选题框的一句话选题",
+      "angle": "这一条的内容切入点，简短说明"
+    }}
+  ]
+}}
+
+要求：
+1. 全部使用简体中文。
+2. 每条 title 必须是清晰的一句话，可以直接用于 60~120 秒知识科普短视频。
+3. 选题之间不要重复，角度要覆盖制度、生活成本、买房误区、持有成本、区域认知、租售差异、身份/税务/贷款常见疑问等。
+4. 不要写品牌导流、咨询转化、联系方式、夸张收益承诺。
+5. title 不要超过 32 个中文字符。
+"""
+    data, usage = _request_json_by_provider(
+        provider,
+        prompt,
+        max_tokens=1800,
+        enable_web_search=False,
+        target_market=target_market,
+        department_id=department_id,
+    )
+    topics = _coerce_topic_ideas(data, safe_count)
+    if len(topics) < safe_count:
+        raise ValueError(f"本地文案模型只返回了 {len(topics)} 条有效选题，请重试")
+    return {"seed_topic": seed, "topics": topics[:safe_count], "_meta": {"usage": usage}}
 
 def _build_message_kwargs(user_prompt: str, max_tokens: int, enable_web_search: bool, target_market: str = "cn", department_id: str = "real_estate") -> dict:
     kwargs = {
