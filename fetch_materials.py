@@ -5142,39 +5142,10 @@ def _fetch_opennews_materials_free_library_strategy(
     )
 
     if image_count < OPENNEWS_LIBRARY_FALLBACK_MIN_SOURCE_IMAGES:
-        fallback_limit = max(
-            1,
-            min(
-                OPENNEWS_LIBRARY_FALLBACK_MAX_IMAGES,
-                max_total_materials - len(material_items),
-                max_source_images - image_count,
-            ),
+        print(
+            "  ℹ️ OpenNews 免费素材不足，已按要求跳过本地素材库/5090向量素材库兜底，"
+            f"仅保留免费素材 API 命中结果：{image_count} 张"
         )
-        if fallback_limit > 0:
-            library_items = _search_opennews_material_vector_fallback(
-                seg,
-                visual_domain=visual_domain,
-                target_market=target_market or str(seg.get("target_market") or ""),
-                department_id=department_id or str(seg.get("department_id") or ""),
-                limit_images=fallback_limit,
-            )
-            if library_items:
-                print(f"  ✅ 免费素材不足，启用本地向量素材库兜底：{len(library_items)} 条")
-                _, image_count = _append_library_material_items(
-                    library_items=library_items,
-                    material_items=material_items,
-                    material_paths=material_paths,
-                    output_dir=output_dir,
-                    segment_index=segment_index,
-                    max_total_materials=max_total_materials,
-                    max_source_videos=0,
-                    max_source_images=max_source_images,
-                    current_video_count=0,
-                    current_image_count=image_count,
-                    used_library_ids=used_library_ids,
-                    is_opennews_material_only=True,
-                    batch_job_id=batch_job_id,
-                )
 
     material_items, material_paths, blank_rejections = _opennews_filter_usable_materials(material_items, material_paths)
     seg_with_materials["material_paths"] = material_paths
@@ -5189,8 +5160,9 @@ def _fetch_opennews_materials_free_library_strategy(
             source: sum(1 for item in material_items if item.get("source") == source)
             for source in sorted({str(item.get("source") or "unknown") for item in material_items})
         },
-        "library_fallback_enabled": OPENNEWS_MATERIAL_LIBRARY_FALLBACK_ENABLED,
-        "library_fallback_used": any(item.get("source") == "library" for item in material_items),
+        "library_fallback_enabled": False,
+        "library_fallback_used": False,
+        "local_library_fallback_disabled": True,
         "blank_or_invalid_rejected_count": len(blank_rejections),
         "blank_or_invalid_rejections": blank_rejections[:40],
         "relevance_tokens": sorted(relevance_tokens)[:80],
@@ -5220,6 +5192,10 @@ def fetch_materials_for_segment(
     used_library_ids = used_library_ids if used_library_ids is not None else set()
     strategy = str(seg.get("material_strategy") or "").strip().lower()
     batch_job_id = str(seg.get("batch_job_id") or "").strip()
+    if is_opennews_material_only and strategy != "free_library_script_match":
+        if strategy:
+            print(f"  ℹ️ OpenNews 已禁用旧素材策略 {strategy}，强制改用免费素材 API 匹配")
+        strategy = "free_library_script_match"
     if is_opennews_material_only and strategy == "free_library_script_match":
         return _fetch_opennews_materials_free_library_strategy(
             seg_with_materials,

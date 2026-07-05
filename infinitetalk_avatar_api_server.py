@@ -13,6 +13,7 @@ import math
 import os
 import queue
 import re
+import signal
 import shutil
 import subprocess
 import threading
@@ -370,16 +371,26 @@ def _run_generation(job: dict[str, Any]) -> None:
     log_path = job_dir / "run.log"
 
     with log_path.open("ab") as log_handle:
-        process = subprocess.run(
+        process = subprocess.Popen(
             ["bash", "-lc", command],
             cwd=str(BASE_DIR),
             stdout=log_handle,
             stderr=subprocess.STDOUT,
-            timeout=timeout_seconds if timeout_seconds and timeout_seconds > 0 else None,
-            check=False,
+            start_new_session=True,
         )
-    if process.returncode != 0:
-        raise RuntimeError(f"InfiniteTalk generation failed with exit code {process.returncode}; see {log_path}")
+        try:
+            returncode = process.wait(timeout=timeout_seconds if timeout_seconds and timeout_seconds > 0 else None)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                time.sleep(5)
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            raise subprocess.TimeoutExpired(process.args, exc.timeout) from exc
+    if returncode != 0:
+        raise RuntimeError(f"InfiniteTalk generation failed with exit code {returncode}; see {log_path}")
     _complete_job(job, output_mp4, expected_duration)
 
 

@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenNews 数据中心</title>
+  <style>
+    :root {
+      --bg: #eef1ec;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667086;
+      --line: #e3e8ef;
+      --green: #087367;
+      --green-2: #0b5f57;
+      --soft: #f7f9fb;
+      --danger: #b42318;
+      --shadow: 0 18px 50px rgba(19, 34, 48, .08);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    a { color: inherit; text-decoration: none; }
+    .shell {
+      width: min(1500px, calc(100vw - 48px));
+      margin: 24px auto 48px;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 22px;
+      background: rgba(255, 255, 255, .9);
+      border: 1px solid rgba(255,255,255,.75);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      position: sticky;
+      top: 14px;
+      z-index: 5;
+      backdrop-filter: blur(14px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+    .brand-mark {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      background: var(--green-2);
+      color: #fff;
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      letter-spacing: .04em;
+    }
+    .brand-title {
+      font-size: 22px;
+      line-height: 1.1;
+      font-weight: 800;
+    }
+    .brand-subtitle {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .btn {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      min-height: 42px;
+      padding: 0 18px;
+      border-radius: 999px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform .16s ease, box-shadow .16s ease, background .16s ease;
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(17, 34, 48, .08); }
+    .btn-primary { background: var(--green); color: #fff; border-color: var(--green); }
+    .btn[disabled] { opacity: .55; cursor: wait; transform: none; box-shadow: none; }
+    .hero {
+      margin-top: 22px;
+      padding: 26px;
+      background: var(--panel);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      border: 1px solid rgba(255,255,255,.78);
+    }
+    .hero-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    .kicker {
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { margin-top: 7px; font-size: clamp(28px, 3.2vw, 46px); letter-spacing: 0; }
+    .desc {
+      margin-top: 10px;
+      max-width: 780px;
+      color: var(--muted);
+      line-height: 1.75;
+      font-size: 15px;
+    }
+    .status {
+      border: 1px solid var(--line);
+      background: var(--soft);
+      color: var(--muted);
+      border-radius: 16px;
+      padding: 12px 14px;
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+    .status.error {
+      color: var(--danger);
+      border-color: #f2b8b5;
+      background: #fff5f4;
+    }
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .kpi, .card {
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .value {
+      margin-top: 8px;
+      font-size: 28px;
+      line-height: 1.05;
+      font-weight: 850;
+      letter-spacing: 0;
+    }
+    .helper {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .grid {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      align-items: start;
+    }
+    .section {
+      background: var(--panel);
+      border-radius: 18px;
+      padding: 18px;
+      border: 1px solid rgba(255,255,255,.78);
+      box-shadow: var(--shadow);
+    }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .section-title {
+      margin-top: 5px;
+      font-size: 20px;
+      font-weight: 820;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 7px 11px;
+      background: #fff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .rows {
+      display: grid;
+      gap: 10px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--soft);
+    }
+    .row-title {
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+    .row-meta {
+      color: var(--muted);
+      margin-top: 5px;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .metric-pills {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .empty {
+      border: 1px dashed var(--line);
+      border-radius: 14px;
+      padding: 18px;
+      color: var(--muted);
+      background: var(--soft);
+    }
+    @media (max-width: 1100px) {
+      .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .shell { width: min(100vw - 24px, 1500px); margin-top: 12px; }
+      .topbar, .hero-head, .row { display: block; }
+      .actions { justify-content: flex-start; margin-top: 14px; }
+      .kpis, .cards { grid-template-columns: 1fr; }
+      .metric-pills { justify-content: flex-start; margin-top: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/">
+        <div class="brand-mark">IH</div>
+        <div>
+          <div class="brand-title">OpenNews 数据中心</div>
+          <div class="brand-subtitle">Platform Analytics</div>
+        </div>
+      </a>
+      <div class="actions">
+        <a class="btn" href="/">返回工作台</a>
+        <button class="btn btn-primary" id="refreshBtn" type="button">刷新互动数据</button>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="hero-head">
+        <div>
+          <div class="kicker">OpenNews Data Center</div>
+          <h1>平台、频道、语言一次看清</h1>
+          <p class="desc">集中查看 OpenNews 三语视频在 X、Facebook 和 YouTube 预留渠道上的发布数量、浏览、点赞、评论，以及最近发布链接。</p>
+        </div>
+        <div class="badge" id="updatedAt">等待加载</div>
+      </div>
+      <div class="status" id="status">正在加载 OpenNews 数据中心...</div>
+      <div class="kpis" id="kpis"></div>
+    </section>
+
+    <section class="grid">
+      <div class="section">
+        <div class="section-head">
+          <div>
+            <div class="kicker">Platforms</div>
+            <h2 class="section-title">平台表现</h2>
+          </div>
+          <span class="badge">X / Facebook / YouTube</span>
+        </div>
+        <div class="cards" id="platforms"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <div>
+            <div class="kicker">Publish Runtime</div>
+            <h2 class="section-title">发布环境</h2>
+          </div>
+          <span class="badge" id="runtimeBadge">检测中</span>
+        </div>
+        <div class="rows" id="runtime"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <div>
+            <div class="kicker">Channels</div>
+            <h2 class="section-title">频道表现</h2>
+          </div>
+          <span class="badge">按频道汇总</span>
+        </div>
+        <div class="rows" id="channels"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-head">
+          <div>
+            <div class="kicker">Languages</div>
+            <h2 class="section-title">语言版本表现</h2>
+          </div>
+          <span class="badge">中 / 日 / 英</span>
+        </div>
+        <div class="rows" id="languages"></div>
+      </div>
+    </section>
+
+    <section class="section" style="margin-top:16px;">
+      <div class="section-head">
+        <div>
+          <div class="kicker">Recent Posts</div>
+          <h2 class="section-title">最近发布</h2>
+        </div>
+        <span class="badge">最新 24 条</span>
+      </div>
+      <div class="rows" id="recent"></div>
+    </section>
+  </main>
+
+  <script>
+    const els = {
+      refreshBtn: document.getElementById('refreshBtn'),
+      status: document.getElementById('status'),
+      updatedAt: document.getElementById('updatedAt'),
+      kpis: document.getElementById('kpis'),
+      platforms: document.getElementById('platforms'),
+      runtime: document.getElementById('runtime'),
+      runtimeBadge: document.getElementById('runtimeBadge'),
+      channels: document.getElementById('channels'),
+      languages: document.getElementById('languages'),
+      recent: document.getElementById('recent'),
+    };
+
+    function escapeHtml(value = '') {
+      return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      }[char]));
+    }
+
+    function formatMetric(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number)) return '0';
+      return number.toLocaleString('zh-CN');
+    }
+
+    function formatTime(value) {
+      const number = Number(value || 0);
+      if (!number) return '未记录';
+      return new Date(number * 1000).toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function emptyStats() {
+      return { published: 0, measured: 0, views: 0, likes: 0, comments: 0, errors: 0 };
+    }
+
+    function marketLabel(market = '') {
+      const id = String(market || 'cn').toLowerCase();
+      return ({ cn: '中文', jp: '日文', en: '英文', tw: '繁中' }[id] || id || '未标注');
+    }
+
+    function platformLabel(platform = '') {
+      const id = String(platform || '').toLowerCase();
+      return ({ youtube: 'YouTube', x: 'X', facebook: 'Facebook' }[id] || platform || '平台');
+    }
+
+    function bucket(target, key, label = '') {
+      const id = String(key || 'unknown').trim() || 'unknown';
+      if (!target[id]) {
+        target[id] = { id, label: label || id, ...emptyStats() };
+      } else if (label && (!target[id].label || target[id].label === id)) {
+        target[id].label = label;
+      }
+      return target[id];
+    }
+
+    function addStats(target, stat) {
+      target.published += Number(stat.published || 0);
+      target.measured += Number(stat.measured || 0);
+      target.views += Number(stat.views || 0);
+      target.likes += Number(stat.likes || 0);
+      target.comments += Number(stat.comments || 0);
+      target.errors += Number(stat.errors || 0);
+    }
+
+    function buildOverview(videos = []) {
+      const platforms = {
+        x: emptyStats(),
+        facebook: emptyStats(),
+        youtube: emptyStats(),
+      };
+      const channels = {};
+      const languages = {};
+      const totals = emptyStats();
+      const recent = [];
+      const seen = new Set();
+
+      const recordKey = (platform, record = {}, url = '') => [
+        platform,
+        record.video_id || record.post_id || record.id || url || record.created_at || Math.random(),
+      ].join(':');
+
+      const accountLabel = (record = {}) => {
+        const account = record.publish_account || {};
+        return account.account_label || account.page_name || account.channel_name || account.handle || record.page_name || record.account_label || '';
+      };
+
+      const addPayload = (platform, payload, context = {}) => {
+        if (!payload || (!payload.record && !payload.metrics && !payload.error)) return;
+        const record = payload.record || {};
+        const metrics = payload.metrics || {};
+        const url = record.youtube_url || record.x_url || record.facebook_url || record.permalink_url || metrics.permalink_url || '';
+        const key = recordKey(platform, record, url);
+        if (seen.has(key)) return;
+        seen.add(key);
+
+        const stat = {
+          published: 1,
+          measured: payload.ok && payload.metrics ? 1 : 0,
+          views: Number(metrics.view_count || metrics.views || 0),
+          likes: Number(metrics.like_count || metrics.likes || 0),
+          comments: Number(metrics.comment_count || metrics.comments || 0),
+          errors: payload.error ? 1 : 0,
+        };
+        addStats(platforms[platform] || bucket(platforms, platform, platformLabel(platform)), stat);
+        addStats(totals, stat);
+        addStats(bucket(channels, context.channel_id || 'general', context.channel_name || '综合新闻'), stat);
+        addStats(bucket(languages, context.target_market || 'cn', marketLabel(context.target_market || 'cn')), stat);
+
+        if (url) {
+          recent.push({
+            platform,
+            platform_label: platformLabel(platform),
+            target_market: context.target_market || 'cn',
+            language_label: marketLabel(context.target_market || 'cn'),
+            channel_name: context.channel_name || '综合新闻',
+            account_label: accountLabel(record),
+            title: context.title || record.title || metrics.title || 'OpenNews 新闻',
+            url,
+            created_at: Number(record.created_at || context.created_at || 0),
+            views: stat.views,
+            likes: stat.likes,
+            comments: stat.comments,
+            error: payload.error || '',
+          });
+        }
+      };
+
+      const addFallbackRecords = (platform, records, context = {}) => {
+        for (const record of (Array.isArray(records) ? records : [])) {
+          if (!record || typeof record !== 'object') continue;
+          const url = record.youtube_url || record.x_url || record.facebook_url || record.permalink_url || '';
+          if (!url && !record.video_id && !record.post_id) continue;
+          addPayload(platform, { ok: false, record, metrics: null }, context);
+        }
+      };
+
+      for (const video of videos || []) {
+        const title = video.title || video.topic || 'OpenNews 新闻';
+        const channelId = video.opennews_channel_id || 'general';
+        const channelName = video.opennews_channel_name || '综合新闻';
+        const targetMarket = video.target_market || 'cn';
+        const createdAt = Number(video.completed_at || video.created_at || 0);
+        const metricsPayload = video.platform_metrics || {};
+        const platformPayloads = metricsPayload.platforms || {};
+        for (const platform of ['x', 'facebook', 'youtube']) {
+          addPayload(platform, platformPayloads[platform], {
+            title,
+            channel_id: channelId,
+            channel_name: channelName,
+            target_market: targetMarket,
+            created_at: createdAt,
+          });
+        }
+        addFallbackRecords('x', video.x_records, { title, channel_id: channelId, channel_name: channelName, target_market: targetMarket, created_at: createdAt });
+        addFallbackRecords('facebook', video.facebook_records, { title, channel_id: channelId, channel_name: channelName, target_market: targetMarket, created_at: createdAt });
+        addFallbackRecords('youtube', video.youtube_records, { title, channel_id: channelId, channel_name: channelName, target_market: targetMarket, created_at: createdAt });
+
+        for (const version of (Array.isArray(metricsPayload.language_versions) ? metricsPayload.language_versions : [])) {
+          const versionMarket = version.target_market || targetMarket;
+          const versionTitle = version.title || title;
+          for (const platform of ['x', 'facebook', 'youtube']) {
+            addPayload(platform, (version.platforms || {})[platform], {
+              title: versionTitle,
+              channel_id: channelId,
+              channel_name: channelName,
+              target_market: versionMarket,
+              created_at: createdAt,
+            });
+          }
+        }
+      }
+
+      const sortStats = items => Object.values(items || {}).sort((a, b) => {
+        const diff = Number(b.views || 0) - Number(a.views || 0);
+        if (diff) return diff;
+        return Number(b.published || 0) - Number(a.published || 0);
+      });
+      recent.sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+      return {
+        totalVideos: videos.length,
+        totals,
+        platforms,
+        channels: sortStats(channels),
+        languages: sortStats(languages),
+        recent: recent.slice(0, 24),
+      };
+    }
+
+    function renderKpis(overview) {
+      const total = overview.totals || emptyStats();
+      els.kpis.innerHTML = [
+        ['成片数', overview.totalVideos || 0],
+        ['发布条目', total.published || 0],
+        ['已读互动', total.measured || 0],
+        ['总浏览', total.views || 0],
+        ['总点赞', total.likes || 0],
+        ['总评论', total.comments || 0],
+      ].map(([label, value]) => `
+        <div class="kpi">
+          <div class="label">${escapeHtml(label)}</div>
+          <div class="value">${escapeHtml(formatMetric(value))}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderPlatformCards(overview) {
+      els.platforms.innerHTML = ['x', 'facebook', 'youtube'].map(platform => {
+        const item = overview.platforms[platform] || emptyStats();
+        const hint = platform === 'youtube' ? '自动发布暂停 / 账号预留' : `${formatMetric(item.measured)} 条已读取互动`;
+        return `
+          <div class="card">
+            <div class="label">${escapeHtml(platformLabel(platform))}</div>
+            <div class="value">${escapeHtml(formatMetric(item.published))}</div>
+            <div class="helper">${escapeHtml(hint)}</div>
+            <div class="helper">浏览 ${escapeHtml(formatMetric(item.views))}｜点赞 ${escapeHtml(formatMetric(item.likes))}｜评论 ${escapeHtml(formatMetric(item.comments))}${item.errors ? `｜异常 ${escapeHtml(formatMetric(item.errors))}` : ''}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderRows(container, items, emptyText) {
+      container.innerHTML = items.length ? items.map(item => `
+        <div class="row">
+          <div>
+            <div class="row-title">${escapeHtml(item.label || item.id || '未命名')}</div>
+            <div class="row-meta">发布 ${escapeHtml(formatMetric(item.published))}｜互动已读 ${escapeHtml(formatMetric(item.measured))}${item.errors ? `｜异常 ${escapeHtml(formatMetric(item.errors))}` : ''}</div>
+          </div>
+          <div class="metric-pills">
+            <span class="badge">浏览 ${escapeHtml(formatMetric(item.views))}</span>
+            <span class="badge">赞 ${escapeHtml(formatMetric(item.likes))}</span>
+            <span class="badge">评 ${escapeHtml(formatMetric(item.comments))}</span>
+          </div>
+        </div>
+      `).join('') : `<div class="empty">${escapeHtml(emptyText)}</div>`;
+    }
+
+    function renderRecent(items) {
+      els.recent.innerHTML = items.length ? items.map(item => `
+        <div class="row">
+          <div>
+            <div class="row-title">${escapeHtml(item.title || 'OpenNews 新闻')}</div>
+            <div class="row-meta">${escapeHtml(item.channel_name || 'OpenNews')}｜${escapeHtml(item.language_label || '')}｜${escapeHtml(item.platform_label || '')}${item.account_label ? `｜${escapeHtml(item.account_label)}` : ''}</div>
+            <div class="row-meta">发布：${escapeHtml(formatTime(item.created_at))}｜浏览 ${escapeHtml(formatMetric(item.views))}｜点赞 ${escapeHtml(formatMetric(item.likes))}｜评论 ${escapeHtml(formatMetric(item.comments))}${item.error ? `｜${escapeHtml(item.error)}` : ''}</div>
+          </div>
+          <div class="metric-pills">
+            <a class="btn" href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener">打开链接</a>
+          </div>
+        </div>
+      `).join('') : '<div class="empty">还没有可展示的平台发布链接。</div>';
+    }
+
+    function renderRuntime(xStatus, xProfile, channelConfig) {
+      const browser = { ...((xStatus || {}).browser || {}), ...((xProfile || {}).browser || {}) };
+      const authReady = Boolean((xProfile || {}).auth_ready ?? browser.auth_ready);
+      const channels = Array.isArray((channelConfig || {}).channels) ? channelConfig.channels : [];
+      const enabledChannels = channels.filter(item => item.enabled).length;
+      els.runtimeBadge.textContent = authReady ? 'X 已登录' : 'X 未登录';
+      els.runtime.innerHTML = `
+        <div class="row">
+          <div>
+            <div class="row-title">X 浏览器自动发布</div>
+            <div class="row-meta">${escapeHtml((xStatus || {}).publish_mode_label || (xStatus || {}).publish_mode || '未读取')}｜Profile：${authReady ? '已登录' : '未登录'}｜文件数：${escapeHtml(formatMetric((xProfile || {}).file_count || 0))}</div>
+          </div>
+          <span class="badge">${authReady ? '可发布' : '需登录'}</span>
+        </div>
+        <div class="row">
+          <div>
+            <div class="row-title">频道自动化</div>
+            <div class="row-meta">${(channelConfig || {}).scheduler_enabled ? '已开启' : '已关闭'}｜启用频道 ${escapeHtml(formatMetric(enabledChannels))} 个</div>
+          </div>
+          <span class="badge">${(channelConfig || {}).scheduler_enabled ? '运行中' : '关闭'}</span>
+        </div>
+      `;
+    }
+
+    async function fetchJson(url) {
+      const res = await fetch(url, { credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || data.detail || `请求失败：${res.status}`);
+      return data;
+    }
+
+    async function loadData(forceRefresh = false) {
+      els.refreshBtn.disabled = true;
+      els.status.classList.remove('error');
+      els.status.textContent = forceRefresh ? '正在刷新平台互动数据...' : '正在加载 OpenNews 数据中心...';
+      try {
+        const [videosData, xStatus, xProfile, channelData] = await Promise.all([
+          fetchJson(`/api/lab/opennews/ready-videos?limit=200&refresh=${forceRefresh ? 1 : 0}`),
+          fetchJson('/api/x/status').catch(() => ({})),
+          fetchJson('/api/x/browser-profile/status').catch(() => ({})),
+          fetchJson('/api/opennews/channels/config').catch(() => ({})),
+        ]);
+        const overview = buildOverview(videosData.videos || []);
+        renderKpis(overview);
+        renderPlatformCards(overview);
+        renderRows(els.channels, overview.channels || [], '还没有频道维度数据。');
+        renderRows(els.languages, overview.languages || [], '还没有语言版本数据。');
+        renderRecent(overview.recent || []);
+        renderRuntime(xStatus, xProfile, channelData.config || {});
+        els.updatedAt.textContent = new Date().toLocaleString('zh-CN', { hour12: false });
+        els.status.textContent = forceRefresh ? '数据中心已刷新，平台互动指标已重新读取。' : '数据中心已加载。';
+      } catch (error) {
+        els.status.classList.add('error');
+        els.status.textContent = `${error.message || '数据中心加载失败'}。如果尚未登录，请先回到主工作台登录。`;
+        els.kpis.innerHTML = '';
+        els.platforms.innerHTML = '';
+        els.channels.innerHTML = '';
+        els.languages.innerHTML = '';
+        els.recent.innerHTML = '';
+      } finally {
+        els.refreshBtn.disabled = false;
+      }
+    }
+
+    els.refreshBtn.addEventListener('click', () => loadData(true));
+    loadData(false);
+  </script>
+</body>
+</html>

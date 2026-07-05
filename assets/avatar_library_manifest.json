@@ -32,5 +32,39 @@
     "style_prompt": "professional vertical talking-head presenter, natural facial expression, subtle head movement, clear lip-sync, studio lighting",
     "created_at": 1783065600,
     "source": "restored_from_admin_avatar_reference"
+  },
+  "avatar_recovered_gray_suit_male_04.png": {
+    "name": "灰西装男主播",
+    "gender": "male",
+    "allowed_target_markets": [
+      "cn",
+      "tw",
+      "jp"
+    ],
+    "preferred_voice_by_market": {
+      "cn": "mandarin_male",
+      "tw": "mandarin_male",
+      "jp": "mandarin_male"
+    },
+    "style_prompt": "professional vertical talking-head presenter, natural facial expression, subtle head movement, clear lip-sync, warm office lighting, seated at desk",
+    "created_at": 1783065600,
+    "source": "restored_from_history_video_frame"
+  },
+  "avatar_recovered_white_shirt_female_05.png": {
+    "name": "灰西装女主播",
+    "gender": "female",
+    "allowed_target_markets": [
+      "cn",
+      "tw",
+      "jp"
+    ],
+    "preferred_voice_by_market": {
+      "cn": "mandarin_female",
+      "tw": "taiwan_clone",
+      "jp": "japanese_female"
+    },
+    "style_prompt": "professional vertical talking-head presenter, natural facial expression, subtle head movement, clear lip-sync, warm office lighting, seated at desk",
+    "created_at": 1783065600,
+    "source": "restored_from_history_video_frame"
   }
 }

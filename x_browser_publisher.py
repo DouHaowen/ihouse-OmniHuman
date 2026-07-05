@@ -575,9 +575,11 @@ def publish_video_to_x_browser(
     *,
     text: str,
     made_with_ai: bool = True,
+    user_data_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     video_path = _ensure_video_path(video_path)
-    X_BROWSER_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    profile_dir = Path(user_data_dir).expanduser().resolve() if user_data_dir else X_BROWSER_USER_DATA_DIR
+    profile_dir.mkdir(parents=True, exist_ok=True)
     X_BROWSER_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     X_BROWSER_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     debug_events: list[dict[str, Any]] = []
@@ -593,9 +595,10 @@ def publish_video_to_x_browser(
             headless=X_BROWSER_HEADLESS,
             compose_url=X_BROWSER_COMPOSE_URL,
             video_path=str(video_path),
+            user_data_dir=str(profile_dir),
         )
         context = browser_type.launch_persistent_context(
-            str(X_BROWSER_USER_DATA_DIR),
+            str(profile_dir),
             executable_path=executable_path,
             headless=X_BROWSER_HEADLESS,
             slow_mo=X_BROWSER_SLOW_MO_MS,

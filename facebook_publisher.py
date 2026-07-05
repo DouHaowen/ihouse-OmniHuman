@@ -305,13 +305,18 @@ def upload_video_to_facebook_page(
     *,
     description: str,
     title: str = "",
+    page_id: str = "",
+    page_access_token: str = "",
 ) -> dict[str, Any]:
     video_path = Path(video_path)
     if not video_path.exists() or not video_path.is_file():
         raise FacebookPublishError("要上传到 Facebook 的 mp4 文件不存在")
     if video_path.suffix.lower() != ".mp4":
         raise FacebookPublishError("Facebook 自动发布目前仅支持 mp4 成片")
-    page_id, page_access_token = _load_page_config(token_store_path)
+    page_id = str(page_id or "").strip()
+    page_access_token = str(page_access_token or "").strip()
+    if not page_id or not page_access_token:
+        page_id, page_access_token = _load_page_config(token_store_path)
     data = {
         "access_token": page_access_token,
         "description": str(description or "").strip(),

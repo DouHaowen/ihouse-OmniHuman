@@ -20,6 +20,7 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 SCRIPT_MODEL_API_RELAY = "api_relay"
 SCRIPT_MODEL_CLAUDE = "claude"
 SCRIPT_MODEL_LOCAL_QWEN = "local_qwen"
+SCRIPT_MODEL_FORCE_ENV_KEYS = ("FORCE_SCRIPT_MODEL_PROVIDER", "SCRIPT_MODEL_FORCE_PROVIDER")
 
 MAX_DIGITAL_HUMAN_TOTAL_SECONDS = 35
 TARGET_DIGITAL_HUMAN_TOTAL_SECONDS = 30
@@ -671,6 +672,10 @@ def _get_openai_relay_base_url() -> str:
     return (os.getenv("OPENAI_RELAY_BASE_URL") or "https://sub2api.ihousejapan.cn").strip().rstrip("/")
 
 
+def _openai_relay_uses_office_api() -> bool:
+    return "api.office.ihousejapan.cn" in _get_openai_relay_base_url().lower()
+
+
 def _get_openai_relay_responses_url() -> str:
     base_url = _get_openai_relay_base_url()
     if base_url.endswith("/responses"):
@@ -685,17 +690,30 @@ def _get_openai_relay_model() -> str:
 
 
 def _get_openai_relay_reasoning_effort() -> str:
-    return (os.getenv("OPENAI_RELAY_REASONING_EFFORT") or "xhigh").strip() or "xhigh"
+    configured = (os.getenv("OPENAI_RELAY_REASONING_EFFORT") or "").strip()
+    if configured:
+        return configured
+    return "low" if _openai_relay_uses_office_api() else "xhigh"
+
+
+def _openai_relay_merge_instructions_into_input() -> bool:
+    raw = (os.getenv("OPENAI_RELAY_MERGE_INSTRUCTIONS_INTO_INPUT") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return not _openai_relay_uses_office_api()
 
 
 def _openai_relay_reasoning_attempts() -> list[str]:
     configured = _get_openai_relay_reasoning_effort()
     attempts: list[str] = []
-    for effort in (configured, "medium", "minimal"):
+    fallbacks = ("low", "medium") if _openai_relay_uses_office_api() else ("medium", "minimal")
+    for effort in (configured, *fallbacks):
         value = str(effort or "").strip()
         if value and value not in attempts:
             attempts.append(value)
-    return attempts or ["minimal"]
+    return attempts or (["low"] if _openai_relay_uses_office_api() else ["minimal"])
 
 
 def _get_glm_api_key() -> str:
@@ -1025,7 +1043,7 @@ def _repair_schema_with_openai_relay(raw_payload: dict, max_tokens: int, target_
         endpoint_url=_get_openai_relay_responses_url(),
         reasoning_effort=_get_openai_relay_reasoning_effort(),
         store_response=False,
-        merge_instructions_into_input=True,
+        merge_instructions_into_input=_openai_relay_merge_instructions_into_input(),
     )
     if not _has_expected_script_shape(data):
         raise ValueError("API 中转 schema repair 后仍未返回符合要求的脚本结构")
@@ -1190,7 +1208,7 @@ def _request_json_from_openai_relay(user_prompt: str, max_tokens: int, enable_we
                 endpoint_url=_get_openai_relay_responses_url(),
                 reasoning_effort=reasoning_effort,
                 store_response=False,
-                merge_instructions_into_input=True,
+                merge_instructions_into_input=_openai_relay_merge_instructions_into_input(),
             )
             break
         except (requests.HTTPError, requests.Timeout, requests.ConnectionError) as exc:
@@ -1580,6 +1598,17 @@ def _request_json_from_claude(user_prompt: str, max_tokens: int, enable_web_sear
 
 
 def _normalize_script_model_provider(provider: str | None) -> str:
+    forced = ""
+    for env_key in SCRIPT_MODEL_FORCE_ENV_KEYS:
+        forced = str(os.getenv(env_key) or "").strip().lower()
+        if forced:
+            break
+    if forced in {"api", "relay", "api_relay", "openai_relay", "office_api", "unified"}:
+        return SCRIPT_MODEL_API_RELAY
+    if forced in {"local", "local_qwen", "qwen", "qwen_local", "ollama"}:
+        return SCRIPT_MODEL_LOCAL_QWEN
+    if forced in {"claude", "anthropic"}:
+        return SCRIPT_MODEL_CLAUDE
     requested = str(provider or "").strip().lower()
     if requested == SCRIPT_MODEL_LOCAL_QWEN:
         return SCRIPT_MODEL_LOCAL_QWEN

@@ -22,6 +22,27 @@ from urllib.parse import parse_qs, parse_qsl, quote_plus, unquote, urlencode, ur
 from xml.etree import ElementTree as ET
 
 import requests
+from dotenv import dotenv_values, load_dotenv
+
+load_dotenv(override=False)
+for _key, _value in dotenv_values().items():
+    if _key in {
+        "FORCE_SCRIPT_MODEL_PROVIDER",
+        "SCRIPT_MODEL_FORCE_PROVIDER",
+        "OPENAI_RELAY_API_KEY",
+        "SUB2API_API_KEY",
+        "API_RELAY_OPENAI_API_KEY",
+        "OPENAI_RELAY_BASE_URL",
+        "OPENAI_RELAY_MODEL",
+        "OPENAI_RELAY_REASONING_EFFORT",
+        "OPENNEWS_MODEL_PROVIDER",
+        "OPENNEWS_TEXT_MODEL_PROVIDER",
+        "OPENNEWS_RELAY_MODEL",
+        "OPENAI_RELAY_OPENNEWS_MODEL",
+        "OPENNEWS_RELAY_REASONING_EFFORT",
+        "OPENAI_RELAY_OPENNEWS_REASONING_EFFORT",
+    } and _value is not None:
+        os.environ[_key] = _value
 
 try:
     import anthropic
@@ -47,6 +68,10 @@ def _get_openai_relay_api_key() -> str:
 
 def _get_openai_relay_base_url() -> str:
     return (os.getenv("OPENAI_RELAY_BASE_URL") or "https://sub2api.ihousejapan.cn").strip().rstrip("/")
+
+
+def _opennews_relay_uses_office_api() -> bool:
+    return "api.office.ihousejapan.cn" in _get_openai_relay_base_url().lower()
 
 
 def _get_openai_relay_responses_url() -> str:
@@ -103,8 +128,8 @@ def _get_opennews_relay_reasoning_effort() -> str:
     return (
         os.getenv("OPENAI_RELAY_OPENNEWS_REASONING_EFFORT")
         or os.getenv("OPENNEWS_RELAY_REASONING_EFFORT")
-        or "medium"
-    ).strip() or "medium"
+        or ("low" if _opennews_relay_uses_office_api() else "medium")
+    ).strip() or ("low" if _opennews_relay_uses_office_api() else "medium")
 
 
 def _get_opennews_relay_timeout_seconds() -> int:
@@ -120,6 +145,17 @@ def _get_opennews_relay_timeout_seconds() -> int:
 
 
 def _get_opennews_model_provider() -> str:
+    forced = (
+        os.getenv("FORCE_SCRIPT_MODEL_PROVIDER")
+        or os.getenv("SCRIPT_MODEL_FORCE_PROVIDER")
+        or ""
+    ).strip().lower()
+    if forced in {"api", "relay", "api_relay", "openai_relay", "office_api", "unified"}:
+        return "relay"
+    if forced in {"local", "local_qwen", "qwen", "qwen_local", "ollama"}:
+        return "local_qwen"
+    if forced in {"claude", "anthropic"}:
+        return "claude"
     explicit = (
         os.getenv("OPENNEWS_TEXT_MODEL_PROVIDER")
         or os.getenv("OPENNEWS_MODEL_PROVIDER")
@@ -337,7 +373,12 @@ video_title, summary, script, material_keywords, material_visual_plan, fact_chec
                 response = requests.post(
                     _get_openai_relay_responses_url(),
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json=_opennews_relay_request_payload(model, repair_prompt, max_output_tokens=4096, effort="minimal"),
+                    json=_opennews_relay_request_payload(
+                        model,
+                        repair_prompt,
+                        max_output_tokens=4096,
+                        effort="low" if _opennews_relay_uses_office_api() else "minimal",
+                    ),
                     timeout=_get_opennews_relay_timeout_seconds(),
                 )
                 if response.status_code >= 400:
@@ -583,8 +624,9 @@ def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) 
     if not api_key:
         raise RuntimeError("未配置 OPENAI_RELAY_API_KEY，无法生成新闻稿")
     efforts = [_get_opennews_relay_reasoning_effort()]
-    if efforts[0] != "minimal":
-        efforts.append("minimal")
+    fallback_effort = "low" if _opennews_relay_uses_office_api() else "minimal"
+    if efforts[0] != fallback_effort:
+        efforts.append(fallback_effort)
     last_error: Exception | None = None
     for model in _get_opennews_relay_model_attempts():
         for effort in efforts:

@@ -1,0 +1,19 @@
+[Unit]
+Description=iHouse Qwen3 TTS local service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/saita/qwen3-tts-service
+Environment=PYTHONUNBUFFERED=1
+Environment=CUDA_VISIBLE_DEVICES=0
+Environment=QWEN3_TTS_API_TOKEN=local-qwen3-tts-5090
+ExecStartPre=/usr/bin/nvidia-smi
+ExecStart=/home/saita/qwen3-tts-service/start.sh
+Restart=no
+
+[Install]
+WantedBy=default.target

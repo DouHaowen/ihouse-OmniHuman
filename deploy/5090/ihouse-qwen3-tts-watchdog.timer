@@ -1,11 +1,12 @@
 [Unit]
-Description=Run iHouse Qwen3-TTS watchdog every minute
+Description=Run iHouse Qwen3-TTS watchdog after warmup
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=1min
+OnActiveSec=2min
+OnUnitActiveSec=2min
 Unit=ihouse-qwen3-tts-watchdog.service
-Persistent=true
+Persistent=false
 
 [Install]
 WantedBy=timers.target

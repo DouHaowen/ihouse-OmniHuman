@@ -52,7 +52,7 @@ def main() -> int:
     digital_dir = output_dir / "digital_human"
     digital_dir.mkdir(parents=True, exist_ok=True)
 
-    profile_result = _switch_5090_gpu_profile("digital", reason=f"manual restore {output_dir.name}")
+    profile_result = _switch_5090_gpu_profile("digital_intro", reason=f"manual restore {output_dir.name}")
     print(json.dumps({"profile_switch": profile_result}, ensure_ascii=False))
 
     try:

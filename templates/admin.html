@@ -33,7 +33,6 @@
     .grid { display:grid; gap:16px; }
     .kpis { grid-template-columns:repeat(4,minmax(0,1fr)); }
     .overview-grid { grid-template-columns:repeat(3,minmax(0,1fr)); align-items:start; }
-    .finance-grid { grid-template-columns:0.9fr 1.1fr; align-items:start; }
     .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); padding:18px; }
     .label { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); font-weight:800; margin-bottom:8px; }
     .value { font-size:28px; font-weight:900; line-height:1.15; }
@@ -63,36 +62,12 @@
     .focus-metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
     .focus-item { border:1px solid var(--line); border-radius:18px; background:rgba(248,251,250,0.92); padding:14px; display:grid; gap:6px; }
     .focus-item strong { font-size:20px; line-height:1.2; }
-    .avatar-lab-card { display:grid; gap:16px; }
-    .avatar-lab-card.is-busy { opacity:0.72; }
-    .avatar-lab-card.is-busy .btn, .avatar-lab-card.is-busy input, .avatar-lab-card.is-busy select, .avatar-lab-card.is-busy textarea { pointer-events:none; }
-    .avatar-lab-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-    .avatar-lab-field { display:grid; gap:8px; }
-    .avatar-lab-field label { font-weight:800; color:var(--ink); font-size:13px; }
-    .avatar-lab-field input[type="text"], .avatar-lab-field select, .avatar-lab-field textarea { width:100%; border:1px solid var(--line); border-radius:18px; background:#fff; color:var(--ink); padding:12px 14px; font:inherit; outline:none; }
-    .avatar-lab-field textarea { min-height:110px; resize:vertical; }
-    .avatar-lab-field input[type="file"] { width:100%; }
-    .avatar-lab-inline { display:flex; flex-wrap:wrap; gap:10px; }
-    .avatar-lab-check { display:inline-flex; align-items:center; gap:8px; padding:8px 12px; border:1px solid var(--line); border-radius:999px; background:rgba(248,251,250,0.92); font-weight:700; color:var(--ink); }
-    .avatar-lab-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; justify-content:space-between; }
-    .avatar-lab-status { display:grid; gap:8px; }
-    .avatar-candidate-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,200px)); gap:12px; justify-content:start; }
-    .avatar-candidate-card { border:1px solid var(--line); border-radius:22px; overflow:hidden; background:#fff; display:grid; gap:10px; max-width:200px; }
-    .avatar-candidate-thumb { width:100%; aspect-ratio: 9 / 16; object-fit:cover; background:#eef3f2; display:block; }
-    .avatar-candidate-body { padding:12px 12px 14px; display:grid; gap:8px; }
-    .avatar-candidate-title { font-weight:800; }
-    .avatar-candidate-meta { color:var(--muted); font-size:13px; line-height:1.5; word-break:break-word; }
-    .avatar-candidate-actions { display:flex; gap:8px; flex-wrap:wrap; }
     .btn-ghost { background:#f7faf9; color:var(--ink); }
     .btn:disabled { opacity:0.55; cursor:not-allowed; box-shadow:none; }
-    .avatar-lab-card .btn-primary:disabled { background:#b9c6c3 !important; color:#ffffff !important; opacity:1; }
-    .avatar-lab-card button:disabled { pointer-events:none; }
-    .cost-bar { height:10px; background:#ecf5f3; border-radius:999px; overflow:hidden; margin-top:12px; }
-    .cost-bar-fill { height:100%; border-radius:999px; background:linear-gradient(90deg, var(--brand), #53b9ad); }
     .stat-row { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
     .stat-percent { color:var(--muted); font-weight:700; white-space:nowrap; }
     .empty { border:1px dashed var(--line); border-radius:18px; padding:16px; color:var(--muted); text-align:center; }
-    @media (max-width: 1100px) { .kpis, .overview-grid, .finance-grid, .focus-metrics, .avatar-lab-grid, .avatar-candidate-grid { grid-template-columns:1fr; } }
+    @media (max-width: 1100px) { .kpis, .overview-grid, .focus-metrics { grid-template-columns:1fr; } }
     @media (max-width: 720px) { .page { padding:10px; } .topbar { flex-direction:column; align-items:stretch; } }
   </style>
 </head>
@@ -104,7 +79,7 @@
           <div class="brand-mark">IH</div>
           <div class="brand-copy">
             <strong>iHouse 管理员看板</strong>
-            <span>实时查看系统状态、数字人队列、员工状态、最新动态与费用</span>
+            <span>实时查看系统状态、数字人队列、员工状态与最新动态</span>
           </div>
         </div>
         <div class="top-actions">
@@ -124,7 +99,6 @@
             <div class="segmented" id="viewTabs">
               <button class="segment-btn active" type="button" data-view="overview">实时总览</button>
               <button class="segment-btn" type="button" data-view="team">员工状态</button>
-              <button class="segment-btn" type="button" data-view="finance">费用统计</button>
             </div>
           </div>
           <div class="focus-metrics" id="focusMetrics"></div>
@@ -156,82 +130,7 @@
               <div class="feed" id="userFeed"></div>
             </section>
           </section>
-          <section class="view-panel" id="view-finance">
-            <div class="grid finance-grid">
-              <section class="card">
-                <div class="label">费用构成</div>
-                <div class="helper" style="margin-bottom:12px;">按当前真实价格规则查看费用构成：Claude 按官方 token 与联网搜索价格，MiniMax 按 speech-2.8-hd 字符价格，OmniHuman 按 1 元/秒折算；Pexels、TOS 与自动成片当前不计入。</div>
-                <div class="segmented" id="costRangeTabs" style="margin-bottom:12px;">
-                  <button class="segment-btn active" type="button" data-range="today">今日</button>
-                  <button class="segment-btn" type="button" data-range="month">本月</button>
-                  <button class="segment-btn" type="button" data-range="total">累计</button>
-                </div>
-                <div class="stats" id="costBreakdownGrid"></div>
-              </section>
-              <section class="card">
-                <div class="label">账号统计与费用</div>
-                <div class="helper" style="margin-bottom:12px;">当前统一按美元展示：Claude 按官方 API 价格、MiniMax 按 speech-2.8-hd 字符价格、OmniHuman 按 1 元/秒并按 1 USD≈7.2 CNY 折算；Pexels、TOS 与自动成片暂不计入。</div>
-                <div class="stats" id="statsGrid"></div>
-              </section>
-            </div>
-          </section>
         </div>
-        <section class="card avatar-lab-card" id="avatarLabCard">
-          <div class="view-switch">
-            <div>
-              <div class="label">主播图实验室</div>
-              <div class="helper" style="margin-top:0;">上传一张参考人脸，生成 9:16 竖版主播候选图，选中后直接入库到系统主播列表。</div>
-            </div>
-            <div class="chip">仅管理员可用</div>
-          </div>
-          <form id="avatarLabForm" class="avatar-lab-card">
-            <div class="avatar-lab-grid">
-              <div class="avatar-lab-field">
-                <label for="avatarLabImage">参考人脸照片</label>
-                <input id="avatarLabImage" type="file" accept="image/*" required />
-              </div>
-              <div class="avatar-lab-field">
-                <label for="avatarLabName">主播名称</label>
-                <input id="avatarLabName" type="text" placeholder="例如：女主播B" value="新主播" />
-              </div>
-              <div class="avatar-lab-field">
-                <label for="avatarLabGender">人物性别</label>
-                <select id="avatarLabGender">
-                  <option value="female">女性主播</option>
-                  <option value="male">男性主播</option>
-                </select>
-              </div>
-              <div class="avatar-lab-field">
-                <label for="avatarLabCount">生成候选数</label>
-                <select id="avatarLabCount">
-                  <option value="3" selected>3 张</option>
-                  <option value="2">2 张</option>
-                  <option value="1">1 张</option>
-                </select>
-              </div>
-            </div>
-            <div class="avatar-lab-field">
-              <label>可用市场</label>
-              <div class="avatar-lab-inline" id="avatarLabMarkets">
-                <label class="avatar-lab-check"><input type="checkbox" value="cn" checked> 中国市场</label>
-                <label class="avatar-lab-check"><input type="checkbox" value="tw" checked> 台湾市场</label>
-                <label class="avatar-lab-check"><input type="checkbox" value="jp" checked> 日本市场</label>
-              </div>
-            </div>
-            <div class="avatar-lab-field">
-              <label for="avatarLabStyleNote">风格补充要求</label>
-              <textarea id="avatarLabStyleNote">一位AI新闻主播，图片2，身穿简洁修身的白色衬衫，领口整洁，外搭浅灰色小西装外套，整体着装正式干练，职场感十足，半身坐姿，双手自然交叠放于浅色书桌前，直视镜头，神态自信亲切。背景为温馨家庭直播室风格，暖白色调，柔和自然光线从右侧窗户洒入，后方可见整洁的木色书架，书架上摆放着几本书和绿植盆栽，环境体现静谧与成长感。桌面上放置一块精致的亚克力台卡牌，卡台正面有清晰的公司iHouse logo。图片1图案，卡片造型简洁专业，摆放位置在桌面右前方，自然融入画面。柔和温暖的正面补光，背景虚化处理，人物主体清晰突出，写实摄影风格，高清质感，画面整体氛围温馨专业。</textarea>
-            </div>
-            <div class="avatar-lab-actions">
-              <button class="btn btn-primary" type="submit" id="avatarLabSubmit">生成主播图</button>
-              <div class="helper" id="avatarLabHint" style="margin:0;">默认会按 9:16 竖版生成，完成后可直接保存到主播库。</div>
-            </div>
-          </form>
-          <div class="avatar-lab-status" id="avatarLabStatus">
-            <div class="empty">还没有开始生成主播图。</div>
-          </div>
-          <div class="avatar-candidate-grid" id="avatarCandidateGrid"></div>
-        </section>
       </div>
     </div>
   </div>
@@ -240,36 +139,15 @@
       sessionUser: document.getElementById('sessionUser'),
       logoutBtn: document.getElementById('logoutBtn'),
       kpiGrid: document.getElementById('kpiGrid'),
-      avatarLabForm: document.getElementById('avatarLabForm'),
-      avatarLabCard: document.getElementById('avatarLabCard'),
-      avatarLabImage: document.getElementById('avatarLabImage'),
-      avatarLabName: document.getElementById('avatarLabName'),
-      avatarLabGender: document.getElementById('avatarLabGender'),
-      avatarLabCount: document.getElementById('avatarLabCount'),
-      avatarLabStyleNote: document.getElementById('avatarLabStyleNote'),
-      avatarLabMarkets: document.getElementById('avatarLabMarkets'),
-      avatarLabSubmit: document.getElementById('avatarLabSubmit'),
-      avatarLabHint: document.getElementById('avatarLabHint'),
-      avatarLabStatus: document.getElementById('avatarLabStatus'),
-      avatarCandidateGrid: document.getElementById('avatarCandidateGrid'),
       queueFeed: document.getElementById('queueFeed'),
       taskFeed: document.getElementById('taskFeed'),
       userFeed: document.getElementById('userFeed'),
-      statsGrid: document.getElementById('statsGrid'),
-      costBreakdownGrid: document.getElementById('costBreakdownGrid'),
-      costRangeTabs: document.getElementById('costRangeTabs'),
       eventFeed: document.getElementById('eventFeed'),
       viewTabs: document.getElementById('viewTabs'),
       focusMetrics: document.getElementById('focusMetrics'),
     };
     let liveTimer = null;
-    let statsTimer = null;
-    let avatarLabTimer = null;
-    let currentAvatarJobId = '';
-    let activeCostRange = 'today';
     let activeView = 'overview';
-    let costBreakdownExpanded = false;
-    let accountStatsExpanded = false;
 
     function escapeHtml(value = '') {
       return String(value)
@@ -282,11 +160,7 @@
 
     function stopTimers() {
       if (liveTimer) clearInterval(liveTimer);
-      if (statsTimer) clearInterval(statsTimer);
-      if (avatarLabTimer) clearInterval(avatarLabTimer);
       liveTimer = null;
-      statsTimer = null;
-      avatarLabTimer = null;
     }
 
     function formatTime(ts) {
@@ -318,11 +192,6 @@
           { label: '今日完成任务', value: String(summary.completed_today || 0), note: '按历史记录统计' },
           { label: '当前执行账号', value: currentOwner, note: '便于定位谁占用通道' },
         ],
-        finance: [
-          { label: '当前运行任务', value: String(summary.running_task_count || 0), note: '当前并发情况' },
-          { label: '数字人排队数', value: String(summary.waiting_queue_count || 0), note: '辅助判断峰值压力' },
-          { label: '今日完成任务', value: String(summary.completed_today || 0), note: '今日新增落盘任务' },
-        ],
       };
       const items = itemsByView[activeView] || itemsByView.overview;
       els.focusMetrics.innerHTML = items.map(item => `
@@ -332,219 +201,6 @@
           <div class="meta">${escapeHtml(item.note)}</div>
         </div>
       `).join('');
-    }
-
-    function selectedAvatarMarkets() {
-      return Array.from(els.avatarLabMarkets?.querySelectorAll('input[type="checkbox"]:checked') || []).map(item => item.value);
-    }
-
-    function applyGenderMarketRules() {
-      const gender = els.avatarLabGender?.value || 'female';
-      const checkboxes = Array.from(els.avatarLabMarkets?.querySelectorAll('input[type="checkbox"]') || []);
-      if (gender === 'male') {
-        checkboxes.forEach(box => {
-          box.checked = box.value === 'cn';
-          box.disabled = box.value !== 'cn';
-        });
-        if (els.avatarLabHint) {
-          els.avatarLabHint.textContent = '男性主播图当前仅建议用于中国市场，系统会自动锁定中国市场。';
-        }
-      } else {
-        checkboxes.forEach(box => {
-          box.disabled = false;
-          box.checked = true;
-        });
-        if (els.avatarLabHint) {
-          els.avatarLabHint.textContent = '默认会按 9:16 竖版生成，完成后可直接保存到主播库。';
-        }
-      }
-    }
-
-    function setAvatarLabStatus(message, tone = 'normal') {
-      if (!els.avatarLabStatus) return;
-      const color = tone === 'error' ? 'var(--brand)' : tone === 'success' ? 'var(--brand)' : 'var(--muted)';
-      els.avatarLabStatus.innerHTML = `<div class="empty" style="border-style:solid; color:${color};">${escapeHtml(message)}</div>`;
-    }
-
-    function setAvatarLabSubmitState(locked, label) {
-      if (!els.avatarLabSubmit) return;
-      els.avatarLabSubmit.disabled = !!locked;
-      els.avatarLabSubmit.textContent = label || '生成主播图';
-    }
-
-    function setAvatarLabFormLocked(locked) {
-      if (!els.avatarLabForm) return;
-      els.avatarLabCard?.classList.toggle('is-busy', !!locked);
-      els.avatarLabForm.querySelectorAll('input, select, textarea, button').forEach(node => {
-        if (node.id === 'avatarLabSubmit') return;
-        node.disabled = !!locked;
-      });
-      setAvatarLabSubmitState(locked, locked ? '生成中...' : '生成主播图');
-    }
-
-    function renderAvatarCandidates(job) {
-      const candidates = Array.isArray(job?.candidates) ? job.candidates : [];
-      if (!candidates.length) {
-        els.avatarCandidateGrid.innerHTML = '';
-        return;
-      }
-      els.avatarCandidateGrid.innerHTML = candidates.map(item => `
-        <article class="avatar-candidate-card">
-          <img class="avatar-candidate-thumb" src="${escapeHtml(item.url || '')}" alt="主播候选图">
-          <div class="avatar-candidate-body">
-            <div class="avatar-candidate-title">${escapeHtml(item.filename || '候选图')}</div>
-            <div class="avatar-candidate-meta">9:16 竖版候选图</div>
-            <div class="avatar-candidate-actions">
-              <button type="button" class="btn btn-primary avatar-import-btn" data-filename="${escapeHtml(item.filename || '')}">保存到主播库</button>
-              <button type="button" class="btn btn-ghost avatar-delete-btn" data-filename="${escapeHtml(item.filename || '')}">删除图片</button>
-            </div>
-          </div>
-        </article>
-      `).join('');
-      els.avatarCandidateGrid.querySelectorAll('.avatar-import-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          btn.disabled = true;
-          const previous = btn.textContent;
-          btn.textContent = '保存中...';
-          try {
-            await importAvatarCandidate(btn.dataset.filename || '');
-            btn.textContent = '已保存';
-          } catch (error) {
-            setAvatarLabStatus(error.message || '保存主播图失败', 'error');
-            btn.textContent = previous;
-          } finally {
-            btn.disabled = false;
-          }
-        });
-      });
-      els.avatarCandidateGrid.querySelectorAll('.avatar-delete-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          const filename = btn.dataset.filename || '';
-          if (!filename) return;
-          if (!window.confirm(`确定删除候选图 ${filename} 吗？`)) return;
-          btn.disabled = true;
-          const previous = btn.textContent;
-          btn.textContent = '删除中...';
-          try {
-            await deleteAvatarCandidate(filename);
-            btn.textContent = '已删除';
-          } catch (error) {
-            setAvatarLabStatus(error.message || '删除主播图失败', 'error');
-            btn.textContent = previous;
-          } finally {
-            btn.disabled = false;
-          }
-        });
-      });
-    }
-
-    async function loadAvatarJob(jobId) {
-      const res = await fetch(`/api/admin/avatar-lab/jobs/${encodeURIComponent(jobId)}`);
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(payload.error || '主播图任务加载失败');
-      }
-      return await res.json();
-    }
-
-    async function loadLatestAvatarJob() {
-      const res = await fetch('/api/admin/avatar-lab/jobs/latest');
-      if (res.status === 404) return null;
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(payload.error || '主播图任务加载失败');
-      }
-      return await res.json();
-    }
-
-    function stopAvatarJobPolling() {
-      if (avatarLabTimer) clearInterval(avatarLabTimer);
-      avatarLabTimer = null;
-    }
-
-    function startAvatarJobPolling(jobId) {
-      currentAvatarJobId = jobId;
-      stopAvatarJobPolling();
-      avatarLabTimer = setInterval(async () => {
-        try {
-          const job = await loadAvatarJob(jobId);
-          renderAvatarJob(job);
-          if (job.status === 'done' || job.status === 'error') {
-            stopAvatarJobPolling();
-          }
-        } catch (error) {
-          setAvatarLabStatus(error.message || '主播图任务轮询失败', 'error');
-          stopAvatarJobPolling();
-        }
-      }, 2500);
-    }
-
-    function renderAvatarJob(job) {
-      if (!job) {
-        setAvatarLabStatus('还没有开始生成主播图。');
-        setAvatarLabFormLocked(false);
-        els.avatarCandidateGrid.innerHTML = '';
-        return;
-      }
-      if (job.status === 'pending' || job.status === 'running') {
-        setAvatarLabStatus(job.message || '正在生成主播候选图...');
-        setAvatarLabFormLocked(true);
-        els.avatarCandidateGrid.innerHTML = '';
-        return;
-      }
-      if (job.status === 'error') {
-        setAvatarLabStatus(job.error || '主播图生成失败', 'error');
-        setAvatarLabFormLocked(false);
-        els.avatarCandidateGrid.innerHTML = '';
-        return;
-      }
-      setAvatarLabStatus(job.message || '主播候选图已生成', 'success');
-      setAvatarLabFormLocked(false);
-      renderAvatarCandidates(job);
-    }
-
-    async function importAvatarCandidate(filename) {
-      if (!currentAvatarJobId || !filename) return;
-      const formData = new FormData();
-      formData.append('filename', filename);
-      formData.append('display_name', els.avatarLabName?.value || '');
-      formData.append('gender', els.avatarLabGender?.value || 'female');
-      formData.append('target_markets', selectedAvatarMarkets().join(','));
-      formData.append('style_note', els.avatarLabStyleNote?.value || '');
-      const res = await fetch(`/api/admin/avatar-lab/jobs/${encodeURIComponent(currentAvatarJobId)}/import`, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || '保存主播图失败');
-      }
-      setAvatarLabStatus(`已保存到主播库：${data.avatar?.name || data.avatar?.id || filename}`, 'success');
-      if (Array.isArray(data.candidates)) {
-        renderAvatarJob({
-          job_id: currentAvatarJobId,
-          status: 'done',
-          message: data.candidates.length ? '主播候选图已更新' : '主播候选图已全部保存到主播库',
-          candidates: data.candidates,
-        });
-      }
-    }
-
-    async function deleteAvatarCandidate(filename) {
-      if (!currentAvatarJobId || !filename) return;
-      const res = await fetch(`/api/admin/avatar-lab/jobs/${encodeURIComponent(currentAvatarJobId)}/candidates/${encodeURIComponent(filename)}`, {
-        method: 'DELETE',
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || '删除主播图失败');
-      }
-      renderAvatarJob({
-        ...data,
-        job_id: currentAvatarJobId,
-        status: 'done',
-        message: '主播候选图已更新',
-      });
     }
 
     async function ensureAdmin() {
@@ -641,104 +297,11 @@
       `).join('') : `<div class="empty">最近还没有新的系统动态。</div>`;
     }
 
-    function formatEstimatedCost(value) {
-      return `$${Number(value || 0).toFixed(3)}`;
-    }
-
-    function costRangeLabel(range) {
-      return range === 'today' ? '今日估算' : range === 'month' ? '本月估算' : '累计估算';
-    }
-
-    function costRangeValue(item, range) {
-      if (range === 'today') return Number(item?.today_total || 0);
-      if (range === 'month') return Number(item?.month_total || 0);
-      return Number(item?.estimated_total || item?.estimated_cost_total || 0);
-    }
-
-    function renderCostRangeTabs() {
-      if (!els.costRangeTabs) return;
-      els.costRangeTabs.querySelectorAll('[data-range]').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.range === activeCostRange);
-      });
-    }
-
-    function renderExpandButton(id, expanded, hiddenCount, expandLabel, collapseLabel) {
-      if (hiddenCount > 0) {
-        return `<button class="btn" type="button" id="${id}" style="margin-top:8px;">${expanded ? collapseLabel : `${expandLabel}（还有 ${hiddenCount} 条）`}</button>`;
-      }
-      if (expanded) {
-        return `<button class="btn" type="button" id="${id}" style="margin-top:8px;">${collapseLabel}</button>`;
-      }
-      return '';
-    }
-
-    function renderStats(data) {
-      const users = Array.isArray(data?.users) ? data.users : [];
-      const breakdown = Array.isArray(data?.cost_breakdown) ? data.cost_breakdown : [];
-      renderCostRangeTabs();
-      const totalForRange = breakdown.reduce((sum, item) => sum + costRangeValue(item, activeCostRange), 0);
-      const visibleBreakdown = costBreakdownExpanded ? breakdown : breakdown.slice(0, 4);
-      const hiddenBreakdown = Math.max(0, breakdown.length - visibleBreakdown.length);
-      els.costBreakdownGrid.innerHTML = breakdown.length ? visibleBreakdown.map(item => {
-        const primary = costRangeValue(item, activeCostRange);
-        const percent = totalForRange > 0 ? (primary / totalForRange) * 100 : 0;
-        return `
-        <div class="stat-card">
-          <div class="stat-row">
-            <div class="stat-name">${escapeHtml(item.label || item.event_type)}</div>
-            <div class="stat-percent">${escapeHtml(percent.toFixed(1))}%</div>
-          </div>
-          <div class="stat-head" style="margin-top:8px;">
-            <div>
-              <div class="stat-sub">今日 ${escapeHtml(formatEstimatedCost(item.today_total || 0))} · 本月 ${escapeHtml(formatEstimatedCost(item.month_total || 0))}</div>
-            </div>
-            <div class="stat-count">${escapeHtml(formatEstimatedCost(primary))}</div>
-          </div>
-          <div class="cost-bar"><div class="cost-bar-fill" style="width:${percent.toFixed(2)}%"></div></div>
-          <div class="stat-sub">当前视图：${escapeHtml(costRangeLabel(activeCostRange))}</div>
-        </div>`;
-      }).join('') + renderExpandButton('costBreakdownExpandBtn', costBreakdownExpanded, hiddenBreakdown, '展开更多费用项', '收起费用项') : `<div class="empty">暂无费用构成数据。</div>`;
-      const visibleUsers = accountStatsExpanded ? users : users.slice(0, 5);
-      const hiddenUsers = Math.max(0, users.length - visibleUsers.length);
-      els.statsGrid.innerHTML = users.length ? visibleUsers.map(item => {
-        const primary = activeCostRange === 'today' ? Number(item.today_total || 0) : activeCostRange === 'month' ? Number(item.month_total || 0) : Number(item.estimated_cost_total || 0);
-        return `
-        <div class="stat-card">
-          <div class="stat-head">
-            <div>
-              <div class="stat-name">${escapeHtml(item.display_name || item.username)}</div>
-              <div class="stat-sub">今日 ${escapeHtml(formatEstimatedCost(item.today_total || 0))} · 本月 ${escapeHtml(formatEstimatedCost(item.month_total || 0))}</div>
-            </div>
-            <div class="stat-count">${escapeHtml(String(item.count || 0))} 条 · ${escapeHtml(formatEstimatedCost(primary))}</div>
-          </div>
-          <div class="stat-sub">当前视图：${escapeHtml(costRangeLabel(activeCostRange))}</div>
-          <div class="history-list">
-            ${(item.histories || []).length ? item.histories.slice(0, 5).map(history => `<div class="history-item">${escapeHtml(history.title || history.topic || history.history_id)} · ${escapeHtml(formatEstimatedCost(history.estimated_cost_total || 0))}</div>`).join('') : `<div class="history-item">暂无记录</div>`}
-          </div>
-        </div>`;
-      }).join('') + renderExpandButton('accountStatsExpandBtn', accountStatsExpanded, hiddenUsers, '展开更多账号', '收起账号列表') : `<div class="empty">暂无账号统计。</div>`;
-      document.getElementById('costBreakdownExpandBtn')?.addEventListener('click', () => {
-        costBreakdownExpanded = !costBreakdownExpanded;
-        renderStats(data);
-      });
-      document.getElementById('accountStatsExpandBtn')?.addEventListener('click', () => {
-        accountStatsExpanded = !accountStatsExpanded;
-        renderStats(data);
-      });
-    }
-
     async function loadLive() {
       const res = await fetch('/api/admin/live-status');
       if (res.status === 401 || res.status === 403) { window.location.replace('/?logged_out=' + Date.now()); return; }
       const data = await res.json();
       if (res.ok) renderLive(data);
-    }
-
-    async function loadStats() {
-      const res = await fetch('/api/admin/stats');
-      if (res.status === 401 || res.status === 403) { window.location.replace('/?logged_out=' + Date.now()); return; }
-      const data = await res.json();
-      if (res.ok) renderStats(data);
     }
 
     function logout() {
@@ -749,92 +312,17 @@
     async function init() {
       const user = await ensureAdmin();
       if (!user) return;
-      applyGenderMarketRules();
-      setAvatarLabStatus('还没有开始生成主播图。');
       renderViewTabs();
       try { await loadLive(); } catch (_) {}
-      try { await loadStats(); } catch (_) {}
-      try {
-        const latestAvatarJob = await loadLatestAvatarJob();
-        if (latestAvatarJob) {
-          currentAvatarJobId = latestAvatarJob.job_id || '';
-          renderAvatarJob(latestAvatarJob);
-          if (latestAvatarJob.status === 'pending' || latestAvatarJob.status === 'running') {
-            startAvatarJobPolling(latestAvatarJob.job_id);
-          }
-        }
-      } catch (error) {
-        setAvatarLabStatus(error.message || '主播图任务加载失败', 'error');
-      }
       liveTimer = setInterval(loadLive, 3000);
-      statsTimer = setInterval(loadStats, 15000);
     }
 
     els.logoutBtn.addEventListener('click', logout);
-    els.avatarLabGender?.addEventListener('change', applyGenderMarketRules);
-    els.avatarLabForm?.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      let submissionAccepted = false;
-      if (els.avatarLabSubmit?.disabled) {
-        setAvatarLabStatus('主播图正在生成中，请先等当前任务完成。', 'error');
-        return;
-      }
-      const currentStatus = (els.avatarLabStatus?.textContent || '').trim();
-      if (currentStatus.includes('正在生成主播候选图') || currentStatus.includes('正在调用 Seedream') || currentStatus.includes('生成中...')) {
-        setAvatarLabStatus('主播图正在生成中，请先等当前任务完成。', 'error');
-        return;
-      }
-      if (!els.avatarLabImage?.files?.length) {
-        setAvatarLabStatus('请先上传一张参考人脸图片。', 'error');
-        return;
-      }
-      const file = els.avatarLabImage.files[0];
-      const formData = new FormData();
-      formData.append('reference_image', file);
-      formData.append('avatar_name', els.avatarLabName?.value || '新主播');
-      formData.append('gender', els.avatarLabGender?.value || 'female');
-      formData.append('target_markets', selectedAvatarMarkets().join(','));
-      formData.append('style_note', els.avatarLabStyleNote?.value || '');
-      formData.append('candidate_count', els.avatarLabCount?.value || '3');
-      setAvatarLabFormLocked(true);
-      setAvatarLabStatus('正在提交生成任务...');
-      try {
-        const res = await fetch('/api/admin/avatar-lab/generate', {
-          method: 'POST',
-          body: formData,
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          throw new Error(data.error || '主播图生成任务提交失败');
-        }
-        currentAvatarJobId = data.job_id || '';
-        submissionAccepted = true;
-        renderAvatarJob(data);
-        if (data.status === 'pending' || data.status === 'running') {
-          startAvatarJobPolling(data.job_id);
-        }
-      } catch (error) {
-        setAvatarLabStatus(error.message || '主播图生成失败', 'error');
-      } finally {
-        if (!submissionAccepted) {
-          setAvatarLabSubmitState(false, '生成主播图');
-        }
-      }
-    });
     els.viewTabs?.addEventListener('click', (event) => {
       const btn = event.target.closest('[data-view]');
       if (!btn) return;
       activeView = btn.dataset.view || 'overview';
       renderViewTabs();
-    });
-    els.costRangeTabs?.addEventListener('click', (event) => {
-      const btn = event.target.closest('[data-range]');
-      if (!btn) return;
-      activeCostRange = btn.dataset.range || 'today';
-      costBreakdownExpanded = false;
-      accountStatsExpanded = false;
-      renderCostRangeTabs();
-      loadStats();
     });
     init();
   </script>

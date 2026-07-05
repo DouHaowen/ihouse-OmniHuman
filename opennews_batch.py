@@ -20,6 +20,7 @@ DEFAULT_BATCH_CONFIG = {
     "enabled": False,
     "interval_minutes": 180,
     "category": "all",
+    "keyword": "",
     "time_range": "6h",
     "limit": 20,
     "last_run_at": 0,
@@ -245,6 +246,7 @@ def _normalize_config(config: dict | None) -> dict:
     clean["interval_minutes"] = interval if interval in VALID_INTERVALS else DEFAULT_BATCH_CONFIG["interval_minutes"]
     category = str(clean.get("category") or "all").strip().lower()
     clean["category"] = category if category in VALID_CATEGORIES else "all"
+    clean["keyword"] = str(clean.get("keyword") or clean.get("query") or "").strip()
     time_range = str(clean.get("time_range") or "6h").strip().lower()
     clean["time_range"] = time_range if time_range in VALID_TIME_RANGES else "6h"
     try:
@@ -274,7 +276,7 @@ def save_batch_config(root: Path, config: dict) -> dict:
     was_enabled = bool(previous.get("enabled"))
     schedule_changed = any(
         clean.get(key) != previous.get(key)
-        for key in ("interval_minutes", "category", "time_range", "limit")
+        for key in ("interval_minutes", "category", "keyword", "time_range", "limit")
     )
     if clean.get("enabled") and (not was_enabled or schedule_changed):
         # When an admin enables or retunes the scheduler from the UI, run a
@@ -626,7 +628,15 @@ def _notify_after_fetch(root: Path, payload: dict) -> None:
         pass
 
 
-def _candidate_payload(candidate: dict, *, batch_id: str, category: str, fetched_at: float) -> dict:
+def _candidate_payload(
+    candidate: dict,
+    *,
+    batch_id: str,
+    category: str,
+    fetched_at: float,
+    channel_id: str = "",
+    channel_name: str = "",
+) -> dict:
     item = dict(candidate)
     item_id = _candidate_key(item)
     item["id"] = str(item.get("id") or item_id)
@@ -634,6 +644,10 @@ def _candidate_payload(candidate: dict, *, batch_id: str, category: str, fetched
     item["batch_id"] = batch_id
     item["batch_category"] = category
     item["batch_fetched_at"] = fetched_at
+    if channel_id:
+        item["opennews_channel_id"] = channel_id
+    if channel_name:
+        item["opennews_channel_name"] = channel_name
     item["status"] = str(item.get("status") or "pending")
     return item
 
@@ -643,12 +657,17 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
     if not _RUN_LOCK.acquire(blocking=False):
         return {"ok": False, "running": True, "message": "热点批次抓取正在执行中，请稍后刷新。"}
     started_at = time.time()
-    batch_id = time.strftime("batch_%Y%m%d_%H%M%S")
     config = load_batch_config(root)
     if isinstance(override, dict):
         config.update({k: v for k, v in override.items() if v not in (None, "", [])})
         config = _normalize_config(config)
     category = str(config.get("category") or "all")
+    keyword = str(config.get("keyword") or config.get("query") or "").strip()
+    channel_id = re.sub(r"[^a-z0-9_-]+", "_", str(config.get("channel_id") or config.get("opennews_channel_id") or "").strip().lower()).strip("_")
+    channel_name = str(config.get("channel_name") or config.get("opennews_channel_name") or "").strip()
+    batch_id = time.strftime("batch_%Y%m%d_%H%M%S")
+    if channel_id:
+        batch_id = f"{batch_id}_{channel_id}"
     time_range = str(config.get("time_range") or "6h")
     limit = int(config.get("limit") or 20)
     payload = {
@@ -657,6 +676,9 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
         "started_at": started_at,
         "finished_at": 0,
         "category": category,
+        "keyword": keyword,
+        "opennews_channel_id": channel_id,
+        "opennews_channel_name": channel_name,
         "time_range": time_range,
         "limit": limit,
         "items": [],
@@ -667,7 +689,7 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
     }
     try:
         fetch_limit = max(limit, min(FETCH_OVERFETCH_MAX, max(FETCH_OVERFETCH_MIN, limit * FETCH_OVERFETCH_MULTIPLIER)))
-        result = search_english_trends(category=category, time_range=time_range, keyword="", limit=fetch_limit)
+        result = search_english_trends(category=category, time_range=time_range, keyword=keyword, limit=fetch_limit)
         candidates = result.get("candidates") or []
         payload["raw_count"] = len(candidates)
         payload["source_limit"] = fetch_limit
@@ -756,7 +778,14 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
                         seen[existing_key]["seen_count"] = int(seen[existing_key].get("seen_count") or 1) + 1
                         seen[existing_key]["last_duplicate_reason"] = duplicate_reason
                     continue
-                item = _candidate_payload(candidate, batch_id=batch_id, category=category, fetched_at=started_at)
+                item = _candidate_payload(
+                    candidate,
+                    batch_id=batch_id,
+                    category=category,
+                    fetched_at=started_at,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                )
                 item["dedupe_key"] = key
                 item["url_key"] = url_key
                 item["title_key"] = title_key

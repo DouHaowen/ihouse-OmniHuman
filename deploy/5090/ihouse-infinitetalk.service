@@ -9,8 +9,12 @@ WorkingDirectory=/home/saita/InfiniteTalk
 Environment=INFINITETALK_AVATAR_BASE_DIR=/home/saita/InfiniteTalk
 Environment=INFINITETALK_AVATAR_CONDA_ENV=infinitetalk5090
 ExecStart=/home/saita/miniforge3/envs/infinitetalk5090/bin/python -m uvicorn infinitetalk_avatar_api_server:app --host 0.0.0.0 --port 8893
-Restart=always
-RestartSec=8
+Restart=on-failure
+RestartSec=20
+TimeoutStopSec=45
+KillMode=control-group
+SendSIGKILL=yes
+ExecStartPre=/home/saita/InfiniteTalk/cleanup_infinitetalk_processes.sh
+ExecStopPost=/home/saita/InfiniteTalk/cleanup_infinitetalk_processes.sh
 
-[Install]
-WantedBy=default.target
+# Controlled by ihouse-gpu-orchestrator.service; do not enable at boot.

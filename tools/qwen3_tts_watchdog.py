@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Watchdog for the 5090 local Qwen3-TTS service.
 
-Checks the TTS HTTP service for responsiveness. If health or voices endpoints
-hang/fail, restart the systemd user unit to recover from a stuck model process.
+Checks the TTS HTTP service for responsiveness. It intentionally does not call
+model-loading endpoints by default, because repeated cold model loads are risky
+on the 5090 driver stack.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ VOICES_TIMEOUT = max(5, int(os.getenv("QWEN3_TTS_WATCHDOG_VOICES_TIMEOUT", "25")
 POST_RESTART_WAIT = max(5, int(os.getenv("QWEN3_TTS_WATCHDOG_POST_RESTART_WAIT", "20") or "20"))
 RESTART_COOLDOWN_SECONDS = max(30, int(os.getenv("QWEN3_TTS_WATCHDOG_RESTART_COOLDOWN_SECONDS", "180") or "180"))
 STATE_PATH = Path(os.getenv("QWEN3_TTS_WATCHDOG_STATE", "/home/saita/qwen3-tts-service/watchdog_state.json"))
+CHECK_VOICES = (os.getenv("QWEN3_TTS_WATCHDOG_CHECK_VOICES", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+RESTART_ENABLED = (os.getenv("QWEN3_TTS_WATCHDOG_RESTART_ENABLED", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _now() -> float:
@@ -74,6 +77,19 @@ def _systemctl(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[st
     )
 
 
+def _gpu_available() -> bool:
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    return completed.returncode == 0 and bool((completed.stdout or "").strip())
+
+
 def _status_payload(ok: bool, *, message: str, restarted: bool = False, detail: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "ok": ok,
@@ -116,7 +132,8 @@ def _restart_service(reason: str, state: dict[str, Any]) -> dict[str, Any]:
     }
     try:
         detail["health"] = _check_health()
-        detail["voices"] = _check_voices()
+        if CHECK_VOICES:
+            detail["voices"] = _check_voices()
     except Exception as exc:
         detail["post_restart_error"] = str(exc)
         raise RuntimeError(f"{SERVICE_NAME} restarted but validation failed: {exc}") from exc
@@ -128,18 +145,40 @@ def _restart_service(reason: str, state: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     state = _load_state()
+    if not _gpu_available():
+        state["last_gpu_unavailable_at"] = _now()
+        _save_state(state)
+        print(json.dumps(_status_payload(False, message="gpu unavailable; watchdog skipped qwen3-tts restart"), ensure_ascii=False))
+        return 0
     try:
         health = _check_health()
-        voices = _check_voices()
+        voices: dict[str, Any] = {}
+        if CHECK_VOICES:
+            voices = _check_voices()
         state["last_ok_at"] = _now()
         _save_state(state)
-        print(json.dumps(_status_payload(True, message="qwen3-tts healthy", detail={"health": health, "voices_count": len(voices.get("speakers") or [])}), ensure_ascii=False))
+        detail = {"health": health}
+        if CHECK_VOICES:
+            detail["voices_count"] = len(voices.get("speakers") or [])
+        print(json.dumps(_status_payload(True, message="qwen3-tts healthy", detail=detail), ensure_ascii=False))
         return 0
     except Exception as exc:
         reason = str(exc)
+        if not _gpu_available():
+            state["last_gpu_unavailable_at"] = _now()
+            state["last_gpu_unavailable_reason"] = reason
+            _save_state(state)
+            print(json.dumps(_status_payload(False, message=f"gpu unavailable after health failure; skipped restart: {reason[:200]}"), ensure_ascii=False))
+            return 0
+        if not RESTART_ENABLED:
+            state["last_unhealthy_at"] = _now()
+            state["last_unhealthy_reason"] = reason
+            _save_state(state)
+            print(json.dumps(_status_payload(False, message=f"qwen3-tts unhealthy; automatic restart disabled: {reason[:200]}"), ensure_ascii=False))
+            return 0
         if not _restart_allowed(state):
-            print(json.dumps(_status_payload(False, message=f"qwen3-tts unhealthy but in cooldown: {reason}", detail={"cooldown_seconds": RESTART_COOLDOWN_SECONDS}), ensure_ascii=False), file=sys.stderr)
-            return 2
+            print(json.dumps(_status_payload(False, message=f"qwen3-tts unhealthy but in cooldown: {reason}", detail={"cooldown_seconds": RESTART_COOLDOWN_SECONDS}), ensure_ascii=False))
+            return 0
         try:
             payload = _restart_service(reason, state)
             print(json.dumps(payload, ensure_ascii=False))
