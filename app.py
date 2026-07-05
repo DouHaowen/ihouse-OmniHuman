@@ -306,6 +306,7 @@ YOUTUBE_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_THUMBNAIL_RETRY_DIR.mkdir(parents=True, exist_ok=True)
 X_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 FACEBOOK_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+COMPOSE_READY_RECOVERY_STARTED = False
 
 MATERIAL_VECTOR_SERVICE_URL = os.getenv("OPENNEWS_MATERIAL_VECTOR_URL", "http://192.168.0.34:8897").strip().rstrip("/")
 MATERIAL_VECTOR_SYNC_ENABLED = (
@@ -313,6 +314,14 @@ MATERIAL_VECTOR_SYNC_ENABLED = (
     not in {"0", "false", "no", "off"}
 )
 OPENNEWS_STALE_JOB_TIMEOUT_HOURS = max(1, int(os.getenv("OPENNEWS_STALE_JOB_TIMEOUT_HOURS", "3") or "3"))
+COMPOSE_READY_RECOVERY_POLL_SECONDS = max(
+    20,
+    int(os.getenv("COMPOSE_READY_RECOVERY_POLL_SECONDS", "60") or "60"),
+)
+COMPOSE_READY_RECOVERY_BATCH_SIZE = max(
+    1,
+    int(os.getenv("COMPOSE_READY_RECOVERY_BATCH_SIZE", "2") or "2"),
+)
 YOUTUBE_THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS = max(
     600,
     int(os.getenv("YOUTUBE_THUMBNAIL_RATE_LIMIT_COOLDOWN_SECONDS", str(6 * 60 * 60)) or str(6 * 60 * 60)),
@@ -1033,6 +1042,78 @@ def _start_opennews_channel_scheduler(poll_seconds: int = 20) -> None:
     threading.Thread(target=loop, name="opennews-channel-scheduler", daemon=True).start()
 
 
+def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVERY_BATCH_SIZE) -> int:
+    candidates: list[Path] = []
+    try:
+        candidates = sorted(
+            [path for path in OUTPUT_DIR.iterdir() if path.is_dir() and (path / "result.json").exists()],
+            key=lambda path: (path / "result.json").stat().st_mtime,
+            reverse=True,
+        )
+    except Exception as exc:
+        print(f"[compose-ready recovery] list error: {exc!r}", flush=True)
+        return 0
+
+    recovered = 0
+    for output_dir in candidates:
+        if recovered >= max(1, int(max_items)):
+            break
+        result_path = output_dir / "result.json"
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(result, dict):
+                continue
+        except Exception as exc:
+            print(f"[compose-ready recovery] read error dir={output_dir.name} err={exc!r}", flush=True)
+            continue
+        lifecycle = _build_history_lifecycle(output_dir, result)
+        if lifecycle.get("live_task_id") or not lifecycle.get("can_compose"):
+            continue
+        try:
+            print(
+                f"[compose-ready recovery] composing dir={output_dir.name} topic={str(result.get('topic') or '')[:80]}",
+                flush=True,
+            )
+            _compose_history_result(
+                output_dir,
+                result,
+                user=None,
+                requested_aspect_ratio="",
+                cost_scope="compose_ready_recovery",
+            )
+            recovered += 1
+        except Exception as exc:
+            print(
+                f"[compose-ready recovery] compose failed dir={output_dir.name} err={exc!r}",
+                flush=True,
+            )
+    if recovered:
+        print(f"[compose-ready recovery] recovered={recovered}", flush=True)
+    return recovered
+
+
+def _start_compose_ready_recovery_worker(poll_seconds: int = COMPOSE_READY_RECOVERY_POLL_SECONDS) -> None:
+    global COMPOSE_READY_RECOVERY_STARTED
+    if COMPOSE_READY_RECOVERY_STARTED:
+        return
+    COMPOSE_READY_RECOVERY_STARTED = True
+    print(
+        "[compose-ready recovery] started "
+        f"root={OUTPUT_DIR} poll_seconds={poll_seconds} batch_size={COMPOSE_READY_RECOVERY_BATCH_SIZE}",
+        flush=True,
+    )
+
+    def loop() -> None:
+        while True:
+            try:
+                _recover_ready_compose_histories_once(COMPOSE_READY_RECOVERY_BATCH_SIZE)
+            except Exception as exc:
+                print(f"[compose-ready recovery] loop error: {exc!r}", flush=True)
+            time.sleep(max(20, int(poll_seconds)))
+
+    threading.Thread(target=loop, name="compose-ready-recovery", daemon=True).start()
+
+
 @app.on_event("startup")
 async def _start_opennews_batch_scheduler() -> None:
     _cleanup_stale_opennews_batch_jobs()
@@ -1061,6 +1142,7 @@ async def _start_opennews_batch_scheduler() -> None:
     )
     _start_opennews_channel_scheduler(poll_seconds=20)
     _recover_pending_auto_digital_batches()
+    _start_compose_ready_recovery_worker()
 
 VOICE_PRESETS = [
     {
@@ -2437,6 +2519,97 @@ def _build_history_lifecycle(output_dir: Optional[Path], result: Optional[dict])
         "can_compose": bool(materials_ready and not compose_ready),
         "live_task_id": "",
     }
+
+
+def _history_is_opennews_result(result: Optional[dict]) -> bool:
+    payload = result if isinstance(result, dict) else {}
+    workflow_config = payload.get("workflow_config") if isinstance(payload.get("workflow_config"), dict) else {}
+    return bool(
+        workflow_config.get("opennews")
+        or workflow_config.get("opennews_material_only")
+        or str(workflow_config.get("digital_human_engine") or "") == "opennews_material_only"
+        or str(payload.get("topic") or "").startswith("OpenNews")
+    )
+
+
+def _write_history_result(output_dir: Path, result: dict) -> None:
+    (output_dir / "result.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
+def _compose_history_result(
+    output_dir: Path,
+    result: dict,
+    *,
+    user: Optional[dict] = None,
+    requested_aspect_ratio: str = "",
+    cost_scope: str = "manual_history_compose",
+) -> dict:
+    workflow_config = result.get("workflow_config") or {}
+    requested_aspect_ratio = str(requested_aspect_ratio or "").strip().lower()
+    if requested_aspect_ratio not in {"vertical", "horizontal"}:
+        requested_aspect_ratio = ""
+
+    is_opennews_result = _history_is_opennews_result(result)
+    default_aspect_ratio = "horizontal" if is_opennews_result else "vertical"
+    compose_aspect_ratio = str(
+        requested_aspect_ratio
+        or workflow_config.get("compose_aspect_ratio")
+        or workflow_config.get("aspect_ratio")
+        or default_aspect_ratio
+    ).strip().lower()
+    if compose_aspect_ratio not in {"vertical", "horizontal"}:
+        compose_aspect_ratio = default_aspect_ratio
+
+    transition_id = str(workflow_config.get("compose_transition_id") or "fade")
+    subtitle_template_id = str(workflow_config.get("subtitle_template_id") or "classic")
+    if is_opennews_result:
+        subtitle_template_id = "property_clear"
+        composed_result = _compose_opennews_result(
+            output_dir,
+            result,
+            preferred_aspect_ratio=compose_aspect_ratio,
+            user=user,
+            cost_scope=cost_scope,
+        )
+    else:
+        from video_composer import compose_history_video
+
+        composed_payload = compose_history_video(
+            str(output_dir),
+            result,
+            transition_id=transition_id,
+            subtitle_template_id=subtitle_template_id,
+            aspect_ratio=compose_aspect_ratio,
+        )
+        workflow_config["compose_transition_id"] = transition_id
+        workflow_config["subtitle_template_id"] = subtitle_template_id
+        workflow_config["compose_aspect_ratio"] = compose_aspect_ratio
+        result["workflow_config"] = workflow_config
+        result.update(composed_payload)
+        _record_history_cost(
+            output_dir=output_dir,
+            result=result,
+            user=user,
+            event_type="compose_video",
+            amount=_estimate_compose_cost(result.get("total_duration", 0)),
+            provider=COST_RULES["compose_video"]["provider"],
+            topic=result.get("topic", ""),
+            meta={
+                "transition_id": transition_id,
+                "subtitle_template_id": subtitle_template_id,
+                "aspect_ratio": compose_aspect_ratio,
+                "generated_aspect_ratios": [compose_aspect_ratio],
+                "scope": cost_scope,
+            },
+        )
+        composed_result = result
+
+    _write_history_result(output_dir, composed_result)
+    _sync_live_task_result(str(output_dir), composed_result)
+    return composed_result
 
 
 def _combine_prompt(avatar_prompt: str, segment_action: str) -> str:
@@ -10348,6 +10521,15 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
             else os.getenv("OPENNEWS_BATCH_AUTO_TARGET_MARKET", "cn")
         )
         channel_name = str(channel.get("name") or payload.get("opennews_channel_name") or "OpenNews").strip()
+        channel_platforms = channel.get("platforms") if isinstance(channel.get("platforms"), dict) else {}
+        channel_x_auto_publish = (
+            _opennews_x_auto_publish_default()
+            and _parse_bool_form(channel_platforms.get("x", True))
+        )
+        channel_facebook_auto_publish = (
+            _opennews_facebook_auto_publish_default()
+            and _parse_bool_form(channel_platforms.get("facebook", True))
+        )
         job = create_opennews_batch_job(
             root,
             username="auto_opennews",
@@ -10361,11 +10543,11 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
                 "youtube_auto_publish": False,
                 "youtube_privacy_status": os.getenv("OPENNEWS_BATCH_AUTO_YOUTUBE_PRIVACY", "public"),
                 "youtube_aspects": [],
-                "x_auto_publish": _opennews_x_auto_publish_default(),
-                "x_publish_single_shorts": _opennews_x_auto_publish_default(),
+                "x_auto_publish": channel_x_auto_publish,
+                "x_publish_single_shorts": channel_x_auto_publish,
                 "x_collection_auto_publish": False,
                 "x_aspects": ["vertical"],
-                "facebook_auto_publish": _opennews_facebook_auto_publish_default(),
+                "facebook_auto_publish": channel_facebook_auto_publish,
                 "facebook_aspects": ["vertical"],
                 "opennews_presenter": presenter_config,
                 "opennews_channel_id": channel.get("id") or channel_id,
@@ -10570,6 +10752,13 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
         x_auto_publish = _parse_bool_form(options.get("x_auto_publish"))
     if _opennews_x_auto_publish_disabled():
         x_auto_publish = False
+    facebook_auto_publish = _opennews_facebook_auto_publish_default()
+    if "facebook_auto_publish" in external_request:
+        facebook_auto_publish = _parse_bool_form(external_request.get("facebook_auto_publish"))
+    if "facebook_auto_publish" in options:
+        facebook_auto_publish = _parse_bool_form(options.get("facebook_auto_publish"))
+    if _opennews_facebook_auto_publish_disabled():
+        facebook_auto_publish = False
     x_single_shorts_publish = _opennews_x_auto_publish_default() and _opennews_x_single_shorts_enabled()
     if "x_publish_single_shorts" in options:
         x_single_shorts_publish = _parse_bool_form(options.get("x_publish_single_shorts"))
@@ -10675,9 +10864,7 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             facebook_error = ""
             publish_this_item = False
             x_publish_this_item = x_auto_publish
-            facebook_publish_this_item = _opennews_facebook_auto_publish_default()
-            if _opennews_facebook_auto_publish_disabled():
-                facebook_publish_this_item = False
+            facebook_publish_this_item = facebook_auto_publish
             item_x_aspects = x_aspects or ["vertical"]
             if x_publish_this_item:
                 try:
@@ -15086,78 +15273,19 @@ async def compose_history_video_endpoint(history_id: str, request: Request):
         payload = await request.json()
     except Exception:
         payload = {}
-    transition_id = str(workflow_config.get("compose_transition_id") or "fade")
-    subtitle_template_id = str(workflow_config.get("subtitle_template_id") or "classic")
     requested_aspect_ratio = str((payload or {}).get("aspect_ratio") or "").strip().lower()
     if requested_aspect_ratio not in {"vertical", "horizontal"}:
         requested_aspect_ratio = ""
-    is_opennews_result = bool(
-        workflow_config.get("opennews")
-        or workflow_config.get("opennews_material_only")
-        or str(workflow_config.get("digital_human_engine") or "") == "opennews_material_only"
-        or str(result.get("topic") or "").startswith("OpenNews")
-    )
-    default_aspect_ratio = "horizontal" if is_opennews_result else "vertical"
-    compose_aspect_ratio = str(
-        requested_aspect_ratio
-        or workflow_config.get("compose_aspect_ratio")
-        or workflow_config.get("aspect_ratio")
-        or default_aspect_ratio
-    ).strip().lower()
-    if compose_aspect_ratio not in {"vertical", "horizontal"}:
-        compose_aspect_ratio = default_aspect_ratio
-    if is_opennews_result:
-        subtitle_template_id = "property_clear"
-
     try:
-        from video_composer import compose_history_video
-        if is_opennews_result:
-            variant_results: dict[str, dict] = {}
-            for variant_aspect in ("horizontal", "vertical"):
-                variant_results[variant_aspect] = compose_history_video(
-                    str(output_dir),
-                    result,
-                    transition_id=transition_id,
-                    subtitle_template_id=subtitle_template_id,
-                    aspect_ratio=variant_aspect,
-                    output_stem=f"final_video_{variant_aspect}",
-                )
-            compose_result = dict(variant_results.get(compose_aspect_ratio) or variant_results["horizontal"])
-            compose_result["final_video_variants"] = variant_results
-        else:
-            compose_result = compose_history_video(
-                str(output_dir),
-                result,
-                transition_id=transition_id,
-                subtitle_template_id=subtitle_template_id,
-                aspect_ratio=compose_aspect_ratio,
-            )
+        result = _compose_history_result(
+            output_dir,
+            result,
+            user=user,
+            requested_aspect_ratio=requested_aspect_ratio,
+            cost_scope="manual_history_compose",
+        )
     except Exception as exc:
         return JSONResponse({"error": f"自动成片失败：{exc}"}, status_code=500)
-
-    workflow_config["compose_transition_id"] = transition_id
-    workflow_config["subtitle_template_id"] = subtitle_template_id
-    workflow_config["compose_aspect_ratio"] = compose_aspect_ratio
-    result["workflow_config"] = workflow_config
-    result.update(compose_result)
-    _record_history_cost(
-        output_dir=output_dir,
-        result=result,
-        user=user,
-        event_type="compose_video",
-        amount=_estimate_compose_cost(result.get("total_duration", 0)),
-        provider=COST_RULES["compose_video"]["provider"],
-        topic=result.get("topic", ""),
-        meta={
-            "transition_id": transition_id,
-            "subtitle_template_id": subtitle_template_id,
-            "aspect_ratio": compose_aspect_ratio,
-            "generated_aspect_ratios": ["horizontal", "vertical"] if is_opennews_result else [compose_aspect_ratio],
-        },
-    )
-    with open(output_dir / "result.json", "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2, default=str)
-    _sync_live_task_result(str(output_dir), result)
     return {"ok": True, "result": _serialize_result_for_ui(str(output_dir), result, result.get("topic", ""))}
 
 

@@ -5148,6 +5148,25 @@ def _fetch_opennews_materials_free_library_strategy(
         )
 
     material_items, material_paths, blank_rejections = _opennews_filter_usable_materials(material_items, material_paths)
+    generated_news_card_count = 0
+    if not material_items:
+        print("  ℹ️ 免费素材 API 没有留下可用素材，生成 OpenNews 新闻图卡作为安全保底素材。")
+        for card_index in range(min(3, OPENNEWS_MAX_MATERIALS)):
+            card_path = _opennews_generate_verified_news_card(
+                seg,
+                output_dir,
+                segment_index,
+                card_index,
+                visual_domain=visual_domain,
+            )
+            entry = _material_entry(card_path, kind="image", source="generated_news_card")
+            entry["match_reason"] = "free_material_empty_news_card_fallback"
+            entry["title"] = str(seg.get("material_keyword") or seg.get("title_zh") or seg.get("title") or "OpenNews 新闻")
+            material_items.append(entry)
+            material_paths.append(card_path)
+            generated_news_card_count += 1
+        material_items, material_paths, generated_rejections = _opennews_filter_usable_materials(material_items, material_paths)
+        blank_rejections.extend(generated_rejections)
     seg_with_materials["material_paths"] = material_paths
     seg_with_materials["material_items"] = material_items
     seg_with_materials["material_quality"] = {
@@ -5165,6 +5184,8 @@ def _fetch_opennews_materials_free_library_strategy(
         "local_library_fallback_disabled": True,
         "blank_or_invalid_rejected_count": len(blank_rejections),
         "blank_or_invalid_rejections": blank_rejections[:40],
+        "generated_news_card_count": generated_news_card_count,
+        "generated_news_card_fallback_used": generated_news_card_count > 0,
         "relevance_tokens": sorted(relevance_tokens)[:80],
         "accepted_count": len(material_items),
         "rejected_count": len(pexels_rejections),
