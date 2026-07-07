@@ -1078,6 +1078,10 @@ def _start_opennews_channel_scheduler(poll_seconds: int = 20) -> None:
     threading.Thread(target=loop, name="opennews-channel-scheduler", daemon=True).start()
 
 
+# 已在本进程内触发过"补发布"的成片目录名，避免同一条被重复触发发布。
+_OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED: set[str] = set()
+
+
 def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVERY_BATCH_SIZE) -> int:
     candidates: list[Path] = []
     try:
@@ -1103,7 +1107,34 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
             print(f"[compose-ready recovery] read error dir={output_dir.name} err={exc!r}", flush=True)
             continue
         lifecycle = _build_history_lifecycle(output_dir, result)
-        if lifecycle.get("live_task_id") or not lifecycle.get("can_compose"):
+        if lifecycle.get("live_task_id"):
+            continue
+        if not lifecycle.get("can_compose"):
+            # 已合成（或无需再合成）的 OpenNews 成片：若有可发布视频但从未发布过，
+            # 补触发一次发布。覆盖 produce 自身发布未成功、或历史遗留未发的情况。
+            try:
+                if (
+                    output_dir.name not in _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED
+                    and _history_is_opennews_result(result)
+                    and _opennews_result_has_publishable_video(output_dir, result)
+                ):
+                    already_published = bool(
+                        result.get("x_publish_records")
+                        or result.get("facebook_publish_records")
+                        or result.get("youtube_publish_records")
+                    )
+                    already_errored = bool(
+                        result.get("x_auto_publish_error")
+                        or result.get("facebook_auto_publish_error")
+                        or result.get("youtube_auto_publish_error")
+                    )
+                    if not already_published and not already_errored:
+                        _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED.add(output_dir.name)
+                        print(f"[publish-ready recovery] auto-publish dir={output_dir.name}", flush=True)
+                        _schedule_opennews_post_compose_publish("", str(output_dir), result)
+                        recovered += 1
+            except Exception as pub_exc:
+                print(f"[publish-ready recovery] trigger failed dir={output_dir.name} err={pub_exc!r}", flush=True)
             continue
         try:
             print(
