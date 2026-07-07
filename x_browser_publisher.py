@@ -584,6 +584,14 @@ def publish_video_to_x_browser(
     video_path = _ensure_video_path(video_path)
     profile_dir = Path(user_data_dir).expanduser().resolve() if user_data_dir else X_BROWSER_USER_DATA_DIR
     profile_dir.mkdir(parents=True, exist_ok=True)
+    # 清理上次异常退出残留的 Singleton 锁,否则新 chromium 会以为 profile 被占用而启动失败。
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            (profile_dir / lock_name).unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
     X_BROWSER_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     X_BROWSER_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
     debug_events: list[dict[str, Any]] = []
