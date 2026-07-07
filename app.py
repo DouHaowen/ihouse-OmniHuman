@@ -11524,6 +11524,21 @@ def _recover_opennews_task_from_output(task_id: str, expected_title: str = "") -
     return {}
 
 
+def _opennews_task_result_ready_for_compose(result: dict) -> bool:
+    """判断一个 OpenNews 任务结果是否已具备合成条件（所有有台词的段都已生成配音）。
+    生产过程中会写入中间检查点 result.json（音频只生成了一部分），不能据此就去合成，
+    否则会拿到不完整音频 -> 合成报"没有可用的配音文件"。"""
+    segments = (result or {}).get("segments") or []
+    if not segments:
+        return False
+    for seg in segments:
+        if not str((seg or {}).get("script") or "").strip():
+            continue
+        if not _segment_has_audio(seg):
+            return False
+    return True
+
+
 def _wait_for_opennews_task_done(task_id: str, *, timeout_seconds: int = 5400, expected_title: str = "") -> dict:
     deadline = time.time() + max(60, timeout_seconds)
     while time.time() < deadline:
@@ -11546,12 +11561,14 @@ def _wait_for_opennews_task_done(task_id: str, *, timeout_seconds: int = 5400, e
         if tracker_status == "done" and task.get("result") and task.get("output_dir"):
             return task
         # Some OpenNews jobs finish writing result.json before the in-memory
-        # tracker flips to done. Return as soon as the intermediate result is
-        # available; the compose step performs the final material validation.
+        # tracker flips to done. 但生产过程中也会写入"中间检查点"result.json
+        # （音频只生成了一部分），若此时就返回，compose 会拿到不完整音频而失败。
+        # 因此仅当结果已具备合成条件（所有段都已配音）时才提前返回。
         if (
             task.get("result")
             and task.get("output_dir")
             and tracker_status not in {"error", "cancelled"}
+            and _opennews_task_result_ready_for_compose(task.get("result"))
         ):
             return task
         if tracker_status in {"error", "cancelled"}:
