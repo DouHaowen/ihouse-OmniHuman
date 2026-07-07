@@ -1110,7 +1110,7 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
                 f"[compose-ready recovery] composing dir={output_dir.name} topic={str(result.get('topic') or '')[:80]}",
                 flush=True,
             )
-            _compose_history_result(
+            composed_result = _compose_history_result(
                 output_dir,
                 result,
                 user=None,
@@ -1118,6 +1118,25 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
                 cost_scope="compose_ready_recovery",
             )
             recovered += 1
+            # 合成成功后，对 OpenNews 结果触发自动发布（X/Facebook/YouTube）。
+            # produce 主流程若因 TTS 等中途失败不会发布，recovery 补齐成片后必须接上发布，
+            # 否则视频产好却一直不发。带"未发过才发"守卫，避免重复发。
+            try:
+                pub_result = composed_result if isinstance(composed_result, dict) else result
+                if _history_is_opennews_result(pub_result) and _opennews_result_has_publishable_video(output_dir, pub_result):
+                    already_published = bool(
+                        pub_result.get("x_publish_records")
+                        or pub_result.get("facebook_publish_records")
+                        or pub_result.get("youtube_publish_records")
+                    )
+                    if not already_published:
+                        print(f"[compose-ready recovery] auto-publish dir={output_dir.name}", flush=True)
+                        _schedule_opennews_post_compose_publish("", str(output_dir), pub_result)
+            except Exception as pub_exc:
+                print(
+                    f"[compose-ready recovery] auto-publish trigger failed dir={output_dir.name} err={pub_exc!r}",
+                    flush=True,
+                )
         except Exception as exc:
             print(
                 f"[compose-ready recovery] compose failed dir={output_dir.name} err={exc!r}",
