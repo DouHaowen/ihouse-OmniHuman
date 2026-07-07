@@ -1540,6 +1540,9 @@ COST_RULES = {
 OPENNEWS_QWEN_TTS_ENABLED = (os.getenv("OPENNEWS_QWEN_TTS_ENABLED", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
 OPENNEWS_QWEN_TTS_BASE_URL = (os.getenv("OPENNEWS_QWEN_TTS_BASE_URL") or "http://192.168.0.34:8895").strip().rstrip("/")
 OPENNEWS_QWEN_TTS_TOKEN = os.getenv("OPENNEWS_QWEN_TTS_TOKEN", "local-qwen3-tts-5090").strip()
+# 单个分片 TTS 调用的重试次数：TTS 在请求预算回收(每36次)或瞬时不可用时会短暂失败,
+# 单片重试可避免"一片失败导致整段配音失败 -> 没有可用配音文件 -> 合成失败"。
+OPENNEWS_QWEN_TTS_RETRY_ATTEMPTS = max(1, min(8, int(os.getenv("OPENNEWS_QWEN_TTS_RETRY_ATTEMPTS", "4") or "4")))
 OPENNEWS_QWEN_TTS_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_SPEAKER", "serena").strip() or "serena"
 OPENNEWS_QWEN_TTS_FEMALE_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_FEMALE_SPEAKER", "serena").strip() or "serena"
 OPENNEWS_QWEN_TTS_MALE_SPEAKER = os.getenv("OPENNEWS_QWEN_TTS_MALE_SPEAKER", "aiden").strip() or "aiden"
@@ -4598,27 +4601,41 @@ def _generate_opennews_qwen_tts_audio(
             "speaker": presenter.get("qwen_speaker") or OPENNEWS_QWEN_TTS_SPEAKER,
             "instruct": presenter.get("qwen_instruct") or OPENNEWS_QWEN_TTS_INSTRUCT,
         }
-        response = requests.post(
-            f"{OPENNEWS_QWEN_TTS_BASE_URL}/tts",
-            headers=headers,
-            json=payload,
-            timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if not data.get("ok") or not data.get("url"):
-            raise RuntimeError(f"Qwen3-TTS 返回异常：{data}")
-        audio_url = str(data["url"])
-        if audio_url.startswith("/"):
-            audio_url = f"{OPENNEWS_QWEN_TTS_BASE_URL}{audio_url}"
-        wav_response = requests.get(
-            audio_url,
-            headers={"X-Token": OPENNEWS_QWEN_TTS_TOKEN},
-            timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
-        )
-        wav_response.raise_for_status()
         wav_path = output.with_suffix(f".qwen.part{index:02d}.wav")
-        wav_path.write_bytes(wav_response.content)
+        last_tts_error: Exception | None = None
+        for tts_attempt in range(OPENNEWS_QWEN_TTS_RETRY_ATTEMPTS):
+            try:
+                response = requests.post(
+                    f"{OPENNEWS_QWEN_TTS_BASE_URL}/tts",
+                    headers=headers,
+                    json=payload,
+                    timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
+                )
+                response.raise_for_status()
+                data = response.json()
+                if not data.get("ok") or not data.get("url"):
+                    raise RuntimeError(f"Qwen3-TTS 返回异常：{data}")
+                audio_url = str(data["url"])
+                if audio_url.startswith("/"):
+                    audio_url = f"{OPENNEWS_QWEN_TTS_BASE_URL}{audio_url}"
+                wav_response = requests.get(
+                    audio_url,
+                    headers={"X-Token": OPENNEWS_QWEN_TTS_TOKEN},
+                    timeout=OPENNEWS_QWEN_TTS_TIMEOUT,
+                )
+                wav_response.raise_for_status()
+                wav_path.write_bytes(wav_response.content)
+                last_tts_error = None
+                break
+            except Exception as tts_exc:
+                last_tts_error = tts_exc
+                if tts_attempt + 1 < OPENNEWS_QWEN_TTS_RETRY_ATTEMPTS:
+                    if log:
+                        log(f"5090 Qwen3-TTS 分片 {index} 第 {tts_attempt + 1} 次失败，重试：{tts_exc}")
+                    time.sleep(min(30, 6.0 * (tts_attempt + 1)))
+                    continue
+        if last_tts_error is not None:
+            raise last_tts_error
         wav_paths.append(wav_path)
         if OPENNEWS_QWEN_TTS_CHUNK_PAUSE_SECONDS > 0 and index < len(chunks):
             time.sleep(OPENNEWS_QWEN_TTS_CHUNK_PAUSE_SECONDS)
