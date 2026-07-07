@@ -83,6 +83,24 @@ def _get_openai_relay_responses_url() -> str:
     return f"{base_url}/v1/responses"
 
 
+def _get_openai_relay_chat_completions_url() -> str:
+    base_url = _get_openai_relay_base_url()
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    if base_url.endswith("/v1"):
+        return f"{base_url}/chat/completions"
+    return f"{base_url}/v1/chat/completions"
+
+
+def _opennews_relay_use_chat_completions() -> bool:
+    raw = (os.getenv("OPENNEWS_RELAY_USE_CHAT_COMPLETIONS") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return _opennews_relay_uses_office_api()
+
+
 def _get_openai_relay_model() -> str:
     return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.5").strip() or "gpt-5.5"
 
@@ -113,7 +131,7 @@ def _get_opennews_relay_model_attempts() -> list[str]:
 def _get_opennews_relay_retry_attempts() -> int:
     raw_value = os.getenv("OPENNEWS_RELAY_RETRY_ATTEMPTS") or os.getenv("OPENAI_RELAY_OPENNEWS_RETRY_ATTEMPTS") or "3"
     try:
-        return max(1, min(6, int(float(raw_value))))
+        return max(1, min(12, int(float(raw_value))))
     except (TypeError, ValueError):
         return 3
 
@@ -384,7 +402,7 @@ video_title, summary, script, material_keywords, material_visual_plan, fact_chec
                 if response.status_code >= 400:
                     last_error = f"{response.status_code} {response.text[:500]}"
                     if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_relay_retry_attempts():
-                        time.sleep(1.5 * (retry_index + 1))
+                        time.sleep(min(45, 10.0 * (retry_index + 1)))
                         continue
                     break
                 repaired_raw = _extract_openai_relay_text(response.json())
@@ -400,7 +418,7 @@ video_title, summary, script, material_keywords, material_visual_plan, fact_chec
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last_error = repr(exc)
                 if retry_index + 1 < _get_opennews_relay_retry_attempts():
-                    time.sleep(1.5 * (retry_index + 1))
+                    time.sleep(min(45, 10.0 * (retry_index + 1)))
                     continue
                 break
     raise RuntimeError(f"API 中转新闻稿 JSON 修复失败：{last_error}")
@@ -439,7 +457,7 @@ video_title, summary, script, material_keywords, material_visual_plan, fact_chec
             if response.status_code >= 400:
                 last_error = f"{response.status_code} {response.text[:500]}"
                 if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_glm_retry_attempts():
-                    time.sleep(1.5 * (retry_index + 1))
+                    time.sleep(min(45, 10.0 * (retry_index + 1)))
                     continue
                 break
             repaired_raw = _extract_chat_completion_text(response.json())
@@ -455,7 +473,7 @@ video_title, summary, script, material_keywords, material_visual_plan, fact_chec
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_error = repr(exc)
             if retry_index + 1 < _get_opennews_glm_retry_attempts():
-                time.sleep(1.5 * (retry_index + 1))
+                time.sleep(min(45, 10.0 * (retry_index + 1)))
                 continue
             break
     raise RuntimeError(f"GLM-5.2 新闻稿 JSON 修复失败：{last_error}")
@@ -489,7 +507,7 @@ def _request_opennews_glm_json(prompt: str, *, max_output_tokens: int = 4096) ->
             if response.status_code >= 400:
                 last_error = RuntimeError(f"GLM-5.2 新闻稿生成失败：{response.status_code} {response.text[:500]}")
                 if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_glm_retry_attempts():
-                    time.sleep(1.5 * (retry_index + 1))
+                    time.sleep(min(45, 10.0 * (retry_index + 1)))
                     continue
                 break
             raw = _extract_chat_completion_text(response.json())
@@ -519,7 +537,7 @@ def _request_opennews_glm_json(prompt: str, *, max_output_tokens: int = 4096) ->
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_error = exc
             if retry_index + 1 < _get_opennews_glm_retry_attempts():
-                time.sleep(1.5 * (retry_index + 1))
+                time.sleep(min(45, 10.0 * (retry_index + 1)))
                 continue
             break
     raise RuntimeError(f"GLM-5.2 新闻稿生成失败：{last_error}")
@@ -619,7 +637,75 @@ def _request_opennews_local_llm_json(prompt: str, *, max_output_tokens: int = 40
     raise RuntimeError(f"OpenNews 本地文案模型生成失败：{last_error}")
 
 
+def _request_opennews_relay_chat_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
+    api_key = _get_openai_relay_api_key()
+    if not api_key:
+        raise RuntimeError("未配置 OPENAI_RELAY_API_KEY，无法生成新闻稿")
+    last_error: Exception | None = None
+    for model in _get_opennews_relay_model_attempts():
+        for retry_index in range(_get_opennews_relay_retry_attempts()):
+            raw = ""
+            try:
+                response = requests.post(
+                    _get_openai_relay_chat_completions_url(),
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "你是专业新闻短视频编辑。只输出可解析 JSON，不输出解释、markdown 或代码块。",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": max_output_tokens,
+                        "stream": False,
+                    },
+                    timeout=_get_opennews_relay_timeout_seconds(),
+                )
+                if response.status_code >= 400:
+                    last_error = RuntimeError(f"API 中转新闻稿生成失败：{response.status_code} {response.text[:500]}")
+                    if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_relay_retry_attempts():
+                        time.sleep(min(45, 10.0 * (retry_index + 1)))
+                        continue
+                    break
+                raw = _extract_chat_completion_text(response.json())
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        return parsed
+                    last_error = RuntimeError("模型返回的 JSON 不是对象")
+                except json.JSONDecodeError:
+                    candidate = _extract_json_object_text(raw)
+                    if candidate:
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                return parsed
+                            last_error = RuntimeError("模型返回的 JSON 对象提取结果不是对象")
+                        except json.JSONDecodeError as exc:
+                            last_error = exc
+                    else:
+                        last_error = RuntimeError("模型未返回 JSON 对象")
+                try:
+                    return _repair_opennews_relay_json(raw, model_name=model)
+                except Exception as repair_exc:
+                    return {
+                        "_raw_text": raw,
+                        "_json_parse_warning": str(repair_exc),
+                    }
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                if retry_index + 1 < _get_opennews_relay_retry_attempts():
+                    time.sleep(min(45, 10.0 * (retry_index + 1)))
+                    continue
+                break
+    raise RuntimeError(f"API 中转新闻稿生成失败：{last_error}")
+
+
 def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
+    if _opennews_relay_use_chat_completions():
+        return _request_opennews_relay_chat_json(prompt, max_output_tokens=max_output_tokens)
     api_key = _get_openai_relay_api_key()
     if not api_key:
         raise RuntimeError("未配置 OPENAI_RELAY_API_KEY，无法生成新闻稿")
@@ -642,7 +728,7 @@ def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) 
                     if response.status_code >= 400:
                         last_error = RuntimeError(f"API 中转新闻稿生成失败：{response.status_code} {response.text[:500]}")
                         if response.status_code in {429, 500, 502, 503, 504} and retry_index + 1 < _get_opennews_relay_retry_attempts():
-                            time.sleep(1.5 * (retry_index + 1))
+                            time.sleep(min(45, 10.0 * (retry_index + 1)))
                             continue
                         break
                     raw = _extract_openai_relay_text(response.json())
@@ -673,7 +759,7 @@ def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) 
                 except (requests.Timeout, requests.ConnectionError) as exc:
                     last_error = exc
                     if retry_index + 1 < _get_opennews_relay_retry_attempts():
-                        time.sleep(1.5 * (retry_index + 1))
+                        time.sleep(min(45, 10.0 * (retry_index + 1)))
                         continue
                     break
     raise RuntimeError(f"API 中转新闻稿生成失败：{last_error}")
@@ -885,10 +971,18 @@ def _looks_like_generic_opennews_script(script: str, article: dict) -> bool:
 
 
 def _target_language_name(target_market: str) -> str:
-    return "繁體中文" if target_market == "tw" else ("日本語" if target_market == "jp" else "简体中文")
+    target_market = str(target_market or "cn").strip().lower()
+    if target_market == "tw":
+        return "繁體中文"
+    if target_market == "jp":
+        return "日本語"
+    if target_market == "en":
+        return "English"
+    return "简体中文"
 
 
 def _needs_opennews_language_rewrite(text: str, target_market: str) -> bool:
+    target_market = str(target_market or "cn").strip().lower()
     text = _strip_tags(text or "")
     if not text:
         return True
@@ -896,7 +990,9 @@ def _needs_opennews_language_rewrite(text: str, target_market: str) -> bool:
     kana_count = len(re.findall(r"[\u3040-\u30ff]", text))
     alpha_count = len(re.findall(r"[A-Za-z]", text))
     if target_market == "jp":
-        return kana_count < 10 and cjk_count < 25 and alpha_count > 30
+        return kana_count < 8
+    if target_market == "en":
+        return alpha_count < max(12, (cjk_count + kana_count) * 2)
     return cjk_count < 35 and alpha_count > max(40, cjk_count * 2)
 
 
@@ -940,6 +1036,10 @@ def _compact_opennews_subject_text(title: str, summary: str, *, target_market: s
     """Build a concrete fallback subject from the article itself, never from a broad category."""
     title = _strip_tags(title or "").strip()
     summary = _strip_tags(summary or "").strip()
+    if target_market == "en":
+        video_title = (title or summary or "OpenNews Update")[:90]
+        subject = (summary or title or "this developing news story")[:260]
+        return video_title, subject
     if target_market == "jp":
         if _has_cjk_text(title, minimum=3) or len(re.findall(r"[\u3040-\u30ff]", title)) >= 3:
             video_title = title[:80]
@@ -981,6 +1081,16 @@ def _opennews_topic_kind(article: dict, title: str, summary: str) -> str:
 
 
 def _opennews_natural_closing(kind: str, *, target_market: str) -> str:
+    if target_market == "en":
+        closings = {
+            "education": "For students and families, the development marks an important moment in a high-pressure education cycle.",
+            "technology": "The next question is how quickly the technology moves from announcement to real-world adoption.",
+            "finance": "Markets will now watch whether the numbers can support investor expectations.",
+            "military": "The situation will need to be assessed alongside official statements and verified reporting.",
+            "politics": "The focus now turns to how institutions, markets and foreign partners respond.",
+            "general": "The next signal will come from the parties involved and any further verified updates.",
+        }
+        return closings.get(kind, closings["general"])
     if target_market == "jp":
         closings = {
             "education": "受験生と家族にとっては、大きな節目となる一日です。",
@@ -1003,6 +1113,16 @@ def _opennews_natural_closing(kind: str, *, target_market: str) -> str:
 
 
 def _opennews_context_sentence(kind: str, subject: str, *, target_market: str) -> str:
+    if target_market == "en":
+        sentences = {
+            "education": "The story matters because it touches students, families and the wider pressure around education decisions.",
+            "technology": "The broader backdrop is intensifying competition around AI, chips, software and digital infrastructure.",
+            "finance": "For investors, the issue is not only the latest move, but whether it changes expectations for growth or risk.",
+            "military": "The development adds another data point to a security environment already being watched closely.",
+            "politics": "Policy signals like this can quickly affect companies, markets and international relationships.",
+            "general": "The key facts are the timing, the main actors involved and the immediate impact described in the report.",
+        }
+        return sentences.get(kind, sentences["general"])
     if target_market == "jp":
         sentences = {
             "education": "現場では、受験生だけでなく家族にとっても緊張感のある一日となっています。",
@@ -1025,6 +1145,16 @@ def _opennews_context_sentence(kind: str, subject: str, *, target_market: str) -
 
 
 def _opennews_detail_sentence(kind: str, *, target_market: str) -> str:
+    if target_market == "en":
+        sentences = {
+            "education": "It also reflects how education policy and family decisions can shape long-term opportunities.",
+            "technology": "If the product or service reaches real users, the impact could extend beyond one company and reshape competition.",
+            "finance": "Without clearer evidence of sustainable growth, questions around valuation and future earnings will remain.",
+            "military": "Public statements, on-the-ground evidence and reporting from multiple sources all need to be compared carefully.",
+            "politics": "Once a policy direction is set, companies and allies often reassess their own response plans.",
+            "general": "Even a short announcement can offer clues about institutional priorities and possible social or market effects.",
+        }
+        return sentences.get(kind, sentences["general"])
     if target_market == "jp":
         sentences = {
             "education": "毎年多くの受験生が進路を左右する試験に臨み、学校や家庭にも大きな影響を与えています。",
@@ -1071,7 +1201,11 @@ def _localized_known_opennews_subject(title: str, summary: str, *, target_market
 
 def _local_opennews_language_fallback(*, article: dict, target_market: str, published_at: str) -> dict:
     source_name = str(article.get("source_name") or "公开新闻源")
-    original_title, original_summary = _article_concrete_title_summary(article)
+    if target_market == "en":
+        original_title = _first_non_empty_text(article.get("title"), article.get("translated_title"), article.get("title_zh"))
+        original_summary = _first_non_empty_text(article.get("summary"), article.get("translated_summary"), article.get("summary_zh"), original_title)
+    else:
+        original_title, original_summary = _article_concrete_title_summary(article)
     fallback_title, subject = _compact_opennews_subject_text(original_title, original_summary, target_market=target_market)
     localized_subject = _localized_known_opennews_subject(original_title, original_summary, target_market=target_market)
     if localized_subject:
@@ -1082,6 +1216,17 @@ def _local_opennews_language_fallback(*, article: dict, target_market: str, publ
     context_sentence = _opennews_context_sentence(topic_kind, subject, target_market=target_market)
     detail_sentence = _opennews_detail_sentence(topic_kind, target_market=target_market)
     closing = _opennews_natural_closing(topic_kind, target_market=target_market)
+    if target_market == "en":
+        time_label = published_at or "an unspecified publication time"
+        subject_sentence = subject.rstrip(".!?; ")
+        return {
+            "video_title": fallback_title,
+            "summary": subject,
+            "script": _clean_opennews_script_text(
+                f"According to {source_name}, published at {time_label}, {subject_sentence}. "
+                f"{context_sentence} {detail_sentence} {closing}"
+            ),
+        }
     if target_market == "jp":
         lead = _format_opennews_source_time(source_name, published_at).replace("据", "").replace("报道", "が伝えた内容によると")
         return {
@@ -1112,6 +1257,8 @@ def _rewrite_opennews_text_language(*, title: str, summary: str, script: str, ar
 - 保持事实边界，不要新增原文没有的信息。
 - script 是 45-60 秒自然口播，一段即可，必须像主播正在播一条完整短新闻。
 - 简体/繁体中文写 220-320 字；日语写 420-560 字。
+- 如果输出语言是日本語，必须使用自然日本語，标题、摘要和 script 都要包含足够的ひらがな/カタカナ，不要输出英文稿。
+- 如果输出语言是 English，必须使用自然 English，不要输出中文或日文稿。
 - 开头直接讲“谁/哪家机构/哪家公司做了什么”，不要先写空泛导语。
 - 中间至少写 2-3 句，补足新闻背景、关键数字、市场/政策/行业/社会影响，不要只写一句摘要。
 - 结尾自然收住，点出下一步最具体的看点，不要套话。
@@ -1153,7 +1300,15 @@ def _polish_opennews_broadcast_copy(
 ) -> dict:
     """Rewrite title/summary/script as natural broadcast copy after JSON generation."""
     language = _target_language_name(target_market)
-    length_rule = "简体/繁体中文 220-320 字" if target_market != "jp" else "日本語 420-560 字"
+    if target_market == "jp":
+        length_rule = "日本語 420-560 字"
+        summary_field_label = "一句自然日本語摘要"
+    elif target_market == "en":
+        length_rule = "English 110-160 words"
+        summary_field_label = "one concise English summary sentence"
+    else:
+        length_rule = "简体/繁体中文 220-320 字"
+        summary_field_label = "一句中文摘要"
     source_name = str(article.get("source_name") or "公开新闻源")
     title = _strip_tags(str(draft.get("video_title") or article.get("title") or ""))
     summary = _strip_tags(str(draft.get("summary") or article.get("summary") or ""))
@@ -1177,6 +1332,8 @@ def _polish_opennews_broadcast_copy(
 - 不要加入原文没有的价格、人数、结论或立场。
 - 语气像正式新闻主播读稿：客观、准确、自然，不要像机器摘要，不要像论文简介，不要堆砌四字词。
 - 中文表达要自然，不要夹英文，除非是公司名、产品名、机构名或无法翻译的专有名词。
+- 如果输出语言是日本語，必须全篇使用自然日本語，避免夹英文句子；公司名、产品名可以保留原文。
+- 如果输出语言是 English，必须全篇使用 English，避免夹中文或日文句子。Do not use Chinese words such as 据、报道、来源、发布时间、关注、市场 unless they are part of a proper noun.
 
 来源：{source_name}
 发布时间：{published_at or "来源页面未标注明确发布时间"}
@@ -1193,7 +1350,7 @@ def _polish_opennews_broadcast_copy(
 {related_context or "无"}
 
 只返回 JSON：
-{{"video_title":"适合视频标题的短标题","summary":"一句中文/日文摘要","script":"完整播出稿"}}
+{{"video_title":"short broadcast-ready video title","summary":"{summary_field_label}","script":"complete broadcast script"}}
 """.strip()
     try:
         parsed = _request_opennews_model_json(prompt, max_output_tokens=2200)
@@ -3166,9 +3323,12 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
     published_at = article.get("published_at") or article_bundle.get("published_at") or ""
     related_articles = article.get("related_articles") if isinstance(article.get("related_articles"), list) else []
     related_article_media = _collect_related_article_media(related_articles, limit=64)
+    article_text_for_prompt = (article_text or article.get("summary") or article.get("title") or "无正文。").strip()
+    if len(article_text_for_prompt) > 3500:
+        article_text_for_prompt = article_text_for_prompt[:3500].rstrip() + "\n……（正文已截断，避免模型上下文过长）"
     related_context = "\n".join(
         f"- {item.get('source_name') or item.get('trend_domain') or 'source'}｜{item.get('published_at') or ''}｜{item.get('title') or ''}｜{item.get('url') or ''}"
-        for item in related_articles[:8]
+        for item in related_articles[:5]
         if isinstance(item, dict)
     )
     language = (
@@ -3194,7 +3354,7 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
 管理员补充要求：{notes or "无"}
 
 原始网页正文节选：
-{article_text or article.get("summary") or article.get("title") or "无正文。"}
+{article_text_for_prompt}
 
 正文抓取状态：
 {article_fetch_warning or "正文抓取成功。"}

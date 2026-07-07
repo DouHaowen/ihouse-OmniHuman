@@ -685,6 +685,24 @@ def _get_openai_relay_responses_url() -> str:
     return f"{base_url}/v1/responses"
 
 
+def _get_openai_relay_chat_completions_url() -> str:
+    base_url = _get_openai_relay_base_url()
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    if base_url.endswith("/v1"):
+        return f"{base_url}/chat/completions"
+    return f"{base_url}/v1/chat/completions"
+
+
+def _openai_relay_use_chat_completions() -> bool:
+    raw = (os.getenv("OPENAI_RELAY_USE_CHAT_COMPLETIONS") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return _openai_relay_uses_office_api()
+
+
 def _get_openai_relay_model() -> str:
     return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.5").strip() or "gpt-5.5"
 
@@ -714,6 +732,18 @@ def _openai_relay_reasoning_attempts() -> list[str]:
         if value and value not in attempts:
             attempts.append(value)
     return attempts or (["low"] if _openai_relay_uses_office_api() else ["minimal"])
+
+
+def _get_openai_relay_retry_attempts() -> int:
+    raw = (
+        os.getenv("OPENAI_RELAY_RETRY_ATTEMPTS")
+        or os.getenv("OPENAI_RELAY_OPENNEWS_RETRY_ATTEMPTS")
+        or "6"
+    )
+    try:
+        return max(1, min(12, int(raw)))
+    except Exception:
+        return 6
 
 
 def _get_glm_api_key() -> str:
@@ -1032,6 +1062,22 @@ def _repair_schema_with_openai_relay(raw_payload: dict, max_tokens: int, target_
 原始 JSON：
 {json.dumps(raw_payload, ensure_ascii=False, indent=2)}
 """
+    if _openai_relay_use_chat_completions():
+        raw, usage = _request_text_from_openai_relay_chat(
+            api_key=api_key,
+            model_name=_get_openai_relay_model(),
+            user_prompt=repair_prompt,
+            max_tokens=max_tokens,
+            enable_web_search=False,
+            target_market=target_market,
+            department_id=department_id,
+        )
+        data, repair_usage = _parse_json_response(raw)
+        usage = _merge_usage(usage, repair_usage)
+        if not _has_expected_script_shape(data):
+            raise ValueError("API 中转 schema repair 后仍未返回符合要求的脚本结构")
+        return data, usage
+
     data, repair_usage = _request_json_from_openai_responses(
         api_key=api_key,
         model_name=_get_openai_relay_model(),
@@ -1188,6 +1234,69 @@ def _request_json_from_openai_responses(
     return data, usage
 
 
+def _request_text_from_openai_relay_chat(
+    *,
+    api_key: str,
+    model_name: str,
+    user_prompt: str,
+    max_tokens: int,
+    enable_web_search: bool,
+    target_market: str,
+    department_id: str,
+    system_prompt: str | None = None,
+) -> tuple[str, dict]:
+    if enable_web_search:
+        raise OpenAIFallbackUnavailableError("API 中转 chat/completions 当前未启用联网检索")
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt or (SYSTEM_PROMPT + _build_context_guidance(target_market, department_id)),
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    response = requests.post(
+        _get_openai_relay_chat_completions_url(),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=180,
+    )
+    if response.status_code >= 400:
+        raise requests.HTTPError(response.text[:500], response=response)
+    body = response.json()
+    return _extract_openai_text(body), _extract_usage_from_openai_payload(body)
+
+
+def _request_json_from_openai_relay_chat(
+    *,
+    api_key: str,
+    model_name: str,
+    user_prompt: str,
+    max_tokens: int,
+    enable_web_search: bool,
+    target_market: str,
+    department_id: str,
+) -> tuple[dict, dict]:
+    raw, usage = _request_text_from_openai_relay_chat(
+        api_key=api_key,
+        model_name=model_name,
+        user_prompt=user_prompt,
+        max_tokens=max_tokens,
+        enable_web_search=enable_web_search,
+        target_market=target_market,
+        department_id=department_id,
+    )
+    data, repair_usage = _parse_json_response(raw)
+    return data, _merge_usage(usage, repair_usage)
+
+
 def _request_json_from_openai_relay(user_prompt: str, max_tokens: int, enable_web_search: bool = False, target_market: str = "cn", department_id: str = "real_estate") -> tuple[dict, dict]:
     api_key = _get_openai_relay_api_key()
     if not api_key:
@@ -1195,6 +1304,34 @@ def _request_json_from_openai_relay(user_prompt: str, max_tokens: int, enable_we
     last_error: Exception | None = None
     data: dict | None = None
     usage: dict = {}
+    if _openai_relay_use_chat_completions():
+        for attempt_index in range(_get_openai_relay_retry_attempts()):
+            try:
+                data, usage = _request_json_from_openai_relay_chat(
+                    api_key=api_key,
+                    model_name=_get_openai_relay_model(),
+                    user_prompt=user_prompt,
+                    max_tokens=max_tokens,
+                    enable_web_search=enable_web_search,
+                    target_market=target_market,
+                    department_id=department_id,
+                )
+                break
+            except (requests.HTTPError, requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                print(f"[api_relay_chat_retry] attempt={attempt_index + 1} error={exc!r}")
+                if attempt_index + 1 < _get_openai_relay_retry_attempts():
+                    time.sleep(min(30, 3 * (attempt_index + 1)))
+                continue
+        if data is None:
+            if last_error:
+                raise RuntimeError(f"API 中转模型暂时不可用：{last_error}") from last_error
+            raise RuntimeError("API 中转模型未返回有效文案")
+        if "生成视频文案" in user_prompt and not _has_expected_script_shape(data):
+            data, schema_usage = _repair_schema_with_openai_relay(data, max_tokens=max_tokens, target_market=target_market, department_id=department_id)
+            usage = _merge_usage(usage, schema_usage)
+        return data, usage
+
     for attempt_index, reasoning_effort in enumerate(_openai_relay_reasoning_attempts()):
         try:
             data, usage = _request_json_from_openai_responses(
@@ -1517,10 +1654,29 @@ def _repair_json_with_openai_relay(raw: str) -> tuple[dict, dict]:
 这是第 {attempt + 1} 次修复。
 原始内容：
 {current}
-"""
+        """
         api_key = _get_openai_relay_api_key()
         if not api_key:
             raise OpenAIFallbackUnavailableError("未配置 OPENAI_RELAY_API_KEY")
+        if _openai_relay_use_chat_completions():
+            raw_text, usage = _request_text_from_openai_relay_chat(
+                api_key=api_key,
+                model_name=_get_openai_relay_model(),
+                user_prompt=repair_prompt,
+                max_tokens=2600,
+                enable_web_search=False,
+                target_market="cn",
+                department_id="real_estate",
+                system_prompt=REPAIR_SYSTEM_PROMPT,
+            )
+            usage_total = _merge_usage(usage_total, usage)
+            repaired_text = _extract_json_candidate(raw_text)
+            try:
+                return json.loads(repaired_text), usage_total
+            except json.JSONDecodeError as exc:
+                current = repaired_text
+                last_error = exc
+                continue
         response = requests.post(
             _get_openai_relay_responses_url(),
             headers={

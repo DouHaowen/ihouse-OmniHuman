@@ -130,6 +130,63 @@ def _active_generation_job_id() -> str:
     return ""
 
 
+def _active_generation_process_pid(job_id: str) -> int:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-af", "generate_infinitetalk.py"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return 0
+    for line in (result.stdout or "").splitlines():
+        if f"/api_jobs/{job_id}/input.json" not in line:
+            continue
+        parts = line.strip().split(maxsplit=1)
+        try:
+            return int(parts[0])
+        except Exception:
+            continue
+    return 0
+
+
+def _mark_job_cancelled(job: dict[str, Any], message: str) -> dict[str, Any]:
+    job["status"] = "cancelled"
+    job["message"] = message
+    job["finished_at"] = _now()
+    job["cancel_requested"] = True
+    _write_job(job)
+    return job
+
+
+def _cancel_job(job_id: str, message: str = "任务已取消") -> dict[str, Any] | None:
+    job = _read_job(job_id)
+    if not job:
+        return None
+    status = str(job.get("status") or "").strip().lower()
+    if status in {"done", "error", "cancelled"}:
+        return job
+    pid = _active_generation_process_pid(job_id)
+    if pid > 0:
+        job["status"] = "cancel_requested"
+        job["message"] = "已收到取消请求，正在终止 InfiniteTalk 进程"
+        job["cancel_requested"] = True
+        _write_job(job)
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+        return job
+    return _mark_job_cancelled(job, message)
+
+
 def _result_mp4_path(job_id: str) -> Path:
     return _job_dir(job_id) / "result" / "segment.mp4"
 
@@ -157,6 +214,9 @@ def _complete_job(job: dict[str, Any], output_mp4: Path, expected_duration: floa
 def _wait_for_generation_slot(job: dict[str, Any]) -> None:
     job_id = str(job["job_id"])
     while True:
+        job = _read_job(job_id) or job
+        if str(job.get("status") or "").strip().lower() in {"cancel_requested", "cancelled"}:
+            raise RuntimeError("InfiniteTalk job cancelled before start")
         active_job_id = _active_generation_job_id()
         if not active_job_id or active_job_id == job_id:
             return
@@ -173,11 +233,17 @@ def _resume_existing_generation(job: dict[str, Any]) -> None:
     expected_duration = float(job.get("expected_duration") or (_probe_media_duration_seconds(Path(job["audio_path"])) or 0))
     while _active_generation_job_id() == job_id:
         job = _read_job(job_id) or job
+        if str(job.get("status") or "").strip().lower() == "cancel_requested":
+            _cancel_job(job_id, "InfiniteTalk 运行中已取消")
+            raise RuntimeError("InfiniteTalk job cancelled while resuming")
         job["status"] = "running"
         job["message"] = "检测到已有 InfiniteTalk 进程正在运行，持续等待完成"
         _write_job(job)
         time.sleep(5)
     job = _read_job(job_id) or job
+    if str(job.get("status") or "").strip().lower() == "cancel_requested":
+        _mark_job_cancelled(job, "InfiniteTalk 运行中已取消")
+        raise RuntimeError("InfiniteTalk job cancelled after process exit")
     _complete_job(job, output_mp4, expected_duration)
 
 
@@ -400,7 +466,10 @@ def _worker_loop() -> None:
         try:
             try:
                 job = _read_job(job_id)
-                if not job or job.get("status") == "done":
+                if not job or job.get("status") in {"done", "cancelled"}:
+                    continue
+                if job.get("status") == "cancel_requested":
+                    _mark_job_cancelled(job, "任务已取消")
                     continue
                 if job.get("status") == "running" and _active_generation_job_id() == str(job_id):
                     _resume_existing_generation(job)
@@ -422,6 +491,9 @@ def _worker_loop() -> None:
                     generation_error = exc
                 if generation_error:
                     job = _read_job(job_id) or job
+                    if str(job.get("status") or "").strip().lower() == "cancel_requested":
+                        _mark_job_cancelled(job, "InfiniteTalk 运行中已取消")
+                        continue
                     job["error"] = str(generation_error)
                     job["finished_at"] = _now()
                     if attempt < max_attempts:
@@ -436,6 +508,9 @@ def _worker_loop() -> None:
             except Exception as loop_exc:
                 # Keep the worker alive even if a single job hits an unexpected edge case.
                 job = _read_job(job_id) or {"job_id": job_id}
+                if str(job.get("status") or "").strip().lower() == "cancel_requested":
+                    _mark_job_cancelled(job, "InfiniteTalk 运行中已取消")
+                    continue
                 job["status"] = "error"
                 job["message"] = "生成失败"
                 job["error"] = str(loop_exc)
@@ -459,6 +534,9 @@ def _recover_jobs() -> None:
             job["message"] = "服务重启后检测到已有 InfiniteTalk 进程，继续等待结果"
             _write_job(job)
             _enqueue(str(job["job_id"]))
+            continue
+        if job.get("status") == "cancel_requested":
+            _mark_job_cancelled(job, "服务重启后已取消")
             continue
         if job.get("status") in {"queued", "running"}:
             job["status"] = "queued"
@@ -572,3 +650,42 @@ def result(job_id: str):
     if job.get("status") != "done" or not result_path.exists():
         return JSONResponse({"error": "result not ready", "status": job.get("status")}, status_code=409)
     return FileResponse(str(result_path), media_type="video/mp4", filename=f"{job_id}.mp4")
+
+
+@app.post("/cancel/{job_id}")
+def cancel_job(job_id: str):
+    job = _cancel_job(job_id, "任务已取消")
+    if not job:
+        return JSONResponse({"error": "job not found"}, status_code=404)
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": job.get("status") or "",
+        "message": job.get("message") or "",
+    }
+
+
+@app.post("/cancel-by-external-task/{external_task_id}")
+def cancel_by_external_task(external_task_id: str):
+    external_task_id = str(external_task_id or "").strip()
+    if not external_task_id:
+        return JSONResponse({"error": "missing external_task_id"}, status_code=400)
+    cancelled: list[dict[str, Any]] = []
+    for path in sorted(JOBS_DIR.glob("*/job.json")):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(job.get("external_task_id") or "").strip() != external_task_id:
+            continue
+        updated = _cancel_job(str(job.get("job_id") or ""), "任务已取消")
+        if updated:
+            cancelled.append(
+                {
+                    "job_id": updated.get("job_id") or "",
+                    "segment_index": int(updated.get("segment_index") or 0),
+                    "status": updated.get("status") or "",
+                    "message": updated.get("message") or "",
+                }
+            )
+    return {"ok": True, "external_task_id": external_task_id, "count": len(cancelled), "jobs": cancelled}

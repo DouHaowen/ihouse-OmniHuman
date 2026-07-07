@@ -1288,6 +1288,7 @@
           <button class="btn btn-secondary" id="propertyVideoPageBtn" type="button" style="min-height:42px;">房源实拍成片</button>
           <div class="user-chip" id="sessionUser" style="display:none;"></div>
           <a class="btn btn-secondary" id="adminDashboardBtn" href="/admin/dashboard" style="display:none; min-height:42px; text-decoration:none;">管理员看板</a>
+          <a class="btn btn-secondary" id="adminServicesBtn" href="/admin/services" style="display:none; min-height:42px; text-decoration:none;">后端服务</a>
           <a class="btn btn-ghost" id="logoutBtn" href="/logout" style="display:none; min-height:42px; text-decoration:none;">退出登录</a>
           <div class="topbar-status" id="heroStatus">工作台已就绪</div>
         </div>
@@ -1643,6 +1644,7 @@
                 </div>
               </div>
               <div class="topbar-status" id="openNewsChannelStatus">正在加载频道配置...</div>
+              <div class="insight-grid" id="openNewsBoundAccounts" style="margin-top:6px;"></div>
               <div class="insight-grid" id="openNewsChannelCards"></div>
               <div class="history-card" id="openNewsChannelEditor" style="display:none;">
                 <div class="history-top">
@@ -2115,6 +2117,7 @@
       openNewsBatches: [],
       openNewsBatchConfig: null,
       openNewsChannelsConfig: null,
+      openNewsAccountSummary: null,
       openNewsSelectedChannelId: 'technology',
       openNewsBatchJobId: '',
       openNewsOverview: null,
@@ -2218,6 +2221,7 @@
       logoutBtn: document.getElementById('logoutBtn'),
       sessionUser: document.getElementById('sessionUser'),
       adminDashboardBtn: document.getElementById('adminDashboardBtn'),
+      adminServicesBtn: document.getElementById('adminServicesBtn'),
       activeTasksDrawerBtn: document.getElementById('activeTasksDrawerBtn'),
       historyDrawerBtn: document.getElementById('historyDrawerBtn'),
       openNewsPageBtn: document.getElementById('openNewsPageBtn'),
@@ -2248,6 +2252,7 @@
       openNewsCandidateList: document.getElementById('openNewsCandidateList'),
       openNewsBatchEnabled: document.getElementById('openNewsBatchEnabled'),
       openNewsChannelStatus: document.getElementById('openNewsChannelStatus'),
+      openNewsBoundAccounts: document.getElementById('openNewsBoundAccounts'),
       openNewsChannelCards: document.getElementById('openNewsChannelCards'),
       openNewsChannelEditor: document.getElementById('openNewsChannelEditor'),
       openNewsChannelEditorTitle: document.getElementById('openNewsChannelEditorTitle'),
@@ -2520,6 +2525,7 @@
         running: copyText('historyStatusRunning', '进行中'),
         stopping: copyText('activeTaskGroupStopping', '停止中'),
         interrupted: copyText('historyStatusInterrupted', '已中断'),
+        failed: copyText('progressFailed', '失败'),
         ready_compose: copyText('historyStatusReadyCompose', '待生成成片'),
         completed: copyText('historyStatusCompleted', '已完成'),
         draft: copyText('historyStatusDraft', '待继续'),
@@ -2532,7 +2538,7 @@
       if (status === 'completed') return 'rgba(13,107,99,0.10); color: var(--brand-deep);';
       if (status === 'ready_compose') return 'rgba(59,130,246,0.10); color: #2f6fed;';
       if (status === 'running') return 'rgba(187,132,65,0.10); color: var(--accent);';
-      if (status === 'stopping' || status === 'interrupted') return 'rgba(205,77,77,0.10); color: var(--danger);';
+      if (status === 'stopping' || status === 'interrupted' || status === 'failed') return 'rgba(205,77,77,0.10); color: var(--danger);';
       return 'rgba(122,138,153,0.12); color: var(--muted);';
     }
 
@@ -2963,6 +2969,7 @@
             <div class="history-topic">${escapeHtml(item.topic || '未记录选题')}</div>
             <div class="history-meta">${escapeHtml(formatHistoryTime(item.created_at))} · ${escapeHtml(String(item.segment_count || 0))} 段 · ${escapeHtml(String(item.total_duration || 0))} 秒${state.currentUser?.role === 'admin' ? ` · ${escapeHtml(item.owner_display_name || item.owner_username || '未归属')}` : ''}</div>
             ${renderHistoryLifecycle(item)}
+            ${item.lifecycle?.error_message ? `<div class="topbar-status error" style="margin-top:10px;">${escapeHtml(item.lifecycle.error_message)}</div>` : ''}
           </div>
           <div class="history-actions">
             <button class="btn btn-secondary history-open-btn" type="button" data-history-id="${item.history_id}" data-live-task-id="${item.lifecycle?.live_task_id || ''}">${escapeHtml(item.lifecycle?.live_task_id ? copyText('activeTaskOpen', '继续查看') : copyText('historyOpen', '打开'))}</button>
@@ -3291,6 +3298,7 @@
         openNewsBtn: "OpenNews 新闻视频",
         propertyVideoBtn: "房源实拍成片",
         adminDashboardBtn: "管理员看板",
+        adminServicesBtn: "后端服务",
         logoutBtn: "退出登录",
       },
       "zh-TW": {
@@ -3299,6 +3307,7 @@
         openNewsBtn: "OpenNews 新聞影片",
         propertyVideoBtn: "房源實拍成片",
         adminDashboardBtn: "管理員看板",
+        adminServicesBtn: "後端服務",
         logoutBtn: "退出登入",
       },
       "ja-JP": {
@@ -3307,6 +3316,7 @@
         openNewsBtn: "OpenNews ニュース動画",
         propertyVideoBtn: "物件動画作成",
         adminDashboardBtn: "管理ダッシュボード",
+        adminServicesBtn: "バックエンド監視",
         logoutBtn: "ログアウト",
       }
     };
@@ -3372,6 +3382,7 @@
         els.sessionUser.style.display = 'none';
         els.logoutBtn.style.display = 'none';
         els.adminDashboardBtn.style.display = 'none';
+        els.adminServicesBtn.style.display = 'none';
         syncAutoDigitalBatchVisibility();
         return;
       }
@@ -3380,6 +3391,7 @@
       els.sessionUser.style.display = 'inline-flex';
       els.logoutBtn.style.display = 'inline-flex';
       els.adminDashboardBtn.style.display = state.currentUser.role === 'admin' ? 'inline-flex' : 'none';
+      els.adminServicesBtn.style.display = state.currentUser.role === 'admin' ? 'inline-flex' : 'none';
       syncAutoDigitalBatchVisibility();
     }
 
@@ -3655,6 +3667,7 @@
       if (els.openNewsPageBtn) els.openNewsPageBtn.textContent = topbarCopy.openNewsBtn || els.openNewsPageBtn.textContent;
       if (els.propertyVideoPageBtn) els.propertyVideoPageBtn.textContent = topbarCopy.propertyVideoBtn || els.propertyVideoPageBtn.textContent;
       if (els.adminDashboardBtn) els.adminDashboardBtn.textContent = topbarCopy.adminDashboardBtn || els.adminDashboardBtn.textContent;
+      if (els.adminServicesBtn) els.adminServicesBtn.textContent = topbarCopy.adminServicesBtn || els.adminServicesBtn.textContent;
       if (els.logoutBtn) els.logoutBtn.textContent = topbarCopy.logoutBtn || els.logoutBtn.textContent;
       if (els.progressTitle) els.progressTitle.textContent = dict.progressTitle || els.progressTitle.textContent;
       if (els.progressDesc) els.progressDesc.textContent = dict.progressDesc || els.progressDesc.textContent;
@@ -3890,6 +3903,55 @@
       els.openNewsChannelStatus.classList.toggle('error', !!error);
     }
 
+    function openNewsBoundAccountDisplay(platform) {
+      const summary = state.openNewsAccountSummary || {};
+      const account = summary[platform] || {};
+      if (platform === 'x') {
+        const handle = account.handle ? `@${account.handle}` : '';
+        return account.account_label || handle || account.display_name || '未识别 X 账号';
+      }
+      if (platform === 'facebook') {
+        return account.page_name || account.account_label || account.page_id || '未绑定 Facebook Page';
+      }
+      return '';
+    }
+
+    function openNewsBoundAccountSmall(platform) {
+      const summary = state.openNewsAccountSummary || {};
+      const account = summary[platform] || {};
+      if (platform === 'x') {
+        const mode = account.publish_mode_label || '浏览器自动化';
+        const detected = account.last_detected_at ? ` · 识别于 ${formatHistoryTime(account.last_detected_at)}` : '';
+        return `${mode}${account.profile_dir ? ` · ${account.profile_dir}` : ''}${detected}`;
+      }
+      if (platform === 'facebook') {
+        const user = account.user_name ? ` · 授权用户：${account.user_name}` : '';
+        return `${account.page_id ? `Page ID：${account.page_id}` : 'Page ID 未识别'}${user}`;
+      }
+      return '';
+    }
+
+    function renderOpenNewsBoundAccounts() {
+      if (!els.openNewsBoundAccounts) return;
+      const summary = state.openNewsAccountSummary || {};
+      const x = summary.x || {};
+      const facebook = summary.facebook || {};
+      els.openNewsBoundAccounts.innerHTML = `
+        <div class="insight-card" style="border-color:${x.configured ? 'rgba(9,106,94,.28)' : 'rgba(180,83,9,.35)'};">
+          <div class="label">当前绑定 X 账号</div>
+          <strong>${escapeHtml(openNewsBoundAccountDisplay('x'))}</strong>
+          <small>${escapeHtml(x.configured ? '已用于 OpenNews 浏览器自动发布' : '未完成 X 浏览器登录或授权')}</small>
+          <div class="history-topic" style="margin-top:8px;">${escapeHtml(openNewsBoundAccountSmall('x'))}</div>
+        </div>
+        <div class="insight-card" style="border-color:${facebook.configured ? 'rgba(9,106,94,.28)' : 'rgba(180,83,9,.35)'};">
+          <div class="label">当前绑定 Facebook Page</div>
+          <strong>${escapeHtml(openNewsBoundAccountDisplay('facebook'))}</strong>
+          <small>${escapeHtml(facebook.configured ? '已用于 OpenNews Page 视频发布' : '未完成 Facebook 授权')}</small>
+          <div class="history-topic" style="margin-top:8px;">${escapeHtml(openNewsBoundAccountSmall('facebook'))}</div>
+        </div>
+      `;
+    }
+
     function openNewsChannels() {
       return Array.isArray(state.openNewsChannelsConfig?.channels) ? state.openNewsChannelsConfig.channels : [];
     }
@@ -3908,11 +3970,22 @@
     function openNewsChannelSummary(channel = {}) {
       const languages = Array.isArray(channel.languages) ? channel.languages : [];
       const platforms = channel.platforms || {};
+      const accounts = channel.accounts || {};
+      const customX = languages.filter(id => {
+        const x = accounts[id]?.x || {};
+        return !!(x.account_label || x.handle || x.profile_dir);
+      }).length;
+      const customFacebook = languages.filter(id => {
+        const facebook = accounts[id]?.facebook || {};
+        return !!(facebook.page_name || facebook.page_id || facebook.page_access_token_configured);
+      }).length;
       return [
         `${languages.map(id => ({ cn: '中', jp: '日', en: '英' }[id] || id)).join('/') || '未选语言'}`,
         platforms.x ? 'X' : '',
         platforms.facebook ? 'Facebook' : '',
         platforms.youtube ? 'YouTube预留' : '',
+        customX ? `X专属${customX}` : 'X全局',
+        customFacebook ? `FB专属${customFacebook}` : 'FB全局',
       ].filter(Boolean).join(' · ');
     }
 
@@ -3952,46 +4025,67 @@
     function renderOpenNewsChannelAccountMatrix(channel = {}) {
       if (!els.openNewsChannelAccountMatrix) return;
       const accounts = channel.accounts || {};
+      const globalX = openNewsBoundAccountDisplay('x');
+      const globalFacebook = openNewsBoundAccountDisplay('facebook');
       els.openNewsChannelAccountMatrix.innerHTML = OPENNEWS_CHANNEL_LANGUAGES.map(lang => {
         const account = accounts[lang.id] || {};
         const x = account.x || {};
         const facebook = account.facebook || {};
         const youtube = account.youtube || {};
+        const xCustom = x.binding_mode === 'custom' || !!(x.account_label || x.handle || x.profile_dir);
+        const facebookCustom = facebook.binding_mode === 'custom' || !!(facebook.page_name || facebook.page_id || facebook.page_access_token_configured);
         return `
           <div class="history-card opennews-account-row" data-language="${escapeHtml(lang.id)}">
             <div class="history-top">
               <div>
                 <div class="history-title">${escapeHtml(lang.label)}发布账号</div>
-                <div class="history-topic">为空时会回退到当前全局授权账号；Facebook token 留空会保留已保存值。</div>
+                <div class="history-topic">可直接使用当前全局账号，也可以为这个频道和语言绑定专属账号。</div>
               </div>
               <span class="badge">${(channel.languages || []).includes(lang.id) ? '已启用语言' : '未启用语言'}</span>
             </div>
-            <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr)); margin-top:10px;">
+            <div class="topbar-status" style="margin-top:10px;">
+              全局 X：${escapeHtml(globalX)}　｜　全局 Facebook：${escapeHtml(globalFacebook)}
+            </div>
+            <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); margin-top:10px;">
+              <div class="field">
+                <label>X 绑定方式</label>
+                <select class="select-input opennews-account-x-mode">
+                  <option value="global" ${xCustom ? '' : 'selected'}>使用当前全局 X</option>
+                  <option value="custom" ${xCustom ? 'selected' : ''}>使用专属 X 账号</option>
+                </select>
+              </div>
               <div class="field">
                 <label>X 账号标签 / handle</label>
-                <input class="select-input opennews-account-x-label" type="text" value="${escapeHtml(x.account_label || x.handle || '')}" placeholder="opennews_${escapeHtml(lang.id)}">
+                <input class="select-input opennews-account-x-label opennews-account-x-field" type="text" value="${escapeHtml(x.account_label || x.handle || '')}" placeholder="@opennews_${escapeHtml(lang.id)}">
               </div>
               <div class="field">
                 <label>X 浏览器 Profile 路径</label>
-                <input class="select-input opennews-account-x-profile" type="text" value="${escapeHtml(x.profile_dir || '')}" placeholder="/app/output/x_browser/profiles/${escapeHtml(lang.id)}">
+                <input class="select-input opennews-account-x-profile opennews-account-x-field" type="text" value="${escapeHtml(x.profile_dir || '')}" placeholder="/app/output/x_browser/profiles/${escapeHtml(lang.id)}">
               </div>
               <label class="check-card" style="min-height:auto; padding:12px;">
                 <span><strong>启用 X</strong><small>该语言发布 X</small></span>
                 <input class="opennews-account-x-enabled" type="checkbox" ${x.enabled === false ? '' : 'checked'}>
               </label>
             </div>
-            <div class="field-grid" style="grid-template-columns: repeat(4, minmax(0,1fr)); margin-top:10px;">
+            <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); margin-top:10px;">
+              <div class="field">
+                <label>Facebook 绑定方式</label>
+                <select class="select-input opennews-account-fb-mode">
+                  <option value="global" ${facebookCustom ? '' : 'selected'}>使用当前全局 Page</option>
+                  <option value="custom" ${facebookCustom ? 'selected' : ''}>使用专属 Page</option>
+                </select>
+              </div>
               <div class="field">
                 <label>Facebook Page 名称</label>
-                <input class="select-input opennews-account-fb-name" type="text" value="${escapeHtml(facebook.page_name || '')}" placeholder="OpenNews ${escapeHtml(lang.label)}">
+                <input class="select-input opennews-account-fb-name opennews-account-fb-field" type="text" value="${escapeHtml(facebook.page_name || '')}" placeholder="OpenNews ${escapeHtml(lang.label)}">
               </div>
               <div class="field">
                 <label>Facebook Page ID</label>
-                <input class="select-input opennews-account-fb-page" type="text" value="${escapeHtml(facebook.page_id || '')}" placeholder="page_id">
+                <input class="select-input opennews-account-fb-page opennews-account-fb-field" type="text" value="${escapeHtml(facebook.page_id || '')}" placeholder="page_id">
               </div>
               <div class="field">
                 <label>Facebook Page Token</label>
-                <input class="select-input opennews-account-fb-token" type="password" value="" placeholder="${facebook.page_access_token_configured ? '已配置，留空不变' : 'page access token'}">
+                <input class="select-input opennews-account-fb-token opennews-account-fb-field" type="password" value="" placeholder="${facebook.page_access_token_configured ? '已配置，留空不变' : 'page access token'}">
               </div>
               <label class="check-card" style="min-height:auto; padding:12px;">
                 <span><strong>启用 Facebook</strong><small>该语言发布 Page</small></span>
@@ -4015,6 +4109,23 @@
           </div>
         `;
       }).join('');
+      applyOpenNewsAccountModeControls();
+      els.openNewsChannelAccountMatrix.querySelectorAll('.opennews-account-x-mode, .opennews-account-fb-mode').forEach(select => {
+        select.addEventListener('change', applyOpenNewsAccountModeControls);
+      });
+    }
+
+    function applyOpenNewsAccountModeControls() {
+      document.querySelectorAll('.opennews-account-row').forEach(row => {
+        const xCustom = row.querySelector('.opennews-account-x-mode')?.value === 'custom';
+        row.querySelectorAll('.opennews-account-x-field').forEach(input => {
+          input.disabled = !xCustom;
+        });
+        const facebookCustom = row.querySelector('.opennews-account-fb-mode')?.value === 'custom';
+        row.querySelectorAll('.opennews-account-fb-field').forEach(input => {
+          input.disabled = !facebookCustom;
+        });
+      });
     }
 
     function renderOpenNewsChannelEditor() {
@@ -4040,6 +4151,7 @@
     }
 
     function renderOpenNewsChannels() {
+      renderOpenNewsBoundAccounts();
       renderOpenNewsChannelCards();
       renderOpenNewsChannelEditor();
       const config = state.openNewsChannelsConfig || {};
@@ -4067,19 +4179,28 @@
       channel.accounts = channel.accounts || {};
       document.querySelectorAll('.opennews-account-row').forEach(row => {
         const language = row.dataset.language || 'cn';
+        const xMode = row.querySelector('.opennews-account-x-mode')?.value || 'global';
+        const facebookMode = row.querySelector('.opennews-account-fb-mode')?.value || 'global';
+        const useCustomX = xMode === 'custom';
+        const useCustomFacebook = facebookMode === 'custom';
+        const xLabel = useCustomX ? (row.querySelector('.opennews-account-x-label')?.value?.trim() || '') : '';
+        const facebookPageName = useCustomFacebook ? (row.querySelector('.opennews-account-fb-name')?.value?.trim() || '') : '';
+        const facebookPageId = useCustomFacebook ? (row.querySelector('.opennews-account-fb-page')?.value?.trim() || '') : '';
         channel.accounts[language] = {
           language,
           x: {
             enabled: !!row.querySelector('.opennews-account-x-enabled')?.checked,
-            account_label: row.querySelector('.opennews-account-x-label')?.value?.trim() || '',
-            handle: row.querySelector('.opennews-account-x-label')?.value?.trim()?.replace(/^@/, '') || '',
-            profile_dir: row.querySelector('.opennews-account-x-profile')?.value?.trim() || '',
+            binding_mode: useCustomX ? 'custom' : 'global',
+            account_label: xLabel,
+            handle: xLabel.replace(/^@/, '') || '',
+            profile_dir: useCustomX ? (row.querySelector('.opennews-account-x-profile')?.value?.trim() || '') : '',
           },
           facebook: {
             enabled: !!row.querySelector('.opennews-account-fb-enabled')?.checked,
-            page_name: row.querySelector('.opennews-account-fb-name')?.value?.trim() || '',
-            page_id: row.querySelector('.opennews-account-fb-page')?.value?.trim() || '',
-            page_access_token: row.querySelector('.opennews-account-fb-token')?.value?.trim() || '',
+            binding_mode: useCustomFacebook ? 'custom' : 'global',
+            page_name: facebookPageName,
+            page_id: facebookPageId,
+            page_access_token: useCustomFacebook ? (row.querySelector('.opennews-account-fb-token')?.value?.trim() || '') : '',
           },
           youtube: {
             enabled: !!row.querySelector('.opennews-account-yt-enabled')?.checked,
@@ -4111,6 +4232,7 @@
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || '频道配置保存失败');
         state.openNewsChannelsConfig = data.config || payload;
+        state.openNewsAccountSummary = data.accounts_summary || state.openNewsAccountSummary;
         renderOpenNewsChannels();
         await loadOpenNewsBatchConfig();
         return true;
@@ -4295,6 +4417,7 @@
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || '自动抓取设置加载失败');
         state.openNewsChannelsConfig = data.channels_config || state.openNewsChannelsConfig;
+        state.openNewsAccountSummary = data.accounts_summary || state.openNewsAccountSummary;
         if (!state.openNewsSelectedChannelId && openNewsChannels()[0]) state.openNewsSelectedChannelId = openNewsChannels()[0].id;
         applyOpenNewsBatchConfig(data.config || {}, !!data.is_admin, data.presenter_state || {});
       } catch (error) {
@@ -6505,11 +6628,24 @@
         const variants = item.final_video_variants || {};
         const vertical = variants.vertical || item.final_video || {};
         const horizontal = variants.horizontal || null;
+        const scriptSegments = Array.isArray(item.script_segments) ? item.script_segments : [];
+        const scriptText = item.script_text || '';
         return `
           <div class="file-card">
             <div class="label">${escapeHtml(item.language_label || item.target_market || '版本')}</div>
             <div style="font-size:18px; font-weight:800; line-height:1.45; margin-top:6px;">${escapeHtml(item.title || '未生成标题')}</div>
             <div style="margin-top:8px; color:var(--muted); line-height:1.7;">${escapeHtml(item.social_post || (item.error ? '' : '正在准备多语言版本内容...'))}</div>
+            ${scriptText ? `<div style="margin-top:12px; padding:14px; border-radius:16px; background:rgba(244,247,250,0.92); border:1px solid var(--line); white-space:pre-wrap; line-height:1.8;">${escapeHtml(scriptText)}</div>` : ''}
+            ${!scriptText && scriptSegments.length ? `
+              <div style="display:grid; gap:10px; margin-top:12px;">
+                ${scriptSegments.map((segment, index) => `
+                  <div style="padding:12px 14px; border-radius:14px; background:rgba(244,247,250,0.92); border:1px solid var(--line); line-height:1.8;">
+                    <div class="label" style="margin-bottom:6px;">第 ${index + 1} 段</div>
+                    <div>${escapeHtml(segment.script || '')}</div>
+                  </div>
+                `).join('')}
+              </div>
+            ` : ''}
             ${item.error ? `<div class="topbar-status error" style="margin-top:10px;">${escapeHtml(item.error)}</div>` : ''}
             <div class="actions" style="margin-top:12px; justify-content:flex-start;">
               ${vertical.url ? `<a class="btn btn-primary" href="${escapeHtml(vertical.url)}" target="_blank" rel="noopener">打开竖屏版</a>` : `<button class="btn btn-secondary" type="button" disabled>竖屏版生成中</button>`}

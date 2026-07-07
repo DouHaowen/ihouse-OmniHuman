@@ -26,6 +26,10 @@ STATE_WAIT_SECONDS = float(os.getenv("IHOUSE_GPU_ORCHESTRATOR_STATE_WAIT_SECONDS
 PROFILE_SETTLE_SECONDS = float(os.getenv("IHOUSE_GPU_ORCHESTRATOR_PROFILE_SETTLE_SECONDS", "8"))
 READINESS_WAIT_SECONDS = float(os.getenv("IHOUSE_GPU_ORCHESTRATOR_READINESS_WAIT_SECONDS", "60"))
 QWEN3_TTS_API_TOKEN = os.getenv("QWEN3_TTS_API_TOKEN", "local-qwen3-tts-5090").strip()
+INFINITETALK_CLEANUP_SCRIPT = (
+    os.getenv("IHOUSE_INFINITETALK_CLEANUP_SCRIPT", "/home/saita/InfiniteTalk/cleanup_infinitetalk_processes.sh")
+    or "/home/saita/InfiniteTalk/cleanup_infinitetalk_processes.sh"
+).strip()
 
 SERVICE_GROUPS = {
     "tts": ["ihouse-qwen3-tts.service"],
@@ -45,11 +49,13 @@ PROFILES = {
     # OpenNews production uses only local Qwen3-TTS on the 5090.
     "material": {
         "stop": SERVICE_GROUPS["digital"],
+        "pre_start_commands": [[INFINITETALK_CLEANUP_SCRIPT]],
         "start": SERVICE_GROUPS["tts"] + SERVICE_GROUPS["tts_watchdog"],
     },
     # Safe idle keeps only TTS warm.
     "idle": {
         "stop": SERVICE_GROUPS["digital"],
+        "pre_start_commands": [[INFINITETALK_CLEANUP_SCRIPT]],
         "start": SERVICE_GROUPS["tts"] + SERVICE_GROUPS["tts_watchdog"],
     },
 }
@@ -97,6 +103,7 @@ def _run_systemctl(action: str, services: list[str]) -> list[dict[str, Any]]:
                     "stdout": "",
                     "stderr": "nvidia-smi failed; GPU is unavailable or has fallen off the bus",
                     "readiness": {"ok": False, "error": "gpu-unavailable"},
+                    "gpu_processes": _gpu_process_snapshot(),
                     "elapsed": 0,
                 }
             )
@@ -146,6 +153,7 @@ def _run_systemctl(action: str, services: list[str]) -> list[dict[str, Any]]:
         if action == "start" and final_ok:
             readiness = _wait_service_ready(service)
             final_ok = bool(readiness.get("ok", True))
+        gpu_processes = _gpu_process_snapshot() if service in GPU_SERVICES and action == "start" and not final_ok else []
         results.append(
             {
                 "service": service,
@@ -156,6 +164,7 @@ def _run_systemctl(action: str, services: list[str]) -> list[dict[str, Any]]:
                 "stdout": (completed.stdout or "").strip()[-1000:],
                 "stderr": (completed.stderr or "").strip()[-1000:],
                 "readiness": readiness,
+                "gpu_processes": gpu_processes,
                 "elapsed": round(time.time() - started_at, 2),
             }
         )
@@ -203,8 +212,92 @@ def _wait_service_ready(service: str) -> dict[str, Any]:
         "url": url,
         "attempts": attempts,
         "error": last_error[-500:],
+        "gpu_processes": _gpu_process_snapshot(),
         "waited": READINESS_WAIT_SECONDS,
     }
+
+
+def _gpu_process_snapshot() -> list[dict[str, Any]]:
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if completed.returncode != 0:
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw_line in (completed.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split(",", 2)]
+        if len(parts) != 3:
+            continue
+        pid_text, process_name, used_memory_text = parts
+        try:
+            pid = int(pid_text)
+        except Exception:
+            pid = 0
+        try:
+            used_memory_mb = int(float(used_memory_text))
+        except Exception:
+            used_memory_mb = 0
+        rows.append(
+            {
+                "pid": pid,
+                "process_name": process_name,
+                "used_memory_mb": used_memory_mb,
+            }
+        )
+    return rows
+
+
+def _run_commands(stage: str, commands: list[list[str]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for command in commands:
+        started_at = time.time()
+        if not command:
+            continue
+        program = command[0]
+        if not Path(program).exists():
+            results.append(
+                {
+                    "stage": stage,
+                    "command": command,
+                    "ok": False,
+                    "returncode": 127,
+                    "stdout": "",
+                    "stderr": f"missing command: {program}",
+                    "elapsed": round(time.time() - started_at, 2),
+                }
+            )
+            continue
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=SYSTEMCTL_TIMEOUT,
+        )
+        results.append(
+            {
+                "stage": stage,
+                "command": command,
+                "ok": completed.returncode == 0,
+                "returncode": completed.returncode,
+                "stdout": (completed.stdout or "").strip()[-1000:],
+                "stderr": (completed.stderr or "").strip()[-1000:],
+                "elapsed": round(time.time() - started_at, 2),
+            }
+        )
+    return results
 
 
 def _service_status(services: list[str]) -> list[dict[str, Any]]:
@@ -242,6 +335,7 @@ def health(x_token: str | None = Header(None)):
         "ok": True,
         "profile": STATE_PATH.read_text(encoding="utf-8").strip() if STATE_PATH.exists() else "",
         "gpu_available": _gpu_available(),
+        "gpu_processes": _gpu_process_snapshot(),
         "services": _service_status(_all_services()),
     }
 
@@ -258,6 +352,7 @@ def switch_profile(req: ProfileRequest, x_token: str | None = Header(None)):
     results.extend(_run_systemctl("stop", list(spec.get("stop") or [])))
     if spec.get("stop") and spec.get("start") and PROFILE_SETTLE_SECONDS > 0:
         time.sleep(PROFILE_SETTLE_SECONDS)
+    results.extend(_run_commands("pre_start", list(spec.get("pre_start_commands") or [])))
     results.extend(_run_systemctl("start", list(spec.get("start") or [])))
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(profile, encoding="utf-8")
@@ -266,5 +361,6 @@ def switch_profile(req: ProfileRequest, x_token: str | None = Header(None)):
         "profile": profile,
         "reason": req.reason,
         "results": results,
+        "gpu_processes": _gpu_process_snapshot(),
         "services": _service_status(_all_services()),
     }

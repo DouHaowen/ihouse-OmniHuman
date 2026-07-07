@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>iHouse 后端服务面板</title>
+  <style>
+    :root {
+      --bg:#f4f7f6;
+      --card:#ffffff;
+      --line:rgba(11,31,40,0.08);
+      --ink:#102031;
+      --muted:#66758a;
+      --brand:#0d6b63;
+      --brand-soft:rgba(13,107,99,0.10);
+      --shadow:0 18px 45px rgba(12,29,41,0.08);
+      --radius:24px;
+      --success:#0d6b63;
+      --success-soft:rgba(13,107,99,0.10);
+      --warn:#b87400;
+      --warn-soft:rgba(184,116,0,0.12);
+      --danger:#c64242;
+      --danger-soft:rgba(198,66,66,0.12);
+      --info:#5b6f8d;
+      --info-soft:rgba(91,111,141,0.12);
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0;
+      background:linear-gradient(180deg,#f8fbfa 0%, var(--bg) 100%);
+      color:var(--ink);
+      font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    .page { max-width:1580px; margin:0 auto; padding:24px; }
+    .shell {
+      background:rgba(255,255,255,0.76);
+      backdrop-filter:blur(18px);
+      border:1px solid rgba(255,255,255,0.65);
+      border-radius:32px;
+      box-shadow:var(--shadow);
+      overflow:hidden;
+    }
+    .topbar {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:16px;
+      padding:24px 28px;
+      border-bottom:1px solid var(--line);
+    }
+    .brand { display:flex; align-items:center; gap:14px; }
+    .brand-mark {
+      width:48px; height:48px; border-radius:16px;
+      display:grid; place-items:center;
+      background:linear-gradient(135deg,#0d6b63,#2a8c82);
+      color:#fff; font-weight:900;
+    }
+    .brand-copy strong { display:block; font-size:22px; }
+    .brand-copy span { color:var(--muted); }
+    .top-actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    .chip {
+      border-radius:999px;
+      padding:10px 14px;
+      background:var(--brand-soft);
+      color:var(--brand);
+      font-weight:700;
+    }
+    .btn {
+      border:1px solid var(--line);
+      background:#fff;
+      color:var(--ink);
+      min-height:42px;
+      padding:10px 16px;
+      border-radius:999px;
+      text-decoration:none;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      cursor:pointer;
+      font-weight:700;
+    }
+    .btn-primary { background:var(--brand); color:#fff; border-color:transparent; }
+    .content { padding:28px; display:grid; gap:18px; }
+    .grid { display:grid; gap:16px; }
+    .summary-grid { grid-template-columns:repeat(6,minmax(0,1fr)); }
+    .main-grid { grid-template-columns:1.2fr .8fr; align-items:start; }
+    .card {
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:18px;
+    }
+    .label {
+      font-size:12px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      color:var(--muted);
+      font-weight:800;
+      margin-bottom:8px;
+    }
+    .value { font-size:28px; font-weight:900; line-height:1.15; }
+    .helper { color:var(--muted); margin-top:8px; }
+    .section-head {
+      display:flex;
+      justify-content:space-between;
+      align-items:flex-start;
+      gap:16px;
+      margin-bottom:14px;
+    }
+    .section-title { font-size:20px; font-weight:900; margin:0; }
+    .section-desc { margin:6px 0 0; color:var(--muted); }
+    .services-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .service-card { display:grid; gap:12px; }
+    .service-head {
+      display:flex; justify-content:space-between; align-items:center; gap:12px;
+    }
+    .service-title { font-size:16px; font-weight:900; }
+    .status-badge {
+      border-radius:999px;
+      padding:5px 10px;
+      font-size:12px;
+      font-weight:800;
+      white-space:nowrap;
+    }
+    .level-success { background:var(--success-soft); color:var(--success); }
+    .level-warning { background:var(--warn-soft); color:var(--warn); }
+    .level-error { background:var(--danger-soft); color:var(--danger); }
+    .level-info { background:var(--info-soft); color:var(--info); }
+    .service-summary { font-weight:700; }
+    .service-detail { color:var(--muted); }
+    .meta-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+    .meta-item {
+      border:1px solid var(--line);
+      border-radius:18px;
+      background:rgba(248,251,250,0.92);
+      padding:12px;
+      display:grid;
+      gap:4px;
+    }
+    .meta-item span { color:var(--muted); font-size:12px; }
+    .meta-item strong { font-size:15px; line-height:1.3; }
+    .warning-list, .feed, .channel-list, .api-list { display:grid; gap:12px; }
+    .warning-item, .feed-item, .channel-item, .api-item {
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:14px;
+      background:rgba(248,251,250,0.92);
+      display:grid;
+      gap:6px;
+    }
+    .warning-item.level-warning { border-color:rgba(184,116,0,0.25); }
+    .warning-item.level-error { border-color:rgba(198,66,66,0.25); }
+    .warning-item.level-info { border-color:rgba(91,111,141,0.25); }
+    .feed-top, .channel-top, .api-top {
+      display:flex; justify-content:space-between; align-items:flex-start; gap:12px;
+    }
+    .feed-name, .channel-name, .api-name { font-size:15px; font-weight:900; }
+    .feed-meta, .channel-meta, .api-meta { color:var(--muted); font-size:13px; }
+    .channel-meta-grid {
+      display:grid;
+      grid-template-columns:repeat(4,minmax(0,1fr));
+      gap:10px;
+      margin-top:6px;
+    }
+    .channel-pill {
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      border-radius:999px;
+      padding:6px 10px;
+      background:rgba(248,251,250,0.92);
+      border:1px solid var(--line);
+      color:var(--muted);
+      font-size:12px;
+      font-weight:800;
+      margin-right:8px;
+      margin-top:4px;
+    }
+    .empty {
+      border:1px dashed var(--line);
+      border-radius:18px;
+      padding:18px;
+      text-align:center;
+      color:var(--muted);
+    }
+    details.raw-panel {
+      border:1px solid var(--line);
+      border-radius:20px;
+      overflow:hidden;
+      background:#fff;
+    }
+    details.raw-panel summary {
+      list-style:none;
+      cursor:pointer;
+      padding:16px 18px;
+      font-weight:900;
+    }
+    details.raw-panel summary::-webkit-details-marker { display:none; }
+    pre.raw-json {
+      margin:0;
+      padding:0 18px 18px;
+      overflow:auto;
+      white-space:pre-wrap;
+      word-break:break-word;
+      color:#0f2438;
+      font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+    }
+    a.inline-link { color:var(--brand); text-decoration:none; font-weight:800; }
+    @media (max-width: 1320px) {
+      .summary-grid, .services-grid, .channel-meta-grid, .meta-grid, .main-grid { grid-template-columns:1fr; }
+    }
+    @media (max-width: 720px) {
+      .page { padding:10px; }
+      .topbar { flex-direction:column; align-items:stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="shell">
+      <div class="topbar">
+        <div class="brand">
+          <div class="brand-mark">IH</div>
+          <div class="brand-copy">
+            <strong>iHouse 后端服务面板</strong>
+            <span>单独查看调度、GPU、配音、数字人队列与发布通道状态</span>
+          </div>
+        </div>
+        <div class="top-actions">
+          <div class="chip" id="sessionUser">管理员</div>
+          <div class="chip" id="lastUpdated">等待拉取状态</div>
+          <a class="btn" href="/">返回内容工作台</a>
+          <a class="btn" href="/admin/dashboard">管理员看板</a>
+          <button class="btn btn-primary" id="refreshBtn" type="button">立即刷新</button>
+        </div>
+      </div>
+      <div class="content">
+        <section class="grid summary-grid" id="summaryGrid"></section>
+
+        <section class="card" id="warningCard">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">告警与异常</h2>
+              <p class="section-desc">这里优先展示真正会影响自动化生产或发布的问题。</p>
+            </div>
+          </div>
+          <div class="warning-list" id="warningList"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">核心服务</h2>
+              <p class="section-desc">用来快速判断系统是不是卡在抓取、配音、GPU 资源，还是发布通道。</p>
+            </div>
+          </div>
+          <div class="grid services-grid" id="servicesGrid"></div>
+        </section>
+
+        <div class="grid main-grid">
+          <section class="card">
+            <div class="section-head">
+              <div>
+                <h2 class="section-title">OpenNews 频道状态</h2>
+                <p class="section-desc">科技、军事、政治、金融等频道拆开看，能更快定位哪一路没跑起来。</p>
+              </div>
+            </div>
+            <div class="channel-list" id="channelList"></div>
+          </section>
+
+          <section class="grid">
+            <section class="card">
+              <div class="section-head">
+                <div>
+                  <h2 class="section-title">当前任务</h2>
+                  <p class="section-desc">只看正在跑的任务，不用再回主页面找。</p>
+                </div>
+              </div>
+              <div class="feed" id="taskFeed"></div>
+            </section>
+
+            <section class="card">
+              <div class="section-head">
+                <div>
+                  <h2 class="section-title">最近事件</h2>
+                  <p class="section-desc">帮助判断队列是否还在持续推进，而不是表面挂着没动。</p>
+                </div>
+              </div>
+              <div class="feed" id="eventFeed"></div>
+            </section>
+          </section>
+        </div>
+
+        <section class="card">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">开发对接</h2>
+              <p class="section-desc">前端或联调时常用的接口入口都放在这里，避免再到代码里翻。</p>
+            </div>
+          </div>
+          <div class="api-list" id="apiList"></div>
+        </section>
+
+        <details class="raw-panel">
+          <summary>查看原始 JSON</summary>
+          <pre class="raw-json" id="rawJson">{}</pre>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const els = {
+      sessionUser: document.getElementById('sessionUser'),
+      lastUpdated: document.getElementById('lastUpdated'),
+      refreshBtn: document.getElementById('refreshBtn'),
+      summaryGrid: document.getElementById('summaryGrid'),
+      warningCard: document.getElementById('warningCard'),
+      warningList: document.getElementById('warningList'),
+      servicesGrid: document.getElementById('servicesGrid'),
+      channelList: document.getElementById('channelList'),
+      taskFeed: document.getElementById('taskFeed'),
+      eventFeed: document.getElementById('eventFeed'),
+      apiList: document.getElementById('apiList'),
+      rawJson: document.getElementById('rawJson'),
+    };
+
+    let refreshTimer = null;
+
+    function escapeHtml(value = '') {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatTime(ts) {
+      const value = Number(ts || 0);
+      if (!value) return '未记录';
+      const date = new Date(value * 1000);
+      if (Number.isNaN(date.getTime())) return '未记录';
+      return date.toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function relativeTime(ts) {
+      const value = Number(ts || 0);
+      if (!value) return '未记录';
+      const diff = Math.max(0, Math.floor(Date.now() / 1000 - value));
+      if (diff < 60) return `${diff} 秒前`;
+      if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+      if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+      return `${Math.floor(diff / 86400)} 天前`;
+    }
+
+    function levelClass(level = 'info') {
+      return `level-${['success','warning','error','info'].includes(level) ? level : 'info'}`;
+    }
+
+    async function ensureAdmin() {
+      const res = await fetch('/api/me');
+      if (res.status === 401) {
+        window.location.replace('/?logged_out=' + Date.now());
+        return null;
+      }
+      const data = await res.json();
+      const user = data.user;
+      if (!user || user.role !== 'admin') {
+        window.location.replace('/?logged_out=' + Date.now());
+        return null;
+      }
+      els.sessionUser.textContent = `${user.display_name} · ${user.username} · Admin`;
+      return user;
+    }
+
+    function renderSummary(summary = {}) {
+      const items = [
+        { label: '活跃任务', value: summary.running_task_count || 0, note: '系统内仍在执行的任务' },
+        { label: '数字人排队', value: summary.digital_human_waiting_count || 0, note: '等待进入数字人通道' },
+        { label: '5090 配音排队', value: summary.qwen_tts_waiting_count || 0, note: '等待本地配音生成' },
+        { label: 'GPU 等待队列', value: summary.gpu_waiting_count || 0, note: '等待 5090 资源' },
+        { label: '启用频道', value: summary.enabled_channel_count || 0, note: 'OpenNews 已开启栏目' },
+        { label: '当前告警', value: summary.warning_count || 0, note: '需要优先处理的问题数' },
+      ];
+      els.summaryGrid.innerHTML = items.map(item => `
+        <div class="card">
+          <div class="label">${escapeHtml(item.label)}</div>
+          <div class="value">${escapeHtml(item.value)}</div>
+          <div class="helper">${escapeHtml(item.note)}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderWarnings(warnings = []) {
+      if (!warnings.length) {
+        els.warningCard.style.display = 'none';
+        return;
+      }
+      els.warningCard.style.display = 'block';
+      els.warningList.innerHTML = warnings.map(item => `
+        <div class="warning-item ${levelClass(item.level)}">
+          <div class="feed-top">
+            <div class="feed-name">${escapeHtml(item.title || '系统提示')}</div>
+            <div class="status-badge ${levelClass(item.level)}">${escapeHtml(item.level || 'info')}</div>
+          </div>
+          <div class="feed-meta">${escapeHtml(item.detail || '')}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderServices(services = []) {
+      if (!services.length) {
+        els.servicesGrid.innerHTML = '<div class="empty">还没有可展示的服务状态。</div>';
+        return;
+      }
+      els.servicesGrid.innerHTML = services.map(service => `
+        <div class="card service-card">
+          <div class="service-head">
+            <div class="service-title">${escapeHtml(service.title || service.key || '服务')}</div>
+            <div class="status-badge ${levelClass(service.level)}">${escapeHtml(service.state_label || '未知')}</div>
+          </div>
+          <div class="service-summary">${escapeHtml(service.summary || '')}</div>
+          <div class="service-detail">${escapeHtml(service.detail || '')}</div>
+          <div class="meta-grid">
+            ${(service.meta || []).map(meta => `
+              <div class="meta-item">
+                <span>${escapeHtml(meta.label || '')}</span>
+                <strong>${escapeHtml(meta.value || '')}</strong>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function renderChannels(channels = []) {
+      if (!channels.length) {
+        els.channelList.innerHTML = '<div class="empty">当前还没有频道配置。</div>';
+        return;
+      }
+      els.channelList.innerHTML = channels.map(channel => {
+        const statusLevel = channel.last_run_error ? 'error' : (channel.enabled ? 'success' : 'info');
+        const statusLabel = channel.enabled ? (channel.last_run_error ? '异常' : '启用中') : '未启用';
+        return `
+          <div class="channel-item">
+            <div class="channel-top">
+              <div>
+                <div class="channel-name">${escapeHtml(channel.name || channel.id || '频道')}</div>
+                <div class="channel-meta">${escapeHtml(channel.category || 'all')} · ${escapeHtml(channel.time_range || '6h')} · 每 ${escapeHtml(channel.interval_minutes || 0)} 分钟抓取一次</div>
+              </div>
+              <div class="status-badge ${levelClass(statusLevel)}">${escapeHtml(statusLabel)}</div>
+            </div>
+            <div class="channel-meta">${escapeHtml(channel.last_run_error || channel.last_run_message || '还没有最近运行反馈')}</div>
+            <div>
+              ${(channel.languages || []).map(lang => `<span class="channel-pill">${escapeHtml(lang)}</span>`).join('')}
+              ${(channel.platforms?.x ? '<span class="channel-pill">X</span>' : '')}
+              ${(channel.platforms?.facebook ? '<span class="channel-pill">Facebook</span>' : '')}
+              ${(channel.platforms?.youtube ? '<span class="channel-pill">YouTube</span>' : '')}
+            </div>
+            <div class="channel-meta-grid">
+              <div class="meta-item"><span>抓取上限</span><strong>${escapeHtml(channel.limit || 0)}</strong></div>
+              <div class="meta-item"><span>成片数量</span><strong>${escapeHtml(channel.produce_limit || 0)}</strong></div>
+              <div class="meta-item"><span>上次运行</span><strong>${escapeHtml(relativeTime(channel.last_run_at))}</strong></div>
+              <div class="meta-item"><span>下次运行</span><strong>${escapeHtml(formatTime(channel.next_run_at))}</strong></div>
+            </div>
+            <div class="channel-meta">
+              X 语言账号：${escapeHtml(channel.account_summary?.x_enabled_languages || 0)} 个，
+              Facebook：${escapeHtml(channel.account_summary?.facebook_enabled_languages || 0)} 个，
+              YouTube：${escapeHtml(channel.account_summary?.youtube_enabled_languages || 0)} 个
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderTasks(tasks = []) {
+      if (!tasks.length) {
+        els.taskFeed.innerHTML = '<div class="empty">当前没有正在运行的任务。</div>';
+        return;
+      }
+      els.taskFeed.innerHTML = tasks.map(task => `
+        <div class="feed-item">
+          <div class="feed-top">
+            <div class="feed-name">${escapeHtml(task.topic || '未命名任务')}</div>
+            <div class="status-badge level-info">步骤 ${escapeHtml(task.step || 0)}/${escapeHtml(task.total_steps || 0)}</div>
+          </div>
+          <div class="feed-meta">${escapeHtml(task.owner_display_name || task.owner_username || '未知账号')} · ${escapeHtml(task.digital_human_engine_name || task.mode_label || '')}</div>
+          <div class="feed-meta">${escapeHtml(task.latest_message || '处理中')}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderEvents(events = []) {
+      if (!events.length) {
+        els.eventFeed.innerHTML = '<div class="empty">暂时没有最近事件。</div>';
+        return;
+      }
+      els.eventFeed.innerHTML = events.map(item => `
+        <div class="feed-item">
+          <div class="feed-top">
+            <div class="feed-name">${escapeHtml(item.label || item.type || '系统事件')}</div>
+            <div class="status-badge level-info">${escapeHtml(relativeTime(item.time || 0))}</div>
+          </div>
+          <div class="feed-meta">${escapeHtml(item.message || '')}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderApiRefs(items = []) {
+      if (!items.length) {
+        els.apiList.innerHTML = '<div class="empty">暂无接口信息。</div>';
+        return;
+      }
+      els.apiList.innerHTML = items.map(item => `
+        <div class="api-item">
+          <div class="api-top">
+            <div class="api-name">${escapeHtml(item.name || '接口')}</div>
+            <a class="inline-link" href="${escapeHtml(item.path || '#')}" target="_blank" rel="noreferrer">${escapeHtml(item.path || '')}</a>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function loadStatus() {
+      const res = await fetch('/api/admin/services-status');
+      if (res.status === 401) {
+        window.location.replace('/?logged_out=' + Date.now());
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '加载服务状态失败');
+      renderSummary(data.summary || {});
+      renderWarnings(data.warnings || []);
+      renderServices(data.services || []);
+      renderChannels(data.channels || []);
+      renderTasks(data.active_tasks || []);
+      renderEvents(data.recent_events || []);
+      renderApiRefs(data.api_reference || []);
+      els.lastUpdated.textContent = `更新于 ${formatTime(data.generated_at)}`;
+      els.rawJson.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function startRefresh() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      refreshTimer = setInterval(() => {
+        loadStatus().catch(error => {
+          els.lastUpdated.textContent = error.message || '刷新失败';
+        });
+      }, 8000);
+    }
+
+    async function init() {
+      const user = await ensureAdmin();
+      if (!user) return;
+      els.refreshBtn.addEventListener('click', () => {
+        loadStatus().catch(error => {
+          alert(error.message || '刷新失败');
+        });
+      });
+      await loadStatus();
+      startRefresh();
+    }
+
+    init().catch(error => {
+      els.lastUpdated.textContent = error.message || '初始化失败';
+    });
+  </script>
+</body>
+</html>

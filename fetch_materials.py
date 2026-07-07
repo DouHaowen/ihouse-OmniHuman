@@ -62,22 +62,22 @@ OPENNEWS_MATERIAL_LIBRARY_USAGE_PATH = os.getenv(
 OPENNEWS_MATERIAL_LIBRARY_USAGE_LOCK = threading.Lock()
 OPENNEWS_PEXELS_IMAGE_DAILY_LIMIT = max(
     1,
-    int(os.getenv("OPENNEWS_PEXELS_IMAGE_DAILY_LIMIT", "3") or "3"),
+    int(os.getenv("OPENNEWS_PEXELS_IMAGE_DAILY_LIMIT", "30") or "30"),
 )
 OPENNEWS_PEXELS_STRICT_MATCH_ENABLED = (
-    os.getenv("OPENNEWS_PEXELS_STRICT_MATCH_ENABLED", "1").strip().lower()
+    os.getenv("OPENNEWS_PEXELS_STRICT_MATCH_ENABLED", "0").strip().lower()
     not in {"0", "false", "no", "off"}
 )
 OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE = max(
     8,
-    min(80, int(os.getenv("OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE", "28") or "28")),
+    min(80, int(os.getenv("OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE", "16") or "16")),
 )
 OPENNEWS_PEXELS_RESCUE_MIN_RELEVANCE_SCORE = max(
     8,
-    min(40, int(os.getenv("OPENNEWS_PEXELS_RESCUE_MIN_RELEVANCE_SCORE", "14") or "14")),
+    min(40, int(os.getenv("OPENNEWS_PEXELS_RESCUE_MIN_RELEVANCE_SCORE", "8") or "8")),
 )
 OPENNEWS_PEXELS_EXACT_ENTITY_REQUIRED = (
-    os.getenv("OPENNEWS_PEXELS_EXACT_ENTITY_REQUIRED", "1").strip().lower()
+    os.getenv("OPENNEWS_PEXELS_EXACT_ENTITY_REQUIRED", "0").strip().lower()
     not in {"0", "false", "no", "off"}
 )
 OPENNEWS_PEXELS_BATCH_REGISTRY_DIR = os.getenv(
@@ -2764,6 +2764,17 @@ def _opennews_entity_context_queries(entity: str, base: str, visual_domain: str)
             f"{normalized_base} smartphone technology",
         ]
     if normalized_entity == "tesla_spacex":
+        if normalized_base == "spacex":
+            return [
+                "SpaceX rocket launch",
+                "SpaceX satellite deployment",
+                "aerospace rocket launch pad",
+            ]
+        if normalized_base == "tesla":
+            return [
+                "Tesla electric vehicle technology",
+                "Tesla factory technology",
+            ]
         return [
             f"{normalized_base} technology company",
             f"{normalized_base} aerospace innovation",
@@ -2875,8 +2886,24 @@ def _opennews_pexels_query_candidates(seg: dict, relevance_tokens: set[str], vis
             "exact_scene": bool(exact_scene),
         })
 
+    intent_blob = " ".join([
+        raw_keyword,
+        str(seg.get("material_keyword") or ""),
+        str(seg.get("title") or ""),
+        str(seg.get("title_zh") or ""),
+        " ".join(sorted(relevance_tokens)),
+    ]).lower()
     for entity in focus_entities:
         display_terms = OPENNEWS_ENTITY_DISPLAY_TERMS.get(entity) or [entity.replace("_", " ")]
+        if entity == "tesla_spacex":
+            display_terms = []
+            if "spacex" in intent_blob or "rocket" in intent_blob or "satellite" in intent_blob:
+                display_terms.append("SpaceX")
+            if "tesla" in intent_blob:
+                display_terms.append("Tesla")
+            if "elon" in intent_blob or "musk" in intent_blob:
+                display_terms.append("Elon Musk")
+            display_terms = display_terms or ["SpaceX"]
         for term in display_terms[:3]:
             base = re.sub(r"\s+", " ", str(term or "")).strip()
             if not base:
@@ -4310,10 +4337,10 @@ def _append_opennews_free_material_items(
             )
 
     stage_configs = [
-        ("exact_entity_scene", "exact_entity_scene", max(OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE + 6, 34)),
-        ("exact_entity", "exact_entity", max(OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE + 2, 30)),
-        ("exact_scene", "exact_scene", max(OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE, 26)),
-        ("related_scene", "related_match", max(16, OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE - 10)),
+        ("exact_entity_scene", "exact_entity_scene", max(16, OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE + 2)),
+        ("exact_entity", "exact_entity", max(14, OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE)),
+        ("exact_scene", "exact_scene", max(12, OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE - 2)),
+        ("related_scene", "related_match", max(8, OPENNEWS_PEXELS_MIN_RELEVANCE_SCORE - 8)),
     ]
     for bucket_name, stage_label, min_score_floor in stage_configs:
         if image_count >= max_source_images or len(material_items) >= max_total_materials:
@@ -5127,19 +5154,25 @@ def _fetch_opennews_materials_free_library_strategy(
     visual_domain = _opennews_visual_domain(seg, relevance_tokens) if relevance_tokens else "general"
     max_total_materials = OPENNEWS_MAX_MATERIALS
     max_source_images = OPENNEWS_MAX_SOURCE_IMAGES
-    image_count, pexels_rejections, selected_debug = _append_opennews_free_material_items(
-        seg=seg,
-        material_items=material_items,
-        material_paths=material_paths,
-        output_dir=output_dir,
-        segment_index=segment_index,
-        max_total_materials=max_total_materials,
-        max_source_images=max_source_images,
-        current_image_count=0,
-        used_source_urls=used_source_urls,
-        used_source_hashes=used_source_hashes,
-        batch_job_id=batch_job_id,
-    )
+    try:
+        image_count, pexels_rejections, selected_debug = _append_opennews_free_material_items(
+            seg=seg,
+            material_items=material_items,
+            material_paths=material_paths,
+            output_dir=output_dir,
+            segment_index=segment_index,
+            max_total_materials=max_total_materials,
+            max_source_images=max_source_images,
+            current_image_count=0,
+            used_source_urls=used_source_urls,
+            used_source_hashes=used_source_hashes,
+            batch_job_id=batch_job_id,
+        )
+    except Exception as exc:
+        image_count = 0
+        pexels_rejections = [{"reason": f"免费素材 API 异常，启用新闻图卡保底：{exc}"}]
+        selected_debug = []
+        print(f"  ⚠️ OpenNews 免费素材 API 异常，启用新闻图卡保底：{exc}")
 
     if image_count < OPENNEWS_LIBRARY_FALLBACK_MIN_SOURCE_IMAGES:
         print(

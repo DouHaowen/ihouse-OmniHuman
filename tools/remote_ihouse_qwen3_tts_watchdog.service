@@ -1,0 +1,19 @@
+[Unit]
+Description=iHouse Qwen3-TTS watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/saita/ihouse-OmniHuman
+Environment=QWEN3_TTS_WATCHDOG_URL=http://127.0.0.1:8895
+Environment=QWEN3_TTS_API_TOKEN=local-qwen3-tts-5090
+Environment=QWEN3_TTS_SYSTEMD_SERVICE=ihouse-qwen3-tts.service
+Environment=QWEN3_TTS_WATCHDOG_HEALTH_TIMEOUT=8
+Environment=QWEN3_TTS_WATCHDOG_VOICES_TIMEOUT=25
+Environment=QWEN3_TTS_WATCHDOG_POST_RESTART_WAIT=20
+Environment=QWEN3_TTS_WATCHDOG_RESTART_COOLDOWN_SECONDS=180
+Environment=QWEN3_TTS_WATCHDOG_STATE=/home/saita/qwen3-tts-service/watchdog_state.json
+Environment=QWEN3_TTS_WATCHDOG_CHECK_VOICES=0
+Environment=QWEN3_TTS_WATCHDOG_RESTART_ENABLED=1
+ExecStart=/home/saita/miniforge3/envs/qwen3-tts/bin/python /home/saita/ihouse-OmniHuman/tools/qwen3_tts_watchdog.py

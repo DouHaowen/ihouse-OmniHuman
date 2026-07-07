@@ -513,6 +513,7 @@ def _wait_post_result(
     deadline = time.time() + X_BROWSER_POST_TIMEOUT_SECONDS
     normalized_text = _normalize_text(text, limit=80)
     settle_deadline = time.time() + min(X_BROWSER_POST_SETTLE_SECONDS, X_BROWSER_POST_TIMEOUT_SECONDS)
+    best_candidate: dict[str, str] = {}
     while time.time() < deadline:
         post_id = _tweet_id_from_url(page.url)
         if post_id and (not expected_handle or f"/{expected_handle}/status/{post_id}" not in existing_profile_status_hrefs):
@@ -534,6 +535,7 @@ def _wait_post_result(
                 post_id = _tweet_id_from_url(href)
                 if post_id:
                     candidate = {"post_id": post_id, "x_url": f"https://x.com/i/web/status/{post_id}"}
+                    best_candidate = candidate
                     if debug_events is not None:
                         _append_debug_event(debug_events, "post_result_link_candidate", page, post_id=post_id, href=href)
         except Exception:
@@ -566,6 +568,10 @@ def _wait_post_result(
                         return {"post_id": post_id, "x_url": matching.get("x_url", "")}
             except Exception:
                 pass
+        if best_candidate:
+            if debug_events is not None:
+                _append_debug_event(debug_events, "post_result_candidate_fallback", page, **best_candidate)
+            return best_candidate
         time.sleep(2)
     return {"post_id": "", "x_url": ""}
 

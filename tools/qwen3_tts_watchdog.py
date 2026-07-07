@@ -28,7 +28,7 @@ POST_RESTART_WAIT = max(5, int(os.getenv("QWEN3_TTS_WATCHDOG_POST_RESTART_WAIT",
 RESTART_COOLDOWN_SECONDS = max(30, int(os.getenv("QWEN3_TTS_WATCHDOG_RESTART_COOLDOWN_SECONDS", "180") or "180"))
 STATE_PATH = Path(os.getenv("QWEN3_TTS_WATCHDOG_STATE", "/home/saita/qwen3-tts-service/watchdog_state.json"))
 CHECK_VOICES = (os.getenv("QWEN3_TTS_WATCHDOG_CHECK_VOICES", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-RESTART_ENABLED = (os.getenv("QWEN3_TTS_WATCHDOG_RESTART_ENABLED", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+RESTART_ENABLED = (os.getenv("QWEN3_TTS_WATCHDOG_RESTART_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _now() -> float:
@@ -100,6 +100,49 @@ def _status_payload(ok: bool, *, message: str, restarted: bool = False, detail: 
     }
 
 
+def _gpu_process_snapshot() -> list[dict[str, Any]]:
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return []
+    if completed.returncode != 0:
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw_line in (completed.stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split(",", 2)]
+        if len(parts) != 3:
+            continue
+        pid_text, process_name, used_memory_text = parts
+        try:
+            pid = int(pid_text)
+        except Exception:
+            pid = 0
+        try:
+            used_memory_mb = int(float(used_memory_text))
+        except Exception:
+            used_memory_mb = 0
+        rows.append(
+            {
+                "pid": pid,
+                "process_name": process_name,
+                "used_memory_mb": used_memory_mb,
+            }
+        )
+    return rows
+
+
 def _check_health() -> dict[str, Any]:
     health = _request_json("/health", HEALTH_TIMEOUT)
     if not health.get("ok"):
@@ -148,7 +191,16 @@ def main() -> int:
     if not _gpu_available():
         state["last_gpu_unavailable_at"] = _now()
         _save_state(state)
-        print(json.dumps(_status_payload(False, message="gpu unavailable; watchdog skipped qwen3-tts restart"), ensure_ascii=False))
+        print(
+            json.dumps(
+                _status_payload(
+                    False,
+                    message="gpu unavailable; watchdog skipped qwen3-tts restart",
+                    detail={"gpu_processes": _gpu_process_snapshot()},
+                ),
+                ensure_ascii=False,
+            )
+        )
         return 0
     try:
         health = _check_health()
@@ -168,7 +220,16 @@ def main() -> int:
             state["last_gpu_unavailable_at"] = _now()
             state["last_gpu_unavailable_reason"] = reason
             _save_state(state)
-            print(json.dumps(_status_payload(False, message=f"gpu unavailable after health failure; skipped restart: {reason[:200]}"), ensure_ascii=False))
+            print(
+                json.dumps(
+                    _status_payload(
+                        False,
+                        message=f"gpu unavailable after health failure; skipped restart: {reason[:200]}",
+                        detail={"gpu_processes": _gpu_process_snapshot()},
+                    ),
+                    ensure_ascii=False,
+                )
+            )
             return 0
         if not RESTART_ENABLED:
             state["last_unhealthy_at"] = _now()

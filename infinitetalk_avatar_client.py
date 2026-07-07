@@ -139,6 +139,28 @@ def _resolve_generation_timeout_seconds(audio: Path) -> int | None:
     return max(60, dynamic_timeout) if dynamic_timeout > 0 else None
 
 
+def cancel_infinitetalk_jobs(external_task_id: str) -> dict:
+    external_task_id = str(external_task_id or "").strip()
+    if not external_task_id:
+        return {"ok": False, "skipped": True, "reason": "missing_external_task_id"}
+    base_url = _base_url()
+    timeout = _request_timeout()
+    verify_tls = _verify_tls()
+    if not verify_tls:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    response = requests.post(
+        f"{base_url}/cancel-by-external-task/{external_task_id}",
+        timeout=min(timeout, 60),
+        verify=verify_tls,
+    )
+    if response.status_code >= 400:
+        raise InfiniteTalkAvatarError(f"InfiniteTalk 取消任务失败: HTTP {response.status_code} {response.text[:500]}")
+    payload = response.json() or {}
+    if not payload.get("ok"):
+        raise InfiniteTalkAvatarError(f"InfiniteTalk 取消任务失败: {payload}")
+    return payload
+
+
 def generate_infinitetalk_avatar_video(
     *,
     image_path: str,
@@ -260,6 +282,8 @@ def generate_infinitetalk_avatar_video(
                                 handle.write(chunk)
                     tmp_path.replace(output)
                     return str(output)
+                if status == "cancelled":
+                    raise InfiniteTalkAvatarError(status_data.get("message") or "InfiniteTalk 任务已取消")
                 if status == "error":
                     raise InfiniteTalkAvatarError(status_data.get("error") or "InfiniteTalk 生成失败")
                 time.sleep(poll_interval)
