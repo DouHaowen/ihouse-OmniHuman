@@ -10,6 +10,7 @@ import html
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -388,16 +389,15 @@ video_title, summary, script, material_keywords, material_visual_plan, fact_chec
     for model in [item for item in models if item]:
         for retry_index in range(_get_opennews_relay_retry_attempts()):
             try:
-                response = requests.post(
+                response = _post_opennews_relay(
                     _get_openai_relay_responses_url(),
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json=_opennews_relay_request_payload(
+                    _opennews_relay_request_payload(
                         model,
                         repair_prompt,
                         max_output_tokens=4096,
                         effort="low" if _opennews_relay_uses_office_api() else "minimal",
                     ),
-                    timeout=_get_opennews_relay_timeout_seconds(),
+                    api_key=api_key,
                 )
                 if response.status_code >= 400:
                     last_error = f"{response.status_code} {response.text[:500]}"
@@ -637,6 +637,30 @@ def _request_opennews_local_llm_json(prompt: str, *, max_output_tokens: int = 40
     raise RuntimeError(f"OpenNews 本地文案模型生成失败：{last_error}")
 
 
+def _get_opennews_relay_max_concurrency() -> int:
+    """同时打到文案中转网关的最大并发请求数。默认 2，避免一批多条×多语言齐发把账号池抽干（503 no available accounts）。"""
+    raw = os.getenv("OPENNEWS_RELAY_MAX_CONCURRENCY") or "2"
+    try:
+        return max(1, min(8, int(float(raw))))
+    except (TypeError, ValueError):
+        return 2
+
+
+# 全局限流：所有 OpenNews 文案中转请求共用一个信号量，跨批次/跨语言排队，防止账号池被并发抽干。
+_OPENNEWS_RELAY_SEMAPHORE = threading.Semaphore(_get_opennews_relay_max_concurrency())
+
+
+def _post_opennews_relay(url: str, payload: dict, *, api_key: str) -> "requests.Response":
+    """经全局信号量限流后向文案中转网关发起请求，避免并发抽干账号池。"""
+    with _OPENNEWS_RELAY_SEMAPHORE:
+        return requests.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=_get_opennews_relay_timeout_seconds(),
+        )
+
+
 def _request_opennews_relay_chat_json(prompt: str, *, max_output_tokens: int = 4096) -> dict:
     api_key = _get_openai_relay_api_key()
     if not api_key:
@@ -646,10 +670,9 @@ def _request_opennews_relay_chat_json(prompt: str, *, max_output_tokens: int = 4
         for retry_index in range(_get_opennews_relay_retry_attempts()):
             raw = ""
             try:
-                response = requests.post(
+                response = _post_opennews_relay(
                     _get_openai_relay_chat_completions_url(),
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json={
+                    {
                         "model": model,
                         "messages": [
                             {
@@ -661,7 +684,7 @@ def _request_opennews_relay_chat_json(prompt: str, *, max_output_tokens: int = 4
                         "max_tokens": max_output_tokens,
                         "stream": False,
                     },
-                    timeout=_get_opennews_relay_timeout_seconds(),
+                    api_key=api_key,
                 )
                 if response.status_code >= 400:
                     last_error = RuntimeError(f"API 中转新闻稿生成失败：{response.status_code} {response.text[:500]}")
@@ -719,11 +742,10 @@ def _request_opennews_relay_json(prompt: str, *, max_output_tokens: int = 4096) 
             for retry_index in range(_get_opennews_relay_retry_attempts()):
                 raw = ""
                 try:
-                    response = requests.post(
+                    response = _post_opennews_relay(
                         _get_openai_relay_responses_url(),
-                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                        json=_opennews_relay_request_payload(model, prompt, max_output_tokens=max_output_tokens, effort=effort),
-                        timeout=_get_opennews_relay_timeout_seconds(),
+                        _opennews_relay_request_payload(model, prompt, max_output_tokens=max_output_tokens, effort=effort),
+                        api_key=api_key,
                     )
                     if response.status_code >= 400:
                         last_error = RuntimeError(f"API 中转新闻稿生成失败：{response.status_code} {response.text[:500]}")
