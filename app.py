@@ -2956,7 +2956,14 @@ def run_pipeline_with_progress(
             )
             seg_with_audio = dict(seg)
             seg_with_audio["audio_path"] = audio_path
-            seg_with_audio["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+            try:
+                seg_with_audio["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+            except Exception as _audio_upload_exc:
+                # 火山 TOS 上传失败不应中断配音流程：本地合成只需 audio_path，
+                # audio_url 仅用于远程预览，缺失可容忍。之前此处异常会中断整段配音循环，
+                # 导致段落 audio_path 未回填 -> 合成报"没有可用的配音文件"。
+                seg_with_audio["audio_url"] = ""
+                print(f"[opennews audio] TOS 上传失败(不影响合成) seg={index}: {_audio_upload_exc!r}", flush=True)
             seg_with_audio["tts_provider"] = tts_provider
             seg_with_audio["target_market"] = target_market
             seg_with_audio["department_id"] = department_id
@@ -3362,7 +3369,11 @@ def run_resume_pipeline_with_progress(task_id: str):
             if audio_path and os.path.exists(audio_path):
                 seg["audio_path"] = audio_path
                 # Historical signed TOS URLs expire, so refresh them on every resume.
-                seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+                try:
+                    seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+                except Exception as _seg_audio_upload_exc:
+                    seg["audio_url"] = seg.get("audio_url", "")
+                    print(f"[opennews audio] TOS 上传失败(不影响合成): {_seg_audio_upload_exc!r}", flush=True)
             else:
                 tracker.log(f"补生成配音（{index}/{len(base_segments)}）：{script_text[:28]}...")
                 audio_path, tts_provider = _generate_audio_for_workflow(
@@ -3378,7 +3389,11 @@ def run_resume_pipeline_with_progress(task_id: str):
                     task_id=task_id,
                 )
                 seg["audio_path"] = audio_path
-                seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+                try:
+                    seg["audio_url"] = upload_file_and_get_url(audio_path, key_prefix="full/audio")
+                except Exception as _seg_audio_upload_exc:
+                    seg["audio_url"] = seg.get("audio_url", "")
+                    print(f"[opennews audio] TOS 上传失败(不影响合成): {_seg_audio_upload_exc!r}", flush=True)
                 seg["tts_provider"] = tts_provider
                 _record_cost_entry(
                     event_type="tts_generate",
