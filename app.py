@@ -176,6 +176,7 @@ from x_browser_login_manager import (
     x_browser_login_env_config,
     x_browser_login_status,
 )
+import topic_auto
 
 app = FastAPI(title="iHouse 内容工作台")
 SESSION_SAME_SITE = os.getenv("SESSION_SAME_SITE", "lax").strip().lower()
@@ -286,6 +287,7 @@ AVATAR_RULES = {
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 AUTO_DIGITAL_BATCH_DIR = OUTPUT_DIR / "auto_digital_batches"
+TOPIC_AUTO_DIR = OUTPUT_DIR / "topic_auto"
 FLOORPLAN_NAV_JOBS_DIR = OUTPUT_DIR / "admin_floorplan_nav_jobs"
 OPENNEWS_ADMIN_DIR = OUTPUT_DIR / "admin_opennews"
 OPENNEWS_AUTO_DIR = OUTPUT_DIR / "opennews_auto"
@@ -1229,6 +1231,7 @@ async def _start_opennews_batch_scheduler() -> None:
     _start_opennews_channel_scheduler(poll_seconds=20)
     _recover_pending_auto_digital_batches()
     _start_compose_ready_recovery_worker()
+    _start_topic_auto_scheduler(poll_seconds=60)
 
 VOICE_PRESETS = [
     {
@@ -4399,6 +4402,155 @@ def _recover_pending_auto_digital_batches(max_recovered: int = 3) -> None:
             break
     if recovered:
         print(f"🔁 已恢复批量数字人自动生成任务：{recovered} 个")
+
+
+# ── 话题接口自动化：从话题采集接口拉取选题，复用现有"批量数字人"管线制作 ──
+
+TOPIC_AUTO_OWNER = {"username": "topic_auto", "display_name": "话题自动化", "role": "admin"}
+
+
+def _topic_auto_config_path() -> Path:
+    return TOPIC_AUTO_DIR / "config.json"
+
+
+def _load_topic_auto_config() -> dict:
+    defaults = {
+        "scheduler_enabled": False,
+        "produce_limit": 3,
+        "interval_minutes": 120,
+        "next_run_at": 0,
+        "last_run_at": 0,
+        "last_run_message": "",
+    }
+    path = _topic_auto_config_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for key in defaults:
+                    if key in data:
+                        defaults[key] = data[key]
+        except Exception:
+            pass
+    return defaults
+
+
+def _save_topic_auto_config(config: dict) -> None:
+    TOPIC_AUTO_DIR.mkdir(parents=True, exist_ok=True)
+    _topic_auto_config_path().write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _find_running_topic_auto_batch() -> Optional[dict]:
+    for job in _list_auto_digital_batch_jobs_for_user(TOPIC_AUTO_OWNER, limit=20):
+        if job.get("source") == "topic_auto" and job.get("status") in {"queued", "running"}:
+            return job
+    return None
+
+
+def _run_topic_auto_produce_once(*, limit: Optional[int] = None, triggered_by: str = "manual") -> dict:
+    """拉取话题接口 -> 去重 -> 复用批量数字人管线创建并开始制作。不影响现有流程。"""
+    config = _load_topic_auto_config()
+    produce_limit = int(limit if limit is not None else (config.get("produce_limit") or 3))
+    produce_limit = max(1, min(10, produce_limit))
+    if not topic_auto.topic_auto_is_configured():
+        return {"ok": False, "error": "未配置 TOPIC_COLLECTOR_API_TOKEN，无法拉取话题选题"}
+    running = _find_running_topic_auto_batch()
+    if running:
+        return {"ok": True, "running": True, "batch_id": running.get("batch_id"), "message": "已有话题数字人批次在运行，本次不重复触发。"}
+    try:
+        records = topic_auto.fetch_topic_records()
+    except Exception as exc:
+        return {"ok": False, "error": f"拉取话题接口失败：{exc}"}
+    produced_ids = topic_auto.load_produced_ids_compat(str(TOPIC_AUTO_DIR))
+    selected = topic_auto.select_new_topics(records, produced_ids, limit=produce_limit)
+    if not selected:
+        msg = f"拉取 {len(records)} 条话题，无新选题（均已制作过）。"
+        config["last_run_at"] = time.time()
+        config["last_run_message"] = msg
+        _save_topic_auto_config(config)
+        return {"ok": True, "produced": 0, "total_records": len(records), "message": msg}
+    # 默认配置与现有"批量数字人"完全一致：中国市场 / MiniMax 女声 / 女主播C / 5090 InfiniteTalk / 本地Qwen文案
+    voice_preset = _get_voice_preset("mandarin_female", "cn")
+    avatar_option = _get_avatar_option("avatar_host_d.png", target_market_id="cn")
+    if not avatar_option:
+        return {"ok": False, "error": "默认女主播C(avatar_host_d.png)不存在，请先恢复"}
+    items: list[dict] = []
+    for i, topic in enumerate(selected, start=1):
+        items.append({
+            "index": i,
+            "topic": topic["topic"],
+            "angle": topic["angle"],
+            "status": "queued",
+            "task_id": "",
+            "history_id": "",
+            "error": "",
+            "topic_record_id": topic["record_id"],
+            "topic_tags": topic.get("tags") or [],
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        })
+    batch_id = f"tadb_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    job = {
+        "batch_id": batch_id,
+        "source": "topic_auto",
+        "seed_topic": "",
+        "status": "queued",
+        "message": "话题数字人批次已创建，等待启动",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "owner_username": TOPIC_AUTO_OWNER["username"],
+        "owner_display_name": TOPIC_AUTO_OWNER["display_name"],
+        "owner_role": TOPIC_AUTO_OWNER["role"],
+        "target_market": "cn",
+        "department_id": "real_estate",
+        "voice_preset_id": voice_preset.get("id"),
+        "avatar_id": avatar_option.get("id"),
+        "speed": float(voice_preset.get("default_speed") or 1.1),
+        "script_model": SCRIPT_MODEL_LOCAL_QWEN,
+        "digital_human_engine": INFINITETALK_ENGINE_ID,
+        "request_context": {"public_base_url": os.getenv("PUBLIC_BASE_URL", "https://aiagent.office.ihousejapan.cn")},
+        "items": items,
+    }
+    _save_auto_digital_batch_job(job)
+    threading.Thread(target=_run_auto_digital_batch, args=(batch_id,), daemon=True).start()
+    # 提交即标记去重，避免重复制作同一条话题
+    for topic in selected:
+        produced_ids.add(topic["record_id"])
+    topic_auto.save_produced_ids(str(TOPIC_AUTO_DIR), produced_ids)
+    msg = f"已从话题接口选取 {len(selected)} 条新选题，创建数字人批次 {batch_id} 并开始制作。"
+    config["last_run_at"] = time.time()
+    config["last_run_message"] = msg
+    _save_topic_auto_config(config)
+    print(f"[topic-auto] {triggered_by}: {msg}", flush=True)
+    return {
+        "ok": True,
+        "produced": len(selected),
+        "total_records": len(records),
+        "batch_id": batch_id,
+        "topics": [t["topic"] for t in selected],
+        "message": msg,
+    }
+
+
+def _start_topic_auto_scheduler(poll_seconds: int = 60) -> None:
+    """话题自动化定时器：仅当 config.scheduler_enabled 为真时按 interval 拉取+制作。默认关闭。"""
+    def loop() -> None:
+        while True:
+            try:
+                config = _load_topic_auto_config()
+                if config.get("scheduler_enabled"):
+                    now = time.time()
+                    next_run_at = float(config.get("next_run_at") or 0)
+                    if now >= next_run_at:
+                        result = _run_topic_auto_produce_once(triggered_by="scheduler")
+                        config = _load_topic_auto_config()
+                        config["next_run_at"] = now + max(10, int(config.get("interval_minutes") or 120)) * 60
+                        _save_topic_auto_config(config)
+            except Exception as exc:
+                print(f"[topic-auto scheduler] loop error: {exc!r}", flush=True)
+            time.sleep(max(30, int(poll_seconds)))
+
+    threading.Thread(target=loop, name="topic-auto-scheduler", daemon=True).start()
 
 
 def _push_live_event(event_type: str, message: str, task: Optional[dict] = None, extra: Optional[dict] = None):
@@ -15401,6 +15553,80 @@ async def auto_digital_cancel_batch(batch_id: str, request: Request):
             item["updated_at"] = time.time()
     _save_auto_digital_batch_job(job)
     return {"ok": True, "batch": _auto_digital_batch_payload(job)}
+
+
+# ── 话题接口自动化 路由（管理员）──
+
+@app.post("/api/topic-auto/run-now")
+async def topic_auto_run_now(request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以触发话题自动化")
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    limit = payload.get("limit") if isinstance(payload, dict) else None
+    result = _run_topic_auto_produce_once(
+        limit=int(limit) if limit else None,
+        triggered_by=f"manual:{user.get('username') or 'admin'}",
+    )
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@app.get("/api/topic-auto/status")
+async def topic_auto_status(request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以查看话题自动化状态")
+    if error:
+        return error
+    config = _load_topic_auto_config()
+    produced_ids = topic_auto.load_produced_ids_compat(str(TOPIC_AUTO_DIR))
+    batches = [
+        _auto_digital_batch_payload(job)
+        for job in _list_auto_digital_batch_jobs_for_user(TOPIC_AUTO_OWNER, limit=10)
+        if job.get("source") == "topic_auto"
+    ]
+    running = _find_running_topic_auto_batch()
+    return {
+        "ok": True,
+        "configured": topic_auto.topic_auto_is_configured(),
+        "produced_count": len(produced_ids),
+        "running_batch_id": (running or {}).get("batch_id") if running else "",
+        "config": config,
+        "recent_batches": batches,
+    }
+
+
+@app.get("/api/topic-auto/config")
+async def topic_auto_get_config(request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以查看话题自动化配置")
+    if error:
+        return error
+    return {"ok": True, "configured": topic_auto.topic_auto_is_configured(), "config": _load_topic_auto_config()}
+
+
+@app.post("/api/topic-auto/config")
+async def topic_auto_set_config(request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以修改话题自动化配置")
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "配置格式错误"}, status_code=400)
+    config = _load_topic_auto_config()
+    if "scheduler_enabled" in payload:
+        config["scheduler_enabled"] = bool(payload.get("scheduler_enabled"))
+        if config["scheduler_enabled"]:
+            config["next_run_at"] = 0  # 开启后尽快跑一次
+    if "produce_limit" in payload:
+        config["produce_limit"] = max(1, min(10, int(payload.get("produce_limit") or 3)))
+    if "interval_minutes" in payload:
+        config["interval_minutes"] = max(10, int(payload.get("interval_minutes") or 120))
+    _save_topic_auto_config(config)
+    return {"ok": True, "config": config}
 
 
 @app.get("/api/tasks/active")
