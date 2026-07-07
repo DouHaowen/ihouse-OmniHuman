@@ -28,25 +28,17 @@ X_BROWSER_DEBUG_DIR = Path(os.getenv("X_BROWSER_DEBUG_DIR", str(X_BROWSER_STATE_
 
 
 def _resolve_browser_executable() -> str:
-    candidates = []
+    # 只在显式设置 X_BROWSER_EXECUTABLE_PATH 时使用指定的浏览器；
+    # 否则返回空字符串，让 Playwright 使用它自带的、版本匹配的 chromium。
+    # 不再自动回退到系统 chromium —— 系统包版本常与 Playwright 协议不兼容，
+    # 导致 launch_persistent_context 启动即崩（TargetClosedError）。
     if X_BROWSER_EXECUTABLE_PATH:
-        candidates.append(X_BROWSER_EXECUTABLE_PATH)
-    candidates.extend(
-        [
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/snap/bin/chromium",
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ]
-    )
-    for candidate in candidates:
         try:
-            path = Path(candidate)
+            path = Path(X_BROWSER_EXECUTABLE_PATH)
             if path.is_file():
                 return str(path)
         except Exception:
-            continue
+            pass
     return ""
 
 
@@ -156,7 +148,13 @@ def _write_debug_log(path: Path, events: list[dict[str, Any]]) -> str:
 
 def _looks_logged_out(page: Any) -> bool:
     url = str(getattr(page, "url", "") or "")
-    if "/login" in url or "/i/flow/login" in url:
+    if (
+        "/login" in url
+        or "/i/flow/login" in url
+        or "/onboarding" in url
+        or "redirect_after_login" in url
+        or "/i/flow/signup" in url
+    ):
         return True
     selectors = [
         'input[name="text"]',

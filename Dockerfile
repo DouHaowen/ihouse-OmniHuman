@@ -57,6 +57,10 @@ COPY requirements.txt .
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
+# 安装 Playwright 自带且版本匹配的 chromium，供 X 浏览器自动发布使用。
+# 不依赖系统 apt 的 chromium —— 系统版本常与 Playwright 协议不兼容导致启动崩溃。
+RUN python -m playwright install chromium
+
 COPY . .
 
 RUN mkdir -p /app/output /app/assets
