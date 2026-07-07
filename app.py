@@ -5589,7 +5589,7 @@ def _find_reusable_running_task(*, owner_username: str, submission_key: str, ded
 
 
 def _schedule_opennews_post_compose_publish(task_id: str, output_dir: str, result_data: dict) -> None:
-    """在 OpenNews 流水线尾部自动发布到 X 与 Facebook。"""
+    """在 OpenNews 流水线尾部自动发布到 X、Facebook 与 YouTube。"""
     def _runner() -> None:
         try:
             path = Path(output_dir)
@@ -5605,6 +5605,7 @@ def _schedule_opennews_post_compose_publish(task_id: str, output_dir: str, resul
                 final["material_review"] = material_review
             final["x_auto_publish_error"] = publish_result.get("x_error") or ""
             final["facebook_auto_publish_error"] = publish_result.get("facebook_error") or ""
+            final["youtube_auto_publish_error"] = publish_result.get("youtube_error") or ""
             _save_result_to_output_dir(path, final)
             try:
                 task = tasks.get(task_id)
@@ -6332,9 +6333,13 @@ def _publish_opennews_result_to_youtube(
     existing_records = result.get("youtube_publish_records")
     if not isinstance(existing_records, list):
         existing_records = []
+    channel_id = _opennews_result_channel_id(result)
     for aspect in aspects:
         aspect_key = str(aspect or "").strip().lower()
         if aspect_key not in {"horizontal", "vertical"}:
+            continue
+        target_market = str((result.get("workflow_config") or {}).get("target_market") or "cn")
+        if not _opennews_publish_account_for(channel_id, target_market, "youtube").get("enabled", True):
             continue
         video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_key)
         thumbnail_path = _resolve_youtube_thumbnail(output_dir, result, aspect_ratio=aspect_key)
@@ -6373,6 +6378,8 @@ def _publish_opennews_result_to_youtube(
                 continue
             target_market = str(version.get("target_market") or "").strip()
             if not target_market:
+                continue
+            if not _opennews_publish_account_for(channel_id, target_market, "youtube").get("enabled", True):
                 continue
             version_metadata = _build_default_youtube_metadata(
                 version,
@@ -13876,14 +13883,24 @@ def _auto_publish_opennews_result_data(
         result["material_review"] = material_review
     x_records: list[dict] = []
     facebook_records: list[dict] = []
+    youtube_records: list[dict] = []
     x_error = ""
     facebook_error = ""
+    youtube_error = ""
     x_auto_publish = _parse_bool_form(workflow_config.get("x_auto_publish")) if "x_auto_publish" in workflow_config else _opennews_x_auto_publish_default()
     facebook_auto_publish = _parse_bool_form(workflow_config.get("facebook_auto_publish")) if "facebook_auto_publish" in workflow_config else _opennews_facebook_auto_publish_default()
+    youtube_auto_publish = _parse_bool_form(workflow_config.get("youtube_auto_publish")) if "youtube_auto_publish" in workflow_config else _opennews_youtube_auto_publish_default()
     if _opennews_x_auto_publish_disabled():
         x_auto_publish = False
     if _opennews_facebook_auto_publish_disabled():
         facebook_auto_publish = False
+    if _opennews_youtube_auto_publish_disabled():
+        youtube_auto_publish = False
+    youtube_aspects_raw = workflow_config.get("youtube_aspects") or ["vertical"]
+    if isinstance(youtube_aspects_raw, str):
+        youtube_aspects = ["horizontal", "vertical"] if youtube_aspects_raw == "both" else [part.strip() for part in youtube_aspects_raw.split(",") if part.strip()]
+    else:
+        youtube_aspects = [str(part).strip() for part in (youtube_aspects_raw or []) if str(part).strip()] or ["vertical"]
     x_aspects_raw = workflow_config.get("x_aspects") or ["vertical"]
     if isinstance(x_aspects_raw, str):
         x_aspects = ["horizontal", "vertical"] if x_aspects_raw == "both" else [part.strip() for part in x_aspects_raw.split(",") if part.strip()]
@@ -13914,6 +13931,17 @@ def _auto_publish_opennews_result_data(
             )
         except Exception as exc:
             facebook_error = str(exc)
+    if youtube_auto_publish:
+        try:
+            youtube_records = _publish_opennews_result_to_youtube(
+                output_dir,
+                result,
+                aspects=youtube_aspects,
+                privacy_status="public",
+                include_language_versions=_opennews_youtube_publish_language_versions_enabled(),
+            )
+        except Exception as exc:
+            youtube_error = str(exc)
     if x_records:
         result["x_publish_records"] = x_records + list(result.get("x_publish_records") or [])[len(x_records):]
         result["x_publish_latest"] = x_records[0]
@@ -13930,12 +13958,22 @@ def _auto_publish_opennews_result_data(
     elif facebook_error:
         result["facebook_auto_publish_error"] = facebook_error
         result["facebook_publish_error"] = facebook_error
+    if youtube_records:
+        result["youtube_publish_records"] = youtube_records + list(result.get("youtube_publish_records") or [])[len(youtube_records):]
+        result["youtube_publish_latest"] = youtube_records[0]
+        result.pop("youtube_auto_publish_error", None)
+        result.pop("youtube_publish_error", None)
+    elif youtube_error:
+        result["youtube_auto_publish_error"] = youtube_error
+        result["youtube_publish_error"] = youtube_error
     _save_result_to_output_dir(output_dir, result)
     return {
         "x_records": x_records,
         "facebook_records": facebook_records,
+        "youtube_records": youtube_records,
         "x_error": x_error,
         "facebook_error": facebook_error,
+        "youtube_error": youtube_error,
         "material_review": material_review,
     }
 
