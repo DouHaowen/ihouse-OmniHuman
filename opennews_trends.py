@@ -340,7 +340,9 @@ def _fetch_gdelt_articles(*, category: TrendCategory, keyword: str = "", hours: 
         payload = response.json()
     except Exception as exc:
         raise RuntimeError(f"GDELT 返回非 JSON：{response.text[:180]}") from exc
-    articles = payload.get("articles") if isinstance(payload, dict) else []
+    articles = (payload.get("articles") or []) if isinstance(payload, dict) else []
+    if not isinstance(articles, list):
+        articles = []
     parsed = [_article_from_gdelt(item, category) for item in articles if isinstance(item, dict)]
     _GDELT_CACHE[cache_key] = (time.time(), [dict(item) for item in parsed])
     return parsed
