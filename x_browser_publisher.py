@@ -33,30 +33,61 @@ X_BROWSER_EXECUTABLE_PATH = os.getenv("X_BROWSER_EXECUTABLE_PATH", "").strip()
 X_BROWSER_DEBUG_DIR = Path(os.getenv("X_BROWSER_DEBUG_DIR", str(X_BROWSER_STATE_DIR / "debug"))).resolve()
 
 
+def _xvfb_running(display: str) -> bool:
+    """扫描 /proc 判断是否真有 Xvfb 进程在服务该 display（不依赖可能残留的 socket 文件）。"""
+    want = display.encode()
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                    parts = fh.read().split(b"\x00")
+            except Exception:
+                continue
+            if parts and parts[0].split(b"/")[-1] == b"Xvfb" and want in parts:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _ensure_publish_display() -> str:
-    """确保有一个可用的虚拟显示(Xvfb)供有头发布使用。返回 DISPLAY 值；失败返回空串。
-    幂等：显示已在运行(存在 X lock 文件)则直接复用。"""
+    """确保有一个真正在运行的虚拟显示(Xvfb)供有头发布使用。返回 DISPLAY，失败返回空串。
+    以“是否存在 Xvfb 进程”为准——重启后可能残留僵尸 socket 文件，只看文件会误判。"""
     display = X_BROWSER_DISPLAY
     if not display:
         return ""
-    lock = Path(f"/tmp/.X{display.lstrip(':')}-lock")
-    if lock.exists():
+    if _xvfb_running(display):
         return display
     xvfb = shutil.which("Xvfb")
     if not xvfb:
         return ""
+    num = display.lstrip(":").split(".")[0]
+    # 清理僵尸 lock / socket，否则 Xvfb 会因“display 被占用”启动即退出。
+    for stale in (Path(f"/tmp/.X{num}-lock"), Path(f"/tmp/.X11-unix/X{num}")):
+        try:
+            stale.unlink()
+        except Exception:
+            pass
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [xvfb, display, "-screen", "0", X_BROWSER_SCREEN, "-ac", "+extension", "RANDR"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
-        time.sleep(1.5)
-        return display if lock.exists() else display
     except Exception:
         return ""
+    socket_path = Path(f"/tmp/.X11-unix/X{num}")
+    for _ in range(40):  # 最多等约 8 秒
+        if socket_path.exists() and _xvfb_running(display):
+            return display
+        if proc.poll() is not None:  # Xvfb 启动即退出
+            return ""
+        time.sleep(0.2)
+    return ""
 
 
 def _resolve_browser_executable() -> str:
