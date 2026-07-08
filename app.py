@@ -4548,6 +4548,57 @@ def _find_running_topic_auto_batch() -> Optional[dict]:
     return None
 
 
+def _start_topic_auto_batch(selected: list[dict]) -> dict:
+    """用给定选题（已抽取，含 topic/angle/record_id）创建并启动一个话题数字人批次。
+    自动流程和面板手动勾选制作共用。返回 {ok, batch_id} 或 {ok:False, error}。"""
+    if not selected:
+        return {"ok": False, "error": "没有可制作的选题"}
+    voice_preset = _get_voice_preset("mandarin_female", "cn")
+    avatar_option = _get_avatar_option("avatar_host_d.png", target_market_id="cn")
+    if not avatar_option:
+        return {"ok": False, "error": "默认女主播C(avatar_host_d.png)不存在，请先恢复"}
+    items: list[dict] = []
+    for i, topic in enumerate(selected, start=1):
+        items.append({
+            "index": i,
+            "topic": topic["topic"],
+            "angle": topic.get("angle") or "",
+            "status": "queued",
+            "task_id": "",
+            "history_id": "",
+            "error": "",
+            "topic_record_id": topic["record_id"],
+            "topic_tags": topic.get("tags") or [],
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        })
+    batch_id = f"tadb_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    job = {
+        "batch_id": batch_id,
+        "source": "topic_auto",
+        "seed_topic": "",
+        "status": "queued",
+        "message": "话题数字人批次已创建，等待启动",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "owner_username": TOPIC_AUTO_OWNER["username"],
+        "owner_display_name": TOPIC_AUTO_OWNER["display_name"],
+        "owner_role": TOPIC_AUTO_OWNER["role"],
+        "target_market": "cn",
+        "department_id": "real_estate",
+        "voice_preset_id": voice_preset.get("id"),
+        "avatar_id": avatar_option.get("id"),
+        "speed": float(voice_preset.get("default_speed") or 1.1),
+        "script_model": SCRIPT_MODEL_LOCAL_QWEN,
+        "digital_human_engine": INFINITETALK_ENGINE_ID,
+        "request_context": {"public_base_url": os.getenv("PUBLIC_BASE_URL", "https://aiagent.office.ihousejapan.cn")},
+        "items": items,
+    }
+    _save_auto_digital_batch_job(job)
+    threading.Thread(target=_run_auto_digital_batch, args=(batch_id,), daemon=True).start()
+    return {"ok": True, "batch_id": batch_id}
+
+
 def _reconcile_topic_auto_state(state: dict, *, max_attempts: int, limit: int = 30) -> bool:
     """把最近已结束的话题批次逐条对账进 state：成功=done(不再做)，失败=attempts+1(可重试)。返回是否有更新。"""
     changed = False
@@ -4609,50 +4660,10 @@ def _run_topic_auto_produce_once(*, limit: Optional[int] = None, triggered_by: s
         config["last_run_message"] = msg
         _save_topic_auto_config(config)
         return {"ok": True, "produced": 0, "total_records": len(records), "message": msg}
-    # 默认配置与现有"批量数字人"完全一致：中国市场 / MiniMax 女声 / 女主播C / 5090 InfiniteTalk / 本地Qwen文案
-    voice_preset = _get_voice_preset("mandarin_female", "cn")
-    avatar_option = _get_avatar_option("avatar_host_d.png", target_market_id="cn")
-    if not avatar_option:
-        return {"ok": False, "error": "默认女主播C(avatar_host_d.png)不存在，请先恢复"}
-    items: list[dict] = []
-    for i, topic in enumerate(selected, start=1):
-        items.append({
-            "index": i,
-            "topic": topic["topic"],
-            "angle": topic["angle"],
-            "status": "queued",
-            "task_id": "",
-            "history_id": "",
-            "error": "",
-            "topic_record_id": topic["record_id"],
-            "topic_tags": topic.get("tags") or [],
-            "created_at": time.time(),
-            "updated_at": time.time(),
-        })
-    batch_id = f"tadb_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-    job = {
-        "batch_id": batch_id,
-        "source": "topic_auto",
-        "seed_topic": "",
-        "status": "queued",
-        "message": "话题数字人批次已创建，等待启动",
-        "created_at": time.time(),
-        "updated_at": time.time(),
-        "owner_username": TOPIC_AUTO_OWNER["username"],
-        "owner_display_name": TOPIC_AUTO_OWNER["display_name"],
-        "owner_role": TOPIC_AUTO_OWNER["role"],
-        "target_market": "cn",
-        "department_id": "real_estate",
-        "voice_preset_id": voice_preset.get("id"),
-        "avatar_id": avatar_option.get("id"),
-        "speed": float(voice_preset.get("default_speed") or 1.1),
-        "script_model": SCRIPT_MODEL_LOCAL_QWEN,
-        "digital_human_engine": INFINITETALK_ENGINE_ID,
-        "request_context": {"public_base_url": os.getenv("PUBLIC_BASE_URL", "https://aiagent.office.ihousejapan.cn")},
-        "items": items,
-    }
-    _save_auto_digital_batch_job(job)
-    threading.Thread(target=_run_auto_digital_batch, args=(batch_id,), daemon=True).start()
+    started = _start_topic_auto_batch(selected)
+    if not started.get("ok"):
+        return started
+    batch_id = started["batch_id"]
     # 不在提交时去重：成功/失败由下一轮对账写入 topic_state（成功才不再做、失败可重试）
     msg = f"已从话题接口选取 {len(selected)} 条待做选题，创建数字人批次 {batch_id} 并开始逐条制作。"
     config["last_run_at"] = time.time()
@@ -16046,6 +16057,80 @@ async def topic_auto_set_config(request: Request):
         config["max_attempts"] = max(1, min(10, int(payload.get("max_attempts") or 3)))
     _save_topic_auto_config(config)
     return {"ok": True, "config": config}
+
+
+@app.get("/api/topic-auto/topics")
+async def topic_auto_topics(request: Request):
+    """列出接口拉到的全部话题 + 每条状态（供页面浏览、勾选制作）。"""
+    user, error = _require_admin_user(request, "只有管理员可以查看话题列表")
+    if error:
+        return error
+    if not topic_auto.topic_auto_is_configured():
+        return JSONResponse({"error": "未配置 TOPIC_COLLECTOR_API_TOKEN"}, status_code=400)
+    try:
+        records = topic_auto.fetch_topic_records()
+    except Exception as exc:
+        return JSONResponse({"error": f"拉取话题接口失败：{exc}"}, status_code=502)
+    state = topic_auto.load_topic_state(str(TOPIC_AUTO_DIR))
+    rec_state = state.get("records") or {}
+    topics = []
+    for r in records:
+        ex = topic_auto.extract_topic_from_record(r)
+        if not ex:
+            continue
+        st = rec_state.get(ex["record_id"]) or {}
+        status = str(st.get("status") or "pending")
+        topics.append({
+            "record_id": ex["record_id"],
+            "topic": ex["topic"],
+            "angle": ex.get("angle") or "",
+            "tags": ex.get("tags") or [],
+            "created_at": ex.get("created_at") or "",
+            "status": status if status in {"done", "failed", "skipped"} else "pending",
+            "attempts": int(st.get("attempts") or 0),
+        })
+    running = _find_running_topic_auto_batch()
+    return {"ok": True, "total": len(topics), "running_batch_id": (running or {}).get("batch_id") if running else "", "topics": topics}
+
+
+@app.post("/api/topic-auto/produce-selected")
+async def topic_auto_produce_selected(request: Request):
+    """把页面勾选的话题走一站式(批量数字人)制作。"""
+    user, error = _require_admin_user(request, "只有管理员可以制作话题视频")
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    ids = payload.get("record_ids") if isinstance(payload, dict) else None
+    wanted = {str(x).strip() for x in (ids or []) if str(x).strip()}
+    if not wanted:
+        return JSONResponse({"error": "请先勾选要制作的话题"}, status_code=400)
+    running = _find_running_topic_auto_batch()
+    if running:
+        return JSONResponse({"ok": True, "running": True, "batch_id": running.get("batch_id"), "message": "已有话题数字人批次在运行，请等它完成后再制作。"}, status_code=200)
+    if not topic_auto.topic_auto_is_configured():
+        return JSONResponse({"error": "未配置 TOPIC_COLLECTOR_API_TOKEN"}, status_code=400)
+    try:
+        records = topic_auto.fetch_topic_records()
+    except Exception as exc:
+        return JSONResponse({"error": f"拉取话题接口失败：{exc}"}, status_code=502)
+    selected: list[dict] = []
+    seen: set = set()
+    for r in records:
+        ex = topic_auto.extract_topic_from_record(r)
+        if not ex or ex["record_id"] not in wanted or ex["record_id"] in seen:
+            continue
+        seen.add(ex["record_id"])
+        selected.append(ex)
+    if not selected:
+        return JSONResponse({"error": "勾选的话题在接口里找不到（可能已被删除）"}, status_code=400)
+    started = _start_topic_auto_batch(selected[:50])
+    if not started.get("ok"):
+        return JSONResponse(started, status_code=400)
+    return {"ok": True, "produced": len(selected), "batch_id": started["batch_id"],
+            "message": f"已选 {len(selected)} 条话题，创建数字人批次并开始逐条制作。"}
 
 
 @app.get("/api/tasks/active")
