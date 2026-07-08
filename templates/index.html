@@ -1352,6 +1352,47 @@
                       <div class="script-board" id="autoDigitalTopicList" style="display:none; margin-top:14px;"></div>
                       <div class="file-board" id="autoDigitalBatchList" style="margin-top:14px;"></div>
                     </div>
+
+                    <div class="field" id="topicAutoPanel" style="display:none; border:1px solid rgba(59,130,246,0.35); border-radius:12px; padding:14px;">
+                      <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                        <label style="margin:0;">话题自动化（拉取选题接口 → 逐条自动生成数字人视频）</label>
+                        <span class="badge" id="topicAutoStatusBadge">加载中…</span>
+                      </div>
+                      <div class="helper" style="margin-top:6px;">开启后每隔设定分钟自动拉取接口，公司同事新填入的选题会被逐条自动做成数字人视频；成功才不再重做，失败自动重试。</div>
+                      <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); margin-top:10px;">
+                        <label class="check-card" style="min-height:auto; padding:12px;">
+                          <span><strong>启用自动化</strong><small>定时拉取并制作</small></span>
+                          <input id="topicAutoEnabled" type="checkbox">
+                        </label>
+                        <div class="field">
+                          <label>轮询间隔（分钟）</label>
+                          <input id="topicAutoInterval" class="select-input" type="number" min="5" max="1440" value="10">
+                        </div>
+                        <div class="field">
+                          <label>每次最多条数</label>
+                          <input id="topicAutoLimit" class="select-input" type="number" min="1" max="50" value="5">
+                        </div>
+                        <div class="field">
+                          <label>失败重试次数</label>
+                          <input id="topicAutoRetries" class="select-input" type="number" min="1" max="10" value="3">
+                        </div>
+                      </div>
+                      <div class="topbar-status" style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+                        <span class="badge" id="topicAutoDone">已产出 0</span>
+                        <span class="badge" id="topicAutoPending">待重试 0</span>
+                        <span class="badge" id="topicAutoSkipped">已跳过 0</span>
+                        <span class="badge" id="topicAutoRunning"></span>
+                      </div>
+                      <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+                        <button class="btn btn-primary" id="topicAutoSaveBtn" type="button">保存配置</button>
+                        <button class="btn btn-secondary" id="topicAutoRunNowBtn" type="button">立即拉取并制作一次</button>
+                        <button class="btn btn-secondary" id="topicAutoRefreshBtn" type="button">刷新状态</button>
+                        <span class="helper" id="topicAutoMsg"></span>
+                      </div>
+                      <div class="file-board" id="topicAutoRecentList" style="margin-top:12px;"></div>
+                      <div class="helper" style="margin-top:8px;">发布账号（YouTube/Facebook）绑定位预留——接好账号后这里可配置自动发布。</div>
+                    </div>
+
                     <div class="field">
                       <label for="topicInput" id="topicInputLabel">视频选题</label>
                       <textarea id="topicInput" placeholder="例如：为什么越来越多台湾家庭开始关注日本置业？&#10;也可以直接粘贴新闻 / YouTube / B站 / 抖音 / 小红书链接"></textarea>
@@ -3562,6 +3603,11 @@
       if (!els.autoDigitalBatchPanel) return;
       const visible = canUseAutoDigitalBatch();
       els.autoDigitalBatchPanel.style.display = visible ? '' : 'none';
+      const topicPanel = document.getElementById('topicAutoPanel');
+      if (topicPanel) {
+        topicPanel.style.display = visible ? '' : 'none';
+        if (visible) loadTopicAuto();
+      }
       if (visible) return;
       state.autoDigitalTopics = [];
       state.autoDigitalBatches = [];
@@ -3574,6 +3620,81 @@
       if (els.autoDigitalBatchList) {
         els.autoDigitalBatchList.innerHTML = '';
       }
+    }
+
+    async function loadTopicAuto() {
+      if (!document.getElementById('topicAutoPanel')) return;
+      try {
+        const res = await fetch('/api/topic-auto/status');
+        if (!res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        renderTopicAuto(data);
+      } catch (e) {}
+    }
+
+    function renderTopicAuto(data) {
+      const cfg = data.config || {};
+      const setVal = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; };
+      const en = document.getElementById('topicAutoEnabled');
+      if (en && document.activeElement !== en) en.checked = !!cfg.scheduler_enabled;
+      setVal('topicAutoInterval', cfg.interval_minutes ?? 10);
+      setVal('topicAutoLimit', cfg.produce_limit ?? 5);
+      setVal('topicAutoRetries', cfg.max_attempts ?? 3);
+      const badge = document.getElementById('topicAutoStatusBadge');
+      if (badge) { badge.textContent = cfg.scheduler_enabled ? '● 自动化运行中' : '○ 已关闭'; badge.style.color = cfg.scheduler_enabled ? '#16a34a' : '#94a3b8'; }
+      const setBadge = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+      setBadge('topicAutoDone', '已产出 ' + (data.done_count || 0));
+      setBadge('topicAutoPending', '待重试 ' + (data.failed_pending_count || 0));
+      setBadge('topicAutoSkipped', '已跳过 ' + (data.skipped_count || 0));
+      const running = document.getElementById('topicAutoRunning');
+      if (running) running.textContent = data.running_batch_id ? '● 正在制作中…' : (data.configured === false ? '⚠ 未配置接口令牌' : '');
+      const list = document.getElementById('topicAutoRecentList');
+      if (list) {
+        const recs = data.recent_records || [];
+        if (!recs.length) list.innerHTML = '<div class="helper">还没有记录。开启自动化，或点“立即拉取并制作一次”。</div>';
+        else {
+          const label = s => s === 'done' ? '<span style="color:#16a34a;">✓ 已产出</span>' : (s === 'skipped' ? '<span style="color:#ef4444;">✗ 已跳过(失败超限)</span>' : (s === 'failed' ? '<span style="color:#f59e0b;">↻ 待重试</span>' : escapeHtml(s)));
+          list.innerHTML = recs.map(r => `<div class="history-topic" style="padding:5px 0; border-bottom:1px solid rgba(148,163,184,0.15);">${label(r.status)}${r.attempts ? '（失败'+r.attempts+'次）' : ''} · ${escapeHtml((r.topic || '').slice(0, 50) || r.record_id || '')}</div>`).join('');
+        }
+      }
+    }
+
+    async function saveTopicAuto() {
+      const msg = document.getElementById('topicAutoMsg');
+      const body = {
+        scheduler_enabled: !!document.getElementById('topicAutoEnabled')?.checked,
+        interval_minutes: Number(document.getElementById('topicAutoInterval')?.value || 10),
+        produce_limit: Number(document.getElementById('topicAutoLimit')?.value || 5),
+        max_attempts: Number(document.getElementById('topicAutoRetries')?.value || 3),
+      };
+      if (msg) msg.textContent = '';
+      try {
+        const res = await fetch('/api/topic-auto/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        await readApiJson(res, '保存话题自动化配置');
+        if (msg) { msg.textContent = '✓ 已保存' + (body.scheduler_enabled ? '，自动化已开启，很快会自动拉取一次' : '，自动化已关闭'); msg.style.color = '#16a34a'; }
+        loadTopicAuto();
+      } catch (e) { if (msg) { msg.textContent = friendlyRequestError(e, '保存失败'); msg.style.color = '#ef4444'; } }
+    }
+
+    async function runTopicAutoNow() {
+      const msg = document.getElementById('topicAutoMsg');
+      const btn = document.getElementById('topicAutoRunNowBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '拉取中…'; }
+      if (msg) msg.textContent = '';
+      try {
+        const res = await fetch('/api/topic-auto/run-now', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await readApiJson(res, '触发话题自动化');
+        if (msg) { msg.textContent = data.message || '已触发'; msg.style.color = '#16a34a'; }
+        loadTopicAuto();
+      } catch (e) { if (msg) { msg.textContent = friendlyRequestError(e, '触发失败'); msg.style.color = '#ef4444'; } }
+      finally { if (btn) { btn.disabled = false; btn.textContent = '立即拉取并制作一次'; } }
+    }
+
+    if (!window.__ihouseTopicAutoBound) {
+      window.__ihouseTopicAutoBound = true;
+      document.getElementById('topicAutoSaveBtn')?.addEventListener('click', saveTopicAuto);
+      document.getElementById('topicAutoRunNowBtn')?.addEventListener('click', runTopicAutoNow);
+      document.getElementById('topicAutoRefreshBtn')?.addEventListener('click', loadTopicAuto);
     }
 
     function visibleVoiceIdsForMarket(marketId) {

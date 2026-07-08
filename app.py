@@ -4516,8 +4516,9 @@ def _topic_auto_config_path() -> Path:
 def _load_topic_auto_config() -> dict:
     defaults = {
         "scheduler_enabled": False,
-        "produce_limit": 3,
-        "interval_minutes": 120,
+        "produce_limit": 5,        # 每次触发最多创建几条（逐条顺序生产）；剩余的下一轮继续，等于持续清空
+        "interval_minutes": 10,     # 轮询间隔（分钟）：抓不定时新内容用小间隔
+        "max_attempts": 3,          # 单条失败最多重试次数，达到后跳过并记录
         "next_run_at": 0,
         "last_run_at": 0,
         "last_run_message": "",
@@ -4547,13 +4548,53 @@ def _find_running_topic_auto_batch() -> Optional[dict]:
     return None
 
 
+def _reconcile_topic_auto_state(state: dict, *, max_attempts: int, limit: int = 30) -> bool:
+    """把最近已结束的话题批次逐条对账进 state：成功=done(不再做)，失败=attempts+1(可重试)。返回是否有更新。"""
+    changed = False
+    reconciled = set(state.get("reconciled_batches") or [])
+    try:
+        jobs = _list_auto_digital_batch_jobs_for_user(TOPIC_AUTO_OWNER, limit=limit)
+    except Exception:
+        jobs = []
+    for job in jobs:
+        if job.get("source") != "topic_auto":
+            continue
+        batch_id = str(job.get("batch_id") or "")
+        if not batch_id or batch_id in reconciled:
+            continue
+        if str(job.get("status") or "") in {"queued", "running"}:
+            continue  # 批次未结束，下一轮再对账
+        full = _load_auto_digital_batch_job(batch_id) or job
+        for item in (full.get("items") or []):
+            rid = str(item.get("topic_record_id") or "")
+            if not rid:
+                continue
+            istatus = str(item.get("status") or "")
+            if istatus == "done":
+                topic_auto.mark_record_result(state, rid, success=True, batch_id=batch_id, topic=item.get("topic") or "", max_attempts=max_attempts)
+                changed = True
+            elif istatus in {"error", "cancelled"}:
+                topic_auto.mark_record_result(state, rid, success=False, batch_id=batch_id, topic=item.get("topic") or "", max_attempts=max_attempts)
+                changed = True
+        reconciled.add(batch_id)
+        changed = True
+    if changed:
+        state["reconciled_batches"] = sorted(reconciled)[-300:]
+    return changed
+
+
 def _run_topic_auto_produce_once(*, limit: Optional[int] = None, triggered_by: str = "manual") -> dict:
-    """拉取话题接口 -> 去重 -> 复用批量数字人管线创建并开始制作。不影响现有流程。"""
+    """拉取话题接口 -> 对账历史批次(成功才去重/失败重试) -> 选待做 -> 复用批量数字人管线逐条生产。"""
     config = _load_topic_auto_config()
-    produce_limit = int(limit if limit is not None else (config.get("produce_limit") or 3))
-    produce_limit = max(1, min(10, produce_limit))
+    max_attempts = max(1, int(config.get("max_attempts") or 3))
+    produce_limit = int(limit if limit is not None else (config.get("produce_limit") or 5))
+    produce_limit = max(1, min(50, produce_limit))
     if not topic_auto.topic_auto_is_configured():
         return {"ok": False, "error": "未配置 TOPIC_COLLECTOR_API_TOKEN，无法拉取话题选题"}
+    # 先对账已结束的历史批次：成功的标记 done，失败的累计重试次数（达上限才跳过）
+    state = topic_auto.load_topic_state(str(TOPIC_AUTO_DIR))
+    if _reconcile_topic_auto_state(state, max_attempts=max_attempts):
+        topic_auto.save_topic_state(str(TOPIC_AUTO_DIR), state)
     running = _find_running_topic_auto_batch()
     if running:
         return {"ok": True, "running": True, "batch_id": running.get("batch_id"), "message": "已有话题数字人批次在运行，本次不重复触发。"}
@@ -4561,8 +4602,7 @@ def _run_topic_auto_produce_once(*, limit: Optional[int] = None, triggered_by: s
         records = topic_auto.fetch_topic_records()
     except Exception as exc:
         return {"ok": False, "error": f"拉取话题接口失败：{exc}"}
-    produced_ids = topic_auto.load_produced_ids_compat(str(TOPIC_AUTO_DIR))
-    selected = topic_auto.select_new_topics(records, produced_ids, limit=produce_limit)
+    selected = topic_auto.select_pending_topics(records, state, max_attempts=max_attempts, limit=produce_limit)
     if not selected:
         msg = f"拉取 {len(records)} 条话题，无新选题（均已制作过）。"
         config["last_run_at"] = time.time()
@@ -4613,11 +4653,8 @@ def _run_topic_auto_produce_once(*, limit: Optional[int] = None, triggered_by: s
     }
     _save_auto_digital_batch_job(job)
     threading.Thread(target=_run_auto_digital_batch, args=(batch_id,), daemon=True).start()
-    # 提交即标记去重，避免重复制作同一条话题
-    for topic in selected:
-        produced_ids.add(topic["record_id"])
-    topic_auto.save_produced_ids(str(TOPIC_AUTO_DIR), produced_ids)
-    msg = f"已从话题接口选取 {len(selected)} 条新选题，创建数字人批次 {batch_id} 并开始制作。"
+    # 不在提交时去重：成功/失败由下一轮对账写入 topic_state（成功才不再做、失败可重试）
+    msg = f"已从话题接口选取 {len(selected)} 条待做选题，创建数字人批次 {batch_id} 并开始逐条制作。"
     config["last_run_at"] = time.time()
     config["last_run_message"] = msg
     _save_topic_auto_config(config)
@@ -15944,7 +15981,15 @@ async def topic_auto_status(request: Request):
     if error:
         return error
     config = _load_topic_auto_config()
-    produced_ids = topic_auto.load_produced_ids_compat(str(TOPIC_AUTO_DIR))
+    state = topic_auto.load_topic_state(str(TOPIC_AUTO_DIR))
+    rec = state.get("records") or {}
+    done_count = sum(1 for v in rec.values() if isinstance(v, dict) and v.get("status") == "done")
+    skipped_count = sum(1 for v in rec.values() if isinstance(v, dict) and v.get("status") == "skipped")
+    failed_pending = sum(1 for v in rec.values() if isinstance(v, dict) and v.get("status") == "failed")
+    recent = sorted(
+        [dict(v, record_id=k) for k, v in rec.items() if isinstance(v, dict)],
+        key=lambda v: v.get("updated_at") or 0, reverse=True,
+    )[:20]
     batches = [
         _auto_digital_batch_payload(job)
         for job in _list_auto_digital_batch_jobs_for_user(TOPIC_AUTO_OWNER, limit=10)
@@ -15954,9 +15999,17 @@ async def topic_auto_status(request: Request):
     return {
         "ok": True,
         "configured": topic_auto.topic_auto_is_configured(),
-        "produced_count": len(produced_ids),
+        "produced_count": done_count,
+        "done_count": done_count,
+        "skipped_count": skipped_count,
+        "failed_pending_count": failed_pending,
         "running_batch_id": (running or {}).get("batch_id") if running else "",
         "config": config,
+        "recent_records": [
+            {"record_id": v.get("record_id"), "topic": v.get("topic") or "", "status": v.get("status") or "",
+             "attempts": v.get("attempts") or 0, "updated_at": v.get("updated_at") or 0}
+            for v in recent
+        ],
         "recent_batches": batches,
     }
 
@@ -15986,9 +16039,11 @@ async def topic_auto_set_config(request: Request):
         if config["scheduler_enabled"]:
             config["next_run_at"] = 0  # 开启后尽快跑一次
     if "produce_limit" in payload:
-        config["produce_limit"] = max(1, min(10, int(payload.get("produce_limit") or 3)))
+        config["produce_limit"] = max(1, min(50, int(payload.get("produce_limit") or 5)))
     if "interval_minutes" in payload:
-        config["interval_minutes"] = max(10, int(payload.get("interval_minutes") or 120))
+        config["interval_minutes"] = max(5, int(payload.get("interval_minutes") or 10))
+    if "max_attempts" in payload:
+        config["max_attempts"] = max(1, min(10, int(payload.get("max_attempts") or 3)))
     _save_topic_auto_config(config)
     return {"ok": True, "config": config}
 

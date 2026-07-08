@@ -133,3 +133,81 @@ def select_new_topics(records: list[dict], produced_ids: set[str], limit: int = 
         if len(selected) >= max(1, limit):
             break
     return selected
+
+
+# ── 逐条状态存储：记录每条选题的 done/failed + 重试次数，替代“提交即去重” ──
+# 结构：{"records": {record_id: {"status": "done"|"failed", "attempts": N,
+#                               "last_batch": str, "topic": str, "updated_at": ts}},
+#        "reconciled_batches": [batch_id, ...], "updated_at": ts}
+
+def _topic_state_path(store_dir: str) -> Path:
+    return Path(store_dir) / "topic_state.json"
+
+
+def load_topic_state(store_dir: str) -> dict:
+    """读取逐条状态；首次运行时从旧的 produced_ids.json 迁移（旧的都当作已完成）。"""
+    path = _topic_state_path(store_dir)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("records"), dict):
+                data.setdefault("reconciled_batches", [])
+                return data
+        except Exception:
+            pass
+    # 迁移旧数据
+    state = {"records": {}, "reconciled_batches": [], "updated_at": time.time()}
+    for rid in load_produced_ids_compat(store_dir):
+        state["records"][str(rid)] = {"status": "done", "attempts": 0, "last_batch": "", "topic": "", "updated_at": 0}
+    return state
+
+
+def save_topic_state(store_dir: str, state: dict) -> None:
+    path = _topic_state_path(store_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state["updated_at"] = time.time()
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def mark_record_result(state: dict, record_id: str, *, success: bool, batch_id: str = "",
+                       topic: str = "", max_attempts: int = 3) -> None:
+    """更新某条记录的结果。成功 -> done；失败 -> attempts+1，达到上限也置 done(跳过)。"""
+    records = state.setdefault("records", {})
+    entry = records.get(record_id) or {"status": "", "attempts": 0, "last_batch": "", "topic": topic, "updated_at": 0}
+    if topic and not entry.get("topic"):
+        entry["topic"] = topic
+    entry["last_batch"] = batch_id or entry.get("last_batch") or ""
+    entry["updated_at"] = time.time()
+    if success:
+        entry["status"] = "done"
+    else:
+        entry["attempts"] = int(entry.get("attempts") or 0) + 1
+        entry["status"] = "skipped" if entry["attempts"] >= max_attempts else "failed"
+    records[record_id] = entry
+
+
+def select_pending_topics(records: list[dict], state: dict, *, max_attempts: int = 3, limit: int = 50) -> list[dict]:
+    """选出还需要制作的选题：从未做过、或失败但重试次数未达上限；已完成/已跳过的排除。"""
+    rec_state = state.get("records") or {}
+    selected: list[dict] = []
+    seen_topics: set[str] = set()
+    for record in records:
+        extracted = extract_topic_from_record(record)
+        if not extracted:
+            continue
+        st = rec_state.get(extracted["record_id"]) or {}
+        status = str(st.get("status") or "")
+        if status in {"done", "skipped"}:
+            continue
+        if int(st.get("attempts") or 0) >= max_attempts:
+            continue
+        topic_key = "".join(extracted["topic"].split()).lower()
+        if topic_key in seen_topics:
+            continue
+        seen_topics.add(topic_key)
+        selected.append(extracted)
+        if len(selected) >= max(1, limit):
+            break
+    return selected
