@@ -1151,6 +1151,16 @@ def _start_opennews_channel_scheduler(poll_seconds: int = 20) -> None:
 _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED: set[str] = set()
 
 
+_STALE_PUBLISH_ERROR_MARKERS = ("还没有可上传的成片", "请先生成成片", "没有可上传的成片")
+
+
+def _is_stale_publish_error(text: Any) -> bool:
+    """判断某条发布错误是否为“成片还没就绪”这类会随合成完成而自愈的临时错误。
+    这类错误不应永久挡住补发——合成完成后成片已存在，必须允许恢复机制重试发布。"""
+    t = str(text or "")
+    return bool(t) and any(marker in t for marker in _STALE_PUBLISH_ERROR_MARKERS)
+
+
 def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVERY_BATCH_SIZE) -> int:
     candidates: list[Path] = []
     try:
@@ -1192,10 +1202,14 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
                         or result.get("facebook_publish_records")
                         or result.get("youtube_publish_records")
                     )
-                    already_errored = bool(
-                        result.get("x_auto_publish_error")
-                        or result.get("facebook_auto_publish_error")
-                        or result.get("youtube_auto_publish_error")
+                    # 只把“真实失败”的错误当作阻断；“成片未就绪”这类临时错误现在成片已存在，应放行补发。
+                    already_errored = any(
+                        v and not _is_stale_publish_error(v)
+                        for v in (
+                            result.get("x_auto_publish_error"),
+                            result.get("facebook_auto_publish_error"),
+                            result.get("youtube_auto_publish_error"),
+                        )
                     )
                     if not already_published and not already_errored:
                         _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED.add(output_dir.name)

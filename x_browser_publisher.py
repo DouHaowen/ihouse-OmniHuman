@@ -321,8 +321,6 @@ def _upload_video_file(page: Any, video_path: Path, *, debug_events: list[dict[s
 def _wait_video_ready(page: Any, video_name: str, *, debug_events: list[dict[str, Any]] | None = None) -> None:
     deadline = time.time() + X_BROWSER_UPLOAD_TIMEOUT_SECONDS
     last_state = ""
-    normalized_video_name = str(video_name or "").strip().lower()
-    body_markers = ("edit", "upload caption file", normalized_video_name)
     while time.time() < deadline:
         pending_text = ""
         try:
@@ -330,17 +328,24 @@ def _wait_video_ready(page: Any, video_name: str, *, debug_events: list[dict[str
         except Exception:
             pending_text = ""
         lowered = pending_text.lower()
-        uploading = any(mark in lowered for mark in ("processing", "uploading", "正在上传", "处理中"))
         failed = any(mark in lowered for mark in ("media failed", "upload failed"))
+        # 只信可靠信号：附件预览元素 / “移除媒体”按钮 / 上传进度条。
+        # 不再用 "edit"、"upload caption file" 等页面通用词兜底——那些词在 X 界面到处都是，
+        # 视频没附上时也会命中，导致误判“已就绪”从而只发出文案、不带视频。
         has_video_chip = False
-        state = "ready_check"
+        uploading_bar = False
         try:
-            previews = page.locator('div[data-testid="attachments"] img, div[data-testid="attachments"] video')
-            has_video_chip = previews.count() > 0
+            previews = page.locator('div[data-testid="attachments"] video, div[data-testid="attachments"] img')
+            remove_btn = page.locator('[data-testid="removeMedia"], button[aria-label*="Remove"], div[aria-label*="移除"]')
+            has_video_chip = previews.count() > 0 or remove_btn.count() > 0
         except Exception:
             has_video_chip = False
-        if not has_video_chip:
-            has_video_chip = any(marker and marker in lowered for marker in body_markers)
+        try:
+            uploading_bar = page.locator('div[role="progressbar"]').count() > 0
+        except Exception:
+            uploading_bar = False
+        uploading = uploading_bar or any(mark in lowered for mark in ("processing", "uploading", "正在上传", "处理中"))
+        state = "ready_check"
         if uploading:
             state = "pending"
         elif not has_video_chip:
@@ -348,9 +353,9 @@ def _wait_video_ready(page: Any, video_name: str, *, debug_events: list[dict[str
         if state != last_state and debug_events is not None:
             _append_debug_event(debug_events, "upload_state", page, state=state)
             last_state = state
-        if uploading or failed:
-            if failed:
-                raise XBrowserPublishError("X 视频上传失败，页面提示 media/upload failed")
+        if failed:
+            raise XBrowserPublishError("X 视频上传失败，页面提示 media/upload failed")
+        if uploading:
             time.sleep(5)
             continue
         if not has_video_chip:
