@@ -1178,9 +1178,19 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
         return 0
 
     recovered = 0
+    now_ts = time.time()
+    recovery_max_age = float(os.getenv("COMPOSE_READY_RECOVERY_MAX_AGE_SECONDS", str(2 * 86400)) or (2 * 86400))
     for output_dir in candidates:
         if recovered >= max(1, int(max_items)):
             break
+        # 只恢复较新的成片：目录名前缀是原始产出时间戳，超过 recovery_max_age(默认2天)的旧积压不再
+        # 重新合成/补发，避免把早期别的频道/通用自动残留的旧新闻(非当前配置频道)又制作出来。
+        try:
+            dir_ts = float(str(output_dir.name).split("_", 1)[0])
+        except Exception:
+            dir_ts = now_ts
+        if now_ts - dir_ts > recovery_max_age:
+            continue
         result_path = output_dir / "result.json"
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
