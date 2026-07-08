@@ -161,9 +161,9 @@ def _spawn(name: str, argv: list[str], extra_env: dict[str, str] | None = None) 
     return proc.pid
 
 
-def start_x_browser_login() -> dict[str, Any]:
+def start_x_browser_login(profile_dir: "Path | None" = None) -> dict[str, Any]:
     stop_x_browser_login()
-    profile_dir = x_browser_profile_dir()
+    profile_dir = Path(profile_dir) if profile_dir else x_browser_profile_dir()
     profile_dir.mkdir(parents=True, exist_ok=True)
 
     xvfb = _resolve_cmd("Xvfb")

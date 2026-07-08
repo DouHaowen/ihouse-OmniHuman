@@ -722,6 +722,39 @@ def _save_opennews_channels_config(payload: dict) -> dict:
     return config
 
 
+def _opennews_channel_account_token_path(channel_id: str, language: str, platform: str) -> Path:
+    """为某频道×语言×平台生成独立的凭据文件路径，实现按频道发布到不同账号。"""
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", f"{channel_id}_{language}").strip("_") or "channel"
+    if platform == "youtube":
+        return YOUTUBE_AUTH_DIR / f"youtube_token_{safe}.json"
+    if platform == "facebook":
+        return FACEBOOK_AUTH_DIR / f"facebook_token_{safe}.json"
+    raise ValueError(f"未知平台：{platform}")
+
+
+def _opennews_bind_channel_account(channel_id: str, language: str, platform: str, account_patch: dict) -> bool:
+    """把某平台授权/登录结果合并写入指定频道/语言的账号槽（加锁）。返回是否命中该频道。"""
+    with OPENNEWS_CHANNEL_CONFIG_LOCK:
+        config = _normalize_opennews_channels_config(_read_opennews_channels_raw())
+        hit = False
+        for channel in config.get("channels", []):
+            if str(channel.get("id")) != str(channel_id):
+                continue
+            accounts = channel.setdefault("accounts", {})
+            slot = accounts.get(language)
+            if not isinstance(slot, dict):
+                slot = _default_opennews_language_account(language)
+                accounts[language] = slot
+            current = slot.get(platform) if isinstance(slot.get(platform), dict) else {}
+            slot[platform] = {**current, **account_patch}
+            channel["updated_at"] = time.time()
+            hit = True
+            break
+        if hit:
+            _write_opennews_channels_config(config)
+        return hit
+
+
 def _public_opennews_channels_config(config: dict) -> dict:
     public_config = copy.deepcopy(config)
     for channel in public_config.get("channels") or []:
@@ -3953,6 +3986,16 @@ def _run_omnihuman_job(job_id: str, label: str, runner, tracker: Optional[Progre
 
 def _is_retryable_omnihuman_error(exc: Exception) -> bool:
     text = str(exc).lower()
+    # 确定性输入错误：音频过短/缺失、图片缺失等，重试再多也不会成功。
+    # 必须先于下面的 retry_tokens 判断（否则会被 "infinitetalk" 关键词误判为可重试而无限重试）。
+    non_retryable_tokens = [
+        "length not satisfies frame nums",
+        "aduio file not exists",  # 上游断言原文（拼写如此）
+        "audio file not exists",
+        "not satisfies frame",
+    ]
+    if any(token in text for token in non_retryable_tokens):
+        return False
     retry_tokens = [
         "50500",
         "internal error",
@@ -8431,6 +8474,15 @@ async def youtube_oauth_start(request: Request):
         return JSONResponse({"error": "未配置 GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_REDIRECT_URI"}, status_code=500)
     state = hashlib.sha256(f"{user.get('username')}:{time.time()}:{uuid.uuid4()}".encode("utf-8")).hexdigest()
     request.session["youtube_oauth_state"] = state
+    # 按频道授权：带上 channel/language 则把凭据绑定到该频道账号槽；否则维持全局绑定行为。
+    oauth_channel = str(request.query_params.get("channel") or "").strip()
+    oauth_language = str(request.query_params.get("language") or "").strip()
+    if oauth_channel and oauth_language:
+        request.session["youtube_oauth_channel"] = oauth_channel
+        request.session["youtube_oauth_language"] = oauth_language
+    else:
+        request.session.pop("youtube_oauth_channel", None)
+        request.session.pop("youtube_oauth_language", None)
     auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={quote(config['client_id'], safe='')}"
@@ -8458,7 +8510,28 @@ async def youtube_oauth_callback(request: Request, code: str = "", state: str = 
         refresh_token = str(tokens.get("refresh_token") or "").strip()
         if not refresh_token:
             return HTMLResponse("<h2>YouTube 授权成功但没有返回 refresh_token</h2><p>如果之前授权过，请撤销应用授权后重新绑定。</p>", status_code=400)
-        save_youtube_refresh_token(YOUTUBE_TOKEN_STORE_PATH, refresh_token, {"token_response": {k: v for k, v in tokens.items() if k != "refresh_token"}})
+        meta = {"token_response": {k: v for k, v in tokens.items() if k != "refresh_token"}}
+        oauth_channel = str(request.session.pop("youtube_oauth_channel", "") or "").strip()
+        oauth_language = str(request.session.pop("youtube_oauth_language", "") or "").strip()
+        if oauth_channel and oauth_language:
+            # 按频道绑定：凭据存到该频道独立文件，并写入该频道账号槽。
+            token_path = _opennews_channel_account_token_path(oauth_channel, oauth_language, "youtube")
+            save_youtube_refresh_token(token_path, refresh_token, meta)
+            channel = get_youtube_channel(token_path)
+            bound = _opennews_bind_channel_account(oauth_channel, oauth_language, "youtube", {
+                "enabled": True,
+                "channel_name": channel.get("title") or "",
+                "token_store_path": str(token_path),
+            })
+            return HTMLResponse(
+                "<h2>YouTube 授权成功</h2>"
+                f"<p>已绑定到频道 <b>{oauth_channel}</b> / 语言 <b>{oauth_language}</b>{'' if bound else '（未找到该频道，凭据已保存）'}</p>"
+                f"<p>YouTube 频道：{channel.get('title') or ''}</p>"
+                f"<p>channel_id：{channel.get('channel_id') or ''}</p>"
+                "<p>可以关闭本页，回到 iHouse 面板刷新查看绑定状态。</p>"
+                "<script>try{window.opener&&window.opener.postMessage({type:'ihouse-oauth-done',platform:'youtube'},'*');}catch(e){}</script>"
+            )
+        save_youtube_refresh_token(YOUTUBE_TOKEN_STORE_PATH, refresh_token, meta)
         channel = get_youtube_channel(YOUTUBE_TOKEN_STORE_PATH)
     except Exception as exc:
         return HTMLResponse(f"<h2>YouTube 授权失败</h2><p>{exc}</p>", status_code=500)
@@ -8591,6 +8664,14 @@ async def facebook_oauth_start(request: Request):
     state = hashlib.sha256(f"facebook:{user.get('username')}:{time.time()}:{uuid.uuid4()}".encode("utf-8")).hexdigest()
     request.session["facebook_oauth_state"] = state
     request.session["facebook_oauth_scope"] = FACEBOOK_SCOPE
+    oauth_channel = str(request.query_params.get("channel") or "").strip()
+    oauth_language = str(request.query_params.get("language") or "").strip()
+    if oauth_channel and oauth_language:
+        request.session["facebook_oauth_channel"] = oauth_channel
+        request.session["facebook_oauth_language"] = oauth_language
+    else:
+        request.session.pop("facebook_oauth_channel", None)
+        request.session.pop("facebook_oauth_language", None)
     try:
         auth_url = build_facebook_authorization_url(state=state, scope=FACEBOOK_SCOPE)
     except Exception as exc:
@@ -8610,18 +8691,54 @@ async def facebook_oauth_callback(request: Request, code: str = "", state: str =
     try:
         short_lived = exchange_facebook_code_for_tokens(code)
         long_lived = exchange_facebook_long_lived_user_token(str(short_lived.get("access_token") or ""))
-        saved = save_facebook_authorization(
-            FACEBOOK_TOKEN_STORE_PATH,
-            user_access_token=str(long_lived.get("access_token") or short_lived.get("access_token") or ""),
-            user_token_expires_at=float(long_lived.get("expires_at") or short_lived.get("expires_at") or 0.0),
-            meta={
-                "scope": request.session.get("facebook_oauth_scope") or FACEBOOK_SCOPE,
-                "short_lived_token_response": short_lived.get("raw") or {},
-                "long_lived_token_response": long_lived.get("raw") or {},
-            },
-        )
+        user_token = str(long_lived.get("access_token") or short_lived.get("access_token") or "")
+        user_expires = float(long_lived.get("expires_at") or short_lived.get("expires_at") or 0.0)
+        meta = {
+            "scope": request.session.get("facebook_oauth_scope") or FACEBOOK_SCOPE,
+            "short_lived_token_response": short_lived.get("raw") or {},
+            "long_lived_token_response": long_lived.get("raw") or {},
+        }
+        oauth_channel = str(request.session.pop("facebook_oauth_channel", "") or "").strip()
+        oauth_language = str(request.session.pop("facebook_oauth_language", "") or "").strip()
         request.session.pop("facebook_oauth_state", None)
         request.session.pop("facebook_oauth_scope", None)
+        if oauth_channel and oauth_language:
+            token_path = _opennews_channel_account_token_path(oauth_channel, oauth_language, "facebook")
+            saved = save_facebook_authorization(
+                token_path, user_access_token=user_token, user_token_expires_at=user_expires, meta=meta,
+            )
+            _opennews_bind_channel_account(oauth_channel, oauth_language, "facebook", {
+                "enabled": True,
+                "binding_mode": "custom",
+                "page_name": saved.get("page_name") or "",
+                "page_id": saved.get("page_id") or "",
+                "page_access_token": saved.get("page_access_token") or "",
+            })
+            pages = saved.get("pages") if isinstance(saved.get("pages"), list) else get_facebook_pages(user_token)
+            picker = ""
+            valid_pages = [p for p in (pages or []) if isinstance(p, dict) and p.get("id")]
+            if len(valid_pages) > 1:
+                links = "".join(
+                    '<li><a href="/api/facebook/oauth/select-page?channel={c}&language={l}&page_id={pid}">{name}</a>{cur}</li>'.format(
+                        c=quote(oauth_channel, safe=""), l=quote(oauth_language, safe=""),
+                        pid=quote(str(p.get("id") or ""), safe=""),
+                        name=(p.get("name") or p.get("id")),
+                        cur="（当前）" if str(p.get("id")) == str(saved.get("page_id")) else "",
+                    )
+                    for p in valid_pages
+                )
+                picker = f"<p>该账号可管理多个 Page，已默认绑定 <b>{saved.get('page_name') or ''}</b>。如需换成其它 Page 请点击：</p><ul>{links}</ul>"
+            return HTMLResponse(
+                "<h2>Facebook 授权成功</h2>"
+                f"<p>已绑定到频道 <b>{oauth_channel}</b> / 语言 <b>{oauth_language}</b></p>"
+                f"<p>Page：{saved.get('page_name') or ''}（{saved.get('page_id') or ''}）</p>"
+                + picker +
+                "<p>可以关闭本页，回到 iHouse 面板刷新查看绑定状态。</p>"
+                "<script>try{window.opener&&window.opener.postMessage({type:'ihouse-oauth-done',platform:'facebook'},'*');}catch(e){}</script>"
+            )
+        saved = save_facebook_authorization(
+            FACEBOOK_TOKEN_STORE_PATH, user_access_token=user_token, user_token_expires_at=user_expires, meta=meta,
+        )
         page = get_facebook_page(FACEBOOK_TOKEN_STORE_PATH)
     except Exception as exc:
         return HTMLResponse(f"<h2>Facebook 授权失败</h2><p>{exc}</p>", status_code=500)
@@ -8631,6 +8748,66 @@ async def facebook_oauth_callback(request: Request, code: str = "", state: str =
         f"<p>page_id：{page.get('id') or saved.get('page_id') or ''}</p>"
         "<p>现在可以回到 iHouse 系统自动发布到 Facebook。</p>"
     )
+
+
+@app.get("/api/facebook/oauth/select-page")
+async def facebook_oauth_select_page(request: Request, channel: str = "", language: str = "", page_id: str = ""):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    channel = str(channel or "").strip()
+    language = str(language or "").strip()
+    page_id = str(page_id or "").strip()
+    if not (channel and language and page_id):
+        return HTMLResponse("<h2>参数不全</h2>", status_code=400)
+    try:
+        token_path = _opennews_channel_account_token_path(channel, language, "facebook")
+        stored = json.loads(token_path.read_text(encoding="utf-8")) if token_path.exists() else {}
+        user_token = str(stored.get("user_access_token") or "").strip()
+        if not user_token:
+            return HTMLResponse("<h2>找不到已保存的用户令牌，请重新授权。</h2>", status_code=400)
+        saved = save_facebook_authorization(
+            token_path, user_access_token=user_token, preferred_page_id=page_id, meta=stored.get("meta") or {},
+        )
+        _opennews_bind_channel_account(channel, language, "facebook", {
+            "enabled": True,
+            "binding_mode": "custom",
+            "page_name": saved.get("page_name") or "",
+            "page_id": saved.get("page_id") or "",
+            "page_access_token": saved.get("page_access_token") or "",
+        })
+    except Exception as exc:
+        return HTMLResponse(f"<h2>切换 Page 失败</h2><p>{exc}</p>", status_code=500)
+    return HTMLResponse(
+        "<h2>已切换 Facebook Page</h2>"
+        f"<p>频道 <b>{channel}</b> / 语言 <b>{language}</b> 现绑定：{saved.get('page_name') or ''}（{saved.get('page_id') or ''}）</p>"
+        "<p>可以关闭本页，回到 iHouse 面板刷新查看。</p>"
+        "<script>try{window.opener&&window.opener.postMessage({type:'ihouse-oauth-done',platform:'facebook'},'*');}catch(e){}</script>"
+    )
+
+
+@app.post("/api/opennews/channel-account/unbind")
+async def opennews_channel_account_unbind(request: Request):
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    channel = str(payload.get("channel") or "").strip()
+    language = str(payload.get("language") or "").strip()
+    platform = str(payload.get("platform") or "").strip()
+    if platform not in {"x", "facebook", "youtube"} or not (channel and language):
+        return JSONResponse({"error": "参数不全或平台不支持"}, status_code=400)
+    reset = dict((_default_opennews_language_account(language).get(platform) or {}))
+    reset["enabled"] = False
+    ok = _opennews_bind_channel_account(channel, language, platform, reset)
+    return {"ok": bool(ok)}
 
 
 @app.post("/api/facebook/upload")
@@ -8876,10 +9053,35 @@ async def x_browser_login_start_api(request: Request):
     if not _is_admin(user):
         return _forbidden_error()
     try:
-        status = start_x_browser_login()
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    channel = str((payload or {}).get("channel") or "").strip()
+    language = str((payload or {}).get("language") or "").strip()
+    profile_dir = None
+    if channel and language:
+        # 按频道登录：为该频道×语言分配独立浏览器 profile，并写入账号槽（发布时用此 profile）。
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", f"{channel}_{language}").strip("_") or "channel"
+        state_dir = Path(str(x_browser_env_config().get("state_dir") or (OUTPUT_DIR / "x_browser")))
+        profile_dir = state_dir / "profiles" / safe
+        _opennews_bind_channel_account(channel, language, "x", {
+            "enabled": True,
+            "binding_mode": "custom",
+            "account_label": f"{channel}/{language}",
+            "profile_dir": str(profile_dir),
+        })
+    try:
+        status = start_x_browser_login(profile_dir)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
-    return {"ok": True, **status, "env": x_browser_login_env_config()}
+    return {
+        "ok": True,
+        "channel": channel,
+        "language": language,
+        "profile_dir": str(profile_dir) if profile_dir else "",
+        **status,
+        "env": x_browser_login_env_config(),
+    }
 
 
 @app.post("/api/x/browser-login/stop")

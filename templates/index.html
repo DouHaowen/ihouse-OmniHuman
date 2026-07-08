@@ -4049,107 +4049,126 @@
         els.openNewsChannelAccountMatrix.innerHTML = '<div class="empty-box">先在上面「② 语言版本」勾选语言，再在这里配置该语言的发布账号。</div>';
         return;
       }
+      const authBtnStyle = 'padding:7px 12px; border-radius:8px; border:1px solid rgba(59,130,246,0.55); background:rgba(59,130,246,0.14); color:inherit; cursor:pointer; font-size:12px; font-weight:600;';
+      const unbindBtnStyle = 'padding:7px 12px; border-radius:8px; border:1px solid rgba(148,163,184,0.45); background:transparent; color:inherit; cursor:pointer; font-size:12px;';
       els.openNewsChannelAccountMatrix.innerHTML = visibleLangs.map(lang => {
         const account = accounts[lang.id] || {};
         const x = account.x || {};
         const facebook = account.facebook || {};
         const youtube = account.youtube || {};
-        const xCustom = x.binding_mode === 'custom' || !!(x.account_label || x.handle || x.profile_dir);
-        const facebookCustom = facebook.binding_mode === 'custom' || !!(facebook.page_name || facebook.page_id || facebook.page_access_token_configured);
+        const chId = channel.id || '';
+        const ytBound = !!(youtube.token_store_path || '').trim();
+        const fbBound = !!(facebook.page_id || '') || !!facebook.page_access_token_configured;
+        const xBound = !!(x.profile_dir || '').trim();
+        const block = (o) => `
+          <div class="field" style="border:1px solid rgba(148,163,184,0.35); border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+              <strong style="font-size:14px;">${o.name}</strong>
+              <label style="display:flex; align-items:center; gap:6px; font-size:12px; margin:0;">
+                <input class="${o.enableClass}" type="checkbox" ${o.enabled ? 'checked' : ''}> 发布
+              </label>
+            </div>
+            <div style="font-size:12px; min-height:18px;">${o.bound
+              ? `<span style="color:#16a34a; font-weight:600;">✓ 已绑定：${escapeHtml(o.boundName || '（已授权）')}</span>`
+              : `<span style="color:#94a3b8;">○ 未绑定 · 发布走全局账号</span>`}</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button type="button" class="${o.actionClass}" data-channel="${escapeHtml(chId)}" data-language="${escapeHtml(lang.id)}" style="${authBtnStyle}">${o.bound ? '重新' + o.actionLabel : o.actionLabel}</button>
+              ${o.bound ? `<button type="button" class="opennews-account-unbind" data-channel="${escapeHtml(chId)}" data-language="${escapeHtml(lang.id)}" data-platform="${o.platform}" style="${unbindBtnStyle}">解绑</button>` : ''}
+            </div>
+          </div>`;
         return `
           <div class="history-card opennews-account-row" data-language="${escapeHtml(lang.id)}">
             <div class="history-top">
               <div>
-                <div class="history-title">${escapeHtml(lang.label)}发布账号</div>
-                <div class="history-topic">可直接使用当前全局账号，也可以为这个频道和语言绑定专属账号。</div>
+                <div class="history-title">${escapeHtml(lang.label)} 发布账号</div>
+                <div class="history-topic">点按钮授权 / 登录即可绑定该频道该语言的专属账号；未绑定则自动用全局账号。</div>
               </div>
               <span class="badge">${(channel.languages || []).includes(lang.id) ? '已启用语言' : '未启用语言'}</span>
             </div>
-            <div class="topbar-status" style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-              <span class="badge">X：${x.enabled === false ? '未启用' : (xCustom ? '专属账号' : '全局')}</span>
-              <span class="badge">Facebook：${facebook.enabled === false ? '未启用' : (facebookCustom ? '专属 Page' : '全局')}</span>
-              <span class="badge">YouTube：${youtube.enabled ? ((youtube.token_store_path || '').trim() ? '专属账号' : '全局') : '未启用'}</span>
-            </div>
-            <div class="history-topic" style="margin-top:6px;">全局 X：${escapeHtml(globalX)}　｜　全局 Facebook：${escapeHtml(globalFacebook)}　（留空=用全局账号，填了=用该频道专属账号）</div>
-            <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); margin-top:10px;">
-              <div class="field">
-                <label>X 绑定方式</label>
-                <select class="select-input opennews-account-x-mode">
-                  <option value="global" ${xCustom ? '' : 'selected'}>使用当前全局 X</option>
-                  <option value="custom" ${xCustom ? 'selected' : ''}>使用专属 X 账号</option>
-                </select>
-              </div>
-              <div class="field">
-                <label>X 账号标签 / handle</label>
-                <input class="select-input opennews-account-x-label opennews-account-x-field" type="text" value="${escapeHtml(x.account_label || x.handle || '')}" placeholder="@opennews_${escapeHtml(lang.id)}">
-              </div>
-              <div class="field">
-                <label>X 浏览器 Profile 路径</label>
-                <input class="select-input opennews-account-x-profile opennews-account-x-field" type="text" value="${escapeHtml(x.profile_dir || '')}" placeholder="/app/output/x_browser/profiles/${escapeHtml(lang.id)}">
-              </div>
-              <label class="check-card" style="min-height:auto; padding:12px;">
-                <span><strong>启用 X</strong><small>该语言发布 X</small></span>
-                <input class="opennews-account-x-enabled" type="checkbox" ${x.enabled === false ? '' : 'checked'}>
-              </label>
-            </div>
-            <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); margin-top:10px;">
-              <div class="field">
-                <label>Facebook 绑定方式</label>
-                <select class="select-input opennews-account-fb-mode">
-                  <option value="global" ${facebookCustom ? '' : 'selected'}>使用当前全局 Page</option>
-                  <option value="custom" ${facebookCustom ? 'selected' : ''}>使用专属 Page</option>
-                </select>
-              </div>
-              <div class="field">
-                <label>Facebook Page 名称</label>
-                <input class="select-input opennews-account-fb-name opennews-account-fb-field" type="text" value="${escapeHtml(facebook.page_name || '')}" placeholder="OpenNews ${escapeHtml(lang.label)}">
-              </div>
-              <div class="field">
-                <label>Facebook Page ID</label>
-                <input class="select-input opennews-account-fb-page opennews-account-fb-field" type="text" value="${escapeHtml(facebook.page_id || '')}" placeholder="page_id">
-              </div>
-              <div class="field">
-                <label>Facebook Page Token</label>
-                <input class="select-input opennews-account-fb-token opennews-account-fb-field" type="password" value="" placeholder="${facebook.page_access_token_configured ? '已配置，留空不变' : 'page access token'}">
-              </div>
-              <label class="check-card" style="min-height:auto; padding:12px;">
-                <span><strong>启用 Facebook</strong><small>该语言发布 Page</small></span>
-                <input class="opennews-account-fb-enabled" type="checkbox" ${facebook.enabled === false ? '' : 'checked'}>
-              </label>
-            </div>
-            <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr)); margin-top:10px;">
-              <div class="field">
-                <label>YouTube 频道名称</label>
-                <input class="select-input opennews-account-yt-name" type="text" value="${escapeHtml(youtube.channel_name || '')}" placeholder="OpenNews ${escapeHtml(lang.label)}">
-              </div>
-              <div class="field">
-                <label>YouTube Token 路径</label>
-                <input class="select-input opennews-account-yt-token" type="text" value="${escapeHtml(youtube.token_store_path || '')}" placeholder="留空=用全局；填该频道专属 token 路径">
-              </div>
-              <label class="check-card" style="min-height:auto; padding:12px;">
-                <span><strong>启用 YouTube</strong><small>该语言发布 YouTube</small></span>
-                <input class="opennews-account-yt-enabled" type="checkbox" ${youtube.enabled ? 'checked' : ''}>
-              </label>
+            <div class="history-topic" style="margin-top:6px;">全局 X：${escapeHtml(globalX)}　｜　全局 Facebook：${escapeHtml(globalFacebook)}</div>
+            <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); margin-top:12px;">
+              ${block({name:'▶ YouTube', platform:'youtube', enabled: !!youtube.enabled, enableClass:'opennews-account-yt-enabled', bound: ytBound, boundName: youtube.channel_name, actionClass:'opennews-account-yt-auth', actionLabel:'授权 YouTube'})}
+              ${block({name:'f Facebook', platform:'facebook', enabled: facebook.enabled !== false, enableClass:'opennews-account-fb-enabled', bound: fbBound, boundName: facebook.page_name, actionClass:'opennews-account-fb-auth', actionLabel:'授权 Facebook'})}
+              ${block({name:'𝕏 (Twitter)', platform:'x', enabled: x.enabled !== false, enableClass:'opennews-account-x-enabled', bound: xBound, boundName: x.account_label || x.handle, actionClass:'opennews-account-x-auth', actionLabel:'登录 X'})}
             </div>
           </div>
         `;
       }).join('');
-      applyOpenNewsAccountModeControls();
-      els.openNewsChannelAccountMatrix.querySelectorAll('.opennews-account-x-mode, .opennews-account-fb-mode').forEach(select => {
-        select.addEventListener('change', applyOpenNewsAccountModeControls);
+      els.openNewsChannelAccountMatrix.querySelectorAll('.opennews-account-yt-auth').forEach(btn => {
+        btn.addEventListener('click', () => openOpenNewsOAuth('youtube', btn.dataset.channel, btn.dataset.language));
+      });
+      els.openNewsChannelAccountMatrix.querySelectorAll('.opennews-account-fb-auth').forEach(btn => {
+        btn.addEventListener('click', () => openOpenNewsOAuth('facebook', btn.dataset.channel, btn.dataset.language));
+      });
+      els.openNewsChannelAccountMatrix.querySelectorAll('.opennews-account-x-auth').forEach(btn => {
+        btn.addEventListener('click', () => startOpenNewsChannelXLogin(btn.dataset.channel, btn.dataset.language));
+      });
+      els.openNewsChannelAccountMatrix.querySelectorAll('.opennews-account-unbind').forEach(btn => {
+        btn.addEventListener('click', () => unbindOpenNewsChannelAccount(btn.dataset.channel, btn.dataset.language, btn.dataset.platform));
       });
     }
 
-    function applyOpenNewsAccountModeControls() {
-      document.querySelectorAll('.opennews-account-row').forEach(row => {
-        const xCustom = row.querySelector('.opennews-account-x-mode')?.value === 'custom';
-        row.querySelectorAll('.opennews-account-x-field').forEach(input => {
-          input.disabled = !xCustom;
+    function openOpenNewsOAuth(platform, channel, language) {
+      if (!channel || !language) return;
+      const url = `/api/${platform}/oauth/start?channel=${encodeURIComponent(channel)}&language=${encodeURIComponent(language)}`;
+      window.open(url, 'ihouse_oauth', 'width=600,height=760');
+      setOpenNewsChannelStatus(`已打开 ${platform === 'youtube' ? 'YouTube' : 'Facebook'} 授权窗口；完成后回到本页会自动刷新绑定状态。`);
+    }
+
+    async function startOpenNewsChannelXLogin(channel, language) {
+      if (!channel || !language) return;
+      setOpenNewsChannelStatus('正在为该频道启动 X 登录窗口...');
+      try {
+        const res = await fetch('/api/x/browser-login/start', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, language }),
         });
-        const facebookCustom = row.querySelector('.opennews-account-fb-mode')?.value === 'custom';
-        row.querySelectorAll('.opennews-account-fb-field').forEach(input => {
-          input.disabled = !facebookCustom;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '启动 X 登录失败');
+        const url = data.public_url || (data.env && data.env.public_url) || '';
+        if (url) window.open(url, 'ihouse_x_login', 'width=1180,height=820');
+        setOpenNewsChannelStatus('X 登录窗口已启动：在弹窗里登录该频道的 X 账号；登录完成后即已绑定，可点“刷新”查看。');
+        await refreshOpenNewsChannelsFromServer();
+      } catch (error) {
+        setOpenNewsChannelStatus(friendlyRequestError(error, '启动 X 登录失败'), true);
+      }
+    }
+
+    async function unbindOpenNewsChannelAccount(channel, language, platform) {
+      if (!channel || !language || !platform) return;
+      if (!confirm('确认解绑该账号？解绑后该语言将回退到全局账号。')) return;
+      try {
+        const res = await fetch('/api/opennews/channel-account/unbind', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel, language, platform }),
         });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '解绑失败');
+        setOpenNewsChannelStatus('已解绑，该语言回退到全局账号。');
+        await refreshOpenNewsChannelsFromServer();
+      } catch (error) {
+        setOpenNewsChannelStatus(friendlyRequestError(error, '解绑失败'), true);
+      }
+    }
+
+    async function refreshOpenNewsChannelsFromServer() {
+      try {
+        const res = await fetch('/api/opennews/batches/config');
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          state.openNewsChannelsConfig = data.channels_config || state.openNewsChannelsConfig;
+          state.openNewsAccountSummary = data.accounts_summary || state.openNewsAccountSummary;
+          renderOpenNewsChannels();
+        }
+      } catch (e) {}
+    }
+
+    if (!window.__ihouseOAuthListenerBound) {
+      window.__ihouseOAuthListenerBound = true;
+      window.addEventListener('message', (ev) => {
+        if (ev && ev.data && ev.data.type === 'ihouse-oauth-done') {
+          refreshOpenNewsChannelsFromServer();
+        }
       });
     }
 
@@ -4208,36 +4227,19 @@
         youtube: !!els.openNewsChannelPlatformYoutube?.checked,
       };
       channel.accounts = channel.accounts || {};
+      // 账号凭据由“授权/登录”按钮在后端直接写入频道配置；这里保存时只更新每平台的“是否发布”开关，
+      // 其余字段（token 路径 / page_id / profile_dir 等）沿用服务器已绑定的值，避免保存把授权结果覆盖清空。
       document.querySelectorAll('.opennews-account-row').forEach(row => {
         const language = row.dataset.language || 'cn';
-        const xMode = row.querySelector('.opennews-account-x-mode')?.value || 'global';
-        const facebookMode = row.querySelector('.opennews-account-fb-mode')?.value || 'global';
-        const useCustomX = xMode === 'custom';
-        const useCustomFacebook = facebookMode === 'custom';
-        const xLabel = useCustomX ? (row.querySelector('.opennews-account-x-label')?.value?.trim() || '') : '';
-        const facebookPageName = useCustomFacebook ? (row.querySelector('.opennews-account-fb-name')?.value?.trim() || '') : '';
-        const facebookPageId = useCustomFacebook ? (row.querySelector('.opennews-account-fb-page')?.value?.trim() || '') : '';
+        const prev = (channel.accounts && channel.accounts[language]) || {};
+        const prevX = prev.x || {};
+        const prevFb = prev.facebook || {};
+        const prevYt = prev.youtube || {};
         channel.accounts[language] = {
           language,
-          x: {
-            enabled: !!row.querySelector('.opennews-account-x-enabled')?.checked,
-            binding_mode: useCustomX ? 'custom' : 'global',
-            account_label: xLabel,
-            handle: xLabel.replace(/^@/, '') || '',
-            profile_dir: useCustomX ? (row.querySelector('.opennews-account-x-profile')?.value?.trim() || '') : '',
-          },
-          facebook: {
-            enabled: !!row.querySelector('.opennews-account-fb-enabled')?.checked,
-            binding_mode: useCustomFacebook ? 'custom' : 'global',
-            page_name: facebookPageName,
-            page_id: facebookPageId,
-            page_access_token: useCustomFacebook ? (row.querySelector('.opennews-account-fb-token')?.value?.trim() || '') : '',
-          },
-          youtube: {
-            enabled: !!row.querySelector('.opennews-account-yt-enabled')?.checked,
-            channel_name: row.querySelector('.opennews-account-yt-name')?.value?.trim() || '',
-            token_store_path: row.querySelector('.opennews-account-yt-token')?.value?.trim() || '',
-          },
+          x: { ...prevX, enabled: !!row.querySelector('.opennews-account-x-enabled')?.checked },
+          facebook: { ...prevFb, page_access_token: '', enabled: !!row.querySelector('.opennews-account-fb-enabled')?.checked },
+          youtube: { ...prevYt, enabled: !!row.querySelector('.opennews-account-yt-enabled')?.checked },
         };
       });
     }
