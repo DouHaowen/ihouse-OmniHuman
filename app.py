@@ -180,6 +180,7 @@ from x_browser_login_manager import (
     x_browser_login_status,
 )
 import topic_auto
+import property_auto
 
 app = FastAPI(title="iHouse 内容工作台")
 SESSION_SAME_SITE = os.getenv("SESSION_SAME_SITE", "lax").strip().lower()
@@ -291,6 +292,7 @@ OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 AUTO_DIGITAL_BATCH_DIR = OUTPUT_DIR / "auto_digital_batches"
 TOPIC_AUTO_DIR = OUTPUT_DIR / "topic_auto"
+PROPERTY_AUTO_DIR = OUTPUT_DIR / "property_auto"
 FLOORPLAN_NAV_JOBS_DIR = OUTPUT_DIR / "admin_floorplan_nav_jobs"
 OPENNEWS_ADMIN_DIR = OUTPUT_DIR / "admin_opennews"
 OPENNEWS_AUTO_DIR = OUTPUT_DIR / "opennews_auto"
@@ -1322,6 +1324,7 @@ async def _start_opennews_batch_scheduler() -> None:
     _recover_pending_auto_digital_batches()
     _start_compose_ready_recovery_worker()
     _start_topic_auto_scheduler(poll_seconds=60)
+    _start_property_auto_scheduler(poll_seconds=60)
 
 VOICE_PRESETS = [
     {
@@ -4744,6 +4747,224 @@ def _start_topic_auto_scheduler(poll_seconds: int = 60) -> None:
             time.sleep(max(30, int(poll_seconds)))
 
     threading.Thread(target=loop, name="topic-auto-scheduler", daemon=True).start()
+
+
+# ────────────── 物件(房源)自动化：拉接口 → 下载实拍视频 → AI 写文案 → 房源实拍成片 ──────────────
+PROPERTY_AUTO_OWNER = {"username": "property_auto", "display_name": "房源自动化", "role": "admin"}
+
+
+def _property_auto_config_path() -> Path:
+    return PROPERTY_AUTO_DIR / "config.json"
+
+
+def _load_property_auto_config() -> dict:
+    defaults = {
+        "scheduler_enabled": False,
+        "interval_minutes": 15,
+        "max_attempts": 3,
+        "next_run_at": 0,
+        "last_run_at": 0,
+        "last_run_message": "",
+    }
+    path = _property_auto_config_path()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for key in defaults:
+                    if key in data:
+                        defaults[key] = data[key]
+        except Exception:
+            pass
+    return defaults
+
+
+def _save_property_auto_config(config: dict) -> None:
+    PROPERTY_AUTO_DIR.mkdir(parents=True, exist_ok=True)
+    _property_auto_config_path().write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _find_running_property_auto_task() -> Optional[str]:
+    """是否有房源自动化的任务正在制作（一次只做一条）。"""
+    for tid, task in list(tasks.items()):
+        if not isinstance(task, dict):
+            continue
+        if task.get("owner_username") != PROPERTY_AUTO_OWNER["username"]:
+            continue
+        tracker = task.get("tracker")
+        if tracker is not None and getattr(tracker, "status", "") in {"running", "pending", "queued"}:
+            return tid
+    return None
+
+
+def _property_video_final_exists(output_dir: Path) -> bool:
+    try:
+        for p in output_dir.rglob("*.mp4"):
+            if "final" in p.name.lower() or "final" in str(p.parent.name).lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _create_property_auto_video(prop: dict) -> dict:
+    """下载房源视频 + AI 写文案 + 创建房源实拍成片任务。返回 {ok, task_id, output_dir} 或 {ok:False, error}。"""
+    voice_preset = _get_voice_preset("mandarin_female", "cn")  # 温柔女声
+    if not voice_preset or voice_preset.get("enabled") is False:
+        return {"ok": False, "error": "默认温柔女声(mandarin_female)不可用"}
+    task_id = str(uuid.uuid4())[:8]
+    safe_name = re.sub(r"[^\w一-鿿-]+", "", str(prop.get("name") or ""))[:20]
+    output_dir = Path(_create_output_dir("property_video", f"房源实拍成片-{safe_name or prop.get('record_id')}"))
+    incoming = output_dir / "incoming"
+    saved_paths = property_auto.download_videos(prop.get("video_urls") or [], incoming)
+    if not saved_paths:
+        return {"ok": False, "error": "房源实拍视频下载失败或无视频"}
+    try:
+        analysis = analyze_property_video_with_openai(
+            video_paths=[Path(p) for p in saved_paths],
+            work_dir=output_dir / "analysis",
+            target_market="cn",
+            user_notes=prop.get("notes_text") or "",
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"AI 文案生成失败：{exc}"}
+    script_text = str(analysis.get("suggested_script") or "").strip()
+    if not script_text:
+        return {"ok": False, "error": "AI 没有生成文案"}
+    timeline = analysis.get("timeline_segments") if isinstance(analysis.get("timeline_segments"), list) else []
+    speed = float(voice_preset.get("default_speed") or 1.1)
+    voice_preset = dict(voice_preset)
+    voice_preset["selected_speed"] = speed
+    tracker = ProgressTracker(task_id)
+    tracker.total_steps = 4
+    tasks[task_id] = {
+        "owner_username": PROPERTY_AUTO_OWNER["username"],
+        "owner_display_name": PROPERTY_AUTO_OWNER["display_name"],
+        "owner_role": PROPERTY_AUTO_OWNER["role"],
+        "id": task_id,
+        "mode": "property_video",
+        "topic": f"房源实拍成片-{prop.get('name') or ''}",
+        "image_path": "",
+        "tracker": tracker,
+        "output_dir": str(output_dir),
+        "result": None,
+        "public_base_url": os.getenv("PUBLIC_BASE_URL", "https://aiagent.office.ihousejapan.cn"),
+        "created_at": time.time(),
+        "cancel_requested": False,
+        "cancel_requested_at": None,
+        "property_auto_record_id": prop.get("record_id"),
+        "workflow_config": {
+            "voice_preset_id": voice_preset.get("id"),
+            "speed": speed,
+            "target_market": "cn",
+            "voice_preset": voice_preset,
+            "bgm_item_id": "",
+            "bgm_volume": 0.0,
+            "property_video_mode": "one_take_timeline" if timeline else "real_shot_voiceover",
+            "timeline_segments": timeline,
+            "property_auto": True,
+            "property_record_id": prop.get("record_id"),
+        },
+        "cost_entries": [],
+        "cost_summary": _empty_cost_summary(),
+    }
+    tracker.log("房源实拍成片任务已创建（房源自动化），准备开始...")
+    threading.Thread(
+        target=run_property_video_with_progress,
+        args=(task_id, saved_paths, script_text, voice_preset, "cn", speed, "", 0.0, timeline),
+        daemon=True,
+    ).start()
+    return {"ok": True, "task_id": task_id, "output_dir": str(output_dir)}
+
+
+def _reconcile_property_auto_state(state: dict, *, max_attempts: int) -> bool:
+    """把 producing 中的房源记录对账：成片存在=done；任务已结束且无成片=失败。"""
+    changed = False
+    for rid, entry in list((state.get("records") or {}).items()):
+        if not isinstance(entry, dict) or entry.get("status") != "producing":
+            continue
+        od = entry.get("output_dir")
+        tid = entry.get("last_task")
+        if od and _property_video_final_exists(Path(od)):
+            property_auto.mark_record_result(state, rid, success=True, task_id=tid or "", name=entry.get("name") or "", max_attempts=max_attempts)
+            changed = True
+            continue
+        # 任务不在运行了（内存里没有或已结束）且没成片 → 失败
+        task = tasks.get(tid) if tid else None
+        tracker = (task or {}).get("tracker") if isinstance(task, dict) else None
+        still_running = tracker is not None and getattr(tracker, "status", "") in {"running", "pending", "queued"}
+        if not still_running:
+            property_auto.mark_record_result(state, rid, success=False, task_id=tid or "", name=entry.get("name") or "", max_attempts=max_attempts)
+            changed = True
+    return changed
+
+
+def _run_property_auto_produce_once(*, triggered_by: str = "manual", record_ids: Optional[list] = None) -> dict:
+    """拉房源接口 → 对账 → 选一条待做 → 下载视频+AI文案+制作。一次只做一条（房源视频较重）。"""
+    config = _load_property_auto_config()
+    max_attempts = max(1, int(config.get("max_attempts") or 3))
+    if not property_auto.property_auto_is_configured():
+        return {"ok": False, "error": "未配置 PROPERTY_API_TOKEN，无法拉取房源数据"}
+    state = property_auto.load_property_state(str(PROPERTY_AUTO_DIR))
+    if _reconcile_property_auto_state(state, max_attempts=max_attempts):
+        property_auto.save_property_state(str(PROPERTY_AUTO_DIR), state)
+    running = _find_running_property_auto_task()
+    if running:
+        return {"ok": True, "running": True, "task_id": running, "message": "已有房源视频在制作中，本次不重复触发。"}
+    try:
+        records = property_auto.fetch_property_records()
+    except Exception as exc:
+        return {"ok": False, "error": f"拉取房源接口失败：{exc}"}
+    if record_ids:
+        wanted = {str(x).strip() for x in record_ids if str(x).strip()}
+        pending = []
+        for r in records:
+            ex = property_auto.extract_property(r)
+            if ex and ex["record_id"] in wanted:
+                pending.append(ex)
+    else:
+        pending = property_auto.select_pending_properties(records, state, max_attempts=max_attempts, limit=1)
+    if not pending:
+        msg = f"拉取 {len(records)} 个房源，无待做（均已制作或无视频）。"
+        config["last_run_at"] = time.time(); config["last_run_message"] = msg
+        _save_property_auto_config(config)
+        return {"ok": True, "produced": 0, "total_records": len(records), "message": msg}
+    prop = pending[0]
+    started = _create_property_auto_video(prop)
+    if not started.get("ok"):
+        # 立即失败也计一次尝试
+        property_auto.mark_record_result(state, prop["record_id"], success=False, name=prop.get("name") or "", max_attempts=max_attempts)
+        property_auto.save_property_state(str(PROPERTY_AUTO_DIR), state)
+        return {"ok": False, "error": started.get("error")}
+    # 标记为 producing（成功/失败由下一轮对账写入）
+    rec = state.setdefault("records", {}).setdefault(prop["record_id"], {"attempts": 0})
+    rec.update({"status": "producing", "last_task": started["task_id"], "output_dir": started["output_dir"],
+                "name": prop.get("name") or "", "updated_at": time.time()})
+    property_auto.save_property_state(str(PROPERTY_AUTO_DIR), state)
+    msg = f"开始制作房源实拍成片：{prop.get('name') or prop['record_id']}（任务 {started['task_id']}）。"
+    config["last_run_at"] = time.time(); config["last_run_message"] = msg
+    _save_property_auto_config(config)
+    print(f"[property-auto] {triggered_by}: {msg}", flush=True)
+    return {"ok": True, "produced": 1, "total_records": len(records), "task_id": started["task_id"], "message": msg}
+
+
+def _start_property_auto_scheduler(poll_seconds: int = 60) -> None:
+    def loop() -> None:
+        while True:
+            try:
+                config = _load_property_auto_config()
+                if config.get("scheduler_enabled"):
+                    now = time.time()
+                    if now >= float(config.get("next_run_at") or 0):
+                        _run_property_auto_produce_once(triggered_by="scheduler")
+                        config = _load_property_auto_config()
+                        config["next_run_at"] = now + max(5, int(config.get("interval_minutes") or 15)) * 60
+                        _save_property_auto_config(config)
+            except Exception as exc:
+                print(f"[property-auto scheduler] loop error: {exc!r}", flush=True)
+            time.sleep(max(30, int(poll_seconds)))
+
+    threading.Thread(target=loop, name="property-auto-scheduler", daemon=True).start()
 
 
 def _push_live_event(event_type: str, message: str, task: Optional[dict] = None, extra: Optional[dict] = None):
@@ -16201,6 +16422,118 @@ async def topic_auto_produce_selected(request: Request):
         return JSONResponse(started, status_code=400)
     return {"ok": True, "produced": len(selected), "batch_id": started["batch_id"],
             "message": f"已选 {len(selected)} 条话题，创建数字人批次并开始逐条制作。"}
+
+
+@app.get("/api/property-auto/status")
+async def property_auto_status(request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以查看房源自动化状态")
+    if error:
+        return error
+    config = _load_property_auto_config()
+    state = property_auto.load_property_state(str(PROPERTY_AUTO_DIR))
+    rec = state.get("records") or {}
+    done_count = sum(1 for v in rec.values() if isinstance(v, dict) and v.get("status") == "done")
+    skipped_count = sum(1 for v in rec.values() if isinstance(v, dict) and v.get("status") == "skipped")
+    failed_pending = sum(1 for v in rec.values() if isinstance(v, dict) and v.get("status") == "failed")
+    producing = sum(1 for v in rec.values() if isinstance(v, dict) and v.get("status") == "producing")
+    recent = sorted([dict(v, record_id=k) for k, v in rec.items() if isinstance(v, dict)],
+                    key=lambda v: v.get("updated_at") or 0, reverse=True)[:20]
+    running = _find_running_property_auto_task()
+    return {
+        "ok": True,
+        "configured": property_auto.property_auto_is_configured(),
+        "done_count": done_count, "skipped_count": skipped_count,
+        "failed_pending_count": failed_pending, "producing_count": producing,
+        "running_task_id": running or "",
+        "config": config,
+        "recent_records": [
+            {"record_id": v.get("record_id"), "name": v.get("name") or "", "status": v.get("status") or "",
+             "attempts": v.get("attempts") or 0, "updated_at": v.get("updated_at") or 0}
+            for v in recent
+        ],
+    }
+
+
+@app.post("/api/property-auto/config")
+async def property_auto_set_config(request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以修改房源自动化配置")
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "配置格式错误"}, status_code=400)
+    config = _load_property_auto_config()
+    if "scheduler_enabled" in payload:
+        config["scheduler_enabled"] = bool(payload.get("scheduler_enabled"))
+        if config["scheduler_enabled"]:
+            config["next_run_at"] = 0
+    if "interval_minutes" in payload:
+        config["interval_minutes"] = max(5, int(payload.get("interval_minutes") or 15))
+    if "max_attempts" in payload:
+        config["max_attempts"] = max(1, min(10, int(payload.get("max_attempts") or 3)))
+    _save_property_auto_config(config)
+    return {"ok": True, "config": config}
+
+
+@app.get("/api/property-auto/properties")
+async def property_auto_properties(request: Request):
+    """列出房源接口全部房源 + 每个状态（供页面浏览、勾选制作）。"""
+    user, error = _require_admin_user(request, "只有管理员可以查看房源列表")
+    if error:
+        return error
+    if not property_auto.property_auto_is_configured():
+        return JSONResponse({"error": "未配置 PROPERTY_API_TOKEN"}, status_code=400)
+    try:
+        records = property_auto.fetch_property_records()
+    except Exception as exc:
+        return JSONResponse({"error": f"拉取房源接口失败：{exc}"}, status_code=502)
+    state = property_auto.load_property_state(str(PROPERTY_AUTO_DIR))
+    rec_state = state.get("records") or {}
+    props = []
+    for r in records:
+        ex = property_auto.extract_property(r)
+        if not ex:
+            continue
+        st = rec_state.get(ex["record_id"]) or {}
+        status = str(st.get("status") or "pending")
+        props.append({
+            "record_id": ex["record_id"], "name": ex["name"],
+            "video_count": len(ex.get("video_urls") or []),
+            "status": status if status in {"done", "failed", "skipped", "producing"} else "pending",
+            "attempts": int(st.get("attempts") or 0),
+        })
+    running = _find_running_property_auto_task()
+    return {"ok": True, "total": len(props), "running_task_id": running or "", "properties": props}
+
+
+@app.post("/api/property-auto/produce-selected")
+async def property_auto_produce_selected(request: Request):
+    """把勾选的房源走一站式房源实拍成片（一次做一条，其余排队等下次）。"""
+    user, error = _require_admin_user(request, "只有管理员可以制作房源视频")
+    if error:
+        return error
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    ids = payload.get("record_ids") if isinstance(payload, dict) else None
+    wanted = [str(x).strip() for x in (ids or []) if str(x).strip()]
+    if not wanted:
+        return JSONResponse({"error": "请先勾选要制作的房源"}, status_code=400)
+    result = _run_property_auto_produce_once(triggered_by=f"manual:{user.get('username') or 'admin'}", record_ids=wanted)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
+
+
+@app.post("/api/property-auto/run-now")
+async def property_auto_run_now(request: Request):
+    user, error = _require_admin_user(request, "只有管理员可以触发房源自动化")
+    if error:
+        return error
+    result = _run_property_auto_produce_once(triggered_by=f"manual:{user.get('username') or 'admin'}")
+    return JSONResponse(result, status_code=200 if result.get("ok") else 400)
 
 
 @app.get("/api/tasks/active")

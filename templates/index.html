@@ -2001,6 +2001,52 @@
               </div>
             </div>
 
+            <div class="history-card" id="propertyAutoPanel" style="display:none; margin-bottom:18px; border:1px solid rgba(59,130,246,0.35);">
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                <strong style="font-size:15px;">房源自动化（从房源接口拉数据 → AI 写文案 → 自动做实拍成片）</strong>
+                <span class="badge" id="propertyAutoStatusBadge">加载中…</span>
+              </div>
+              <div class="helper" style="margin-top:6px;">默认：中国市场 / 简体中文 / 温柔女声 / 不用 BGM / AI 自己写文案。开启后每隔设定分钟自动拉取，公司新填入的房源(带实拍视频)会逐条自动做成视频。</div>
+              <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); margin-top:10px;">
+                <label class="check-card" style="min-height:auto; padding:12px;">
+                  <span><strong>启用自动化</strong><small>定时拉取并制作</small></span>
+                  <input id="propertyAutoEnabled" type="checkbox">
+                </label>
+                <div class="field">
+                  <label>轮询间隔（分钟）</label>
+                  <input id="propertyAutoInterval" class="select-input" type="number" min="5" max="1440" value="15">
+                </div>
+                <div class="field">
+                  <label>失败重试次数</label>
+                  <input id="propertyAutoRetries" class="select-input" type="number" min="1" max="10" value="3">
+                </div>
+              </div>
+              <div class="topbar-status" style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+                <span class="badge" id="propertyAutoDone">已产出 0</span>
+                <span class="badge" id="propertyAutoPending">待重试 0</span>
+                <span class="badge" id="propertyAutoSkipped">已跳过 0</span>
+                <span class="badge" id="propertyAutoRunning"></span>
+              </div>
+              <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+                <button class="btn btn-primary" id="propertyAutoSaveBtn" type="button">保存配置</button>
+                <button class="btn btn-secondary" id="propertyAutoRunNowBtn" type="button">立即拉取并制作一条</button>
+                <span class="helper" id="propertyAutoMsg"></span>
+              </div>
+              <div style="margin-top:14px; border-top:1px solid rgba(148,163,184,0.2); padding-top:12px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                  <strong style="font-size:14px;">房源列表（浏览 + 勾选制作）</strong>
+                  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <label style="display:flex; align-items:center; gap:4px; font-size:12px; margin:0;"><input type="checkbox" id="propertyListHideDone"> 只看未制作</label>
+                    <button class="btn btn-secondary" id="propertyListLoadBtn" type="button">拉取房源列表</button>
+                    <button class="btn btn-primary" id="propertyListProduceBtn" type="button">制作选中</button>
+                  </div>
+                </div>
+                <div id="propertyListBox" class="file-board" style="margin-top:10px; max-height:340px; overflow:auto;"></div>
+                <span class="helper" id="propertyListMsg"></span>
+              </div>
+              <div class="file-board" id="propertyAutoRecentList" style="margin-top:12px;"></div>
+            </div>
+
             <div class="field-grid" style="grid-template-columns: repeat(2, minmax(0, 1fr));">
               <div class="field">
                 <label for="propertyVideoMarketSelect">目标市场 / 语言</label>
@@ -3772,6 +3818,130 @@
         setTimeout(loadTopicList, 800);
       } catch (e) { if (msg) { msg.textContent = friendlyRequestError(e, '制作失败'); msg.style.color = '#ef4444'; } }
       finally { if (btn) { btn.disabled = false; btn.textContent = '制作选中'; } }
+    }
+
+    async function loadPropertyAuto() {
+      if (!document.getElementById('propertyAutoPanel')) return;
+      try {
+        const res = await fetch('/api/property-auto/status');
+        if (!res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        renderPropertyAuto(data);
+      } catch (e) {}
+    }
+
+    function renderPropertyAuto(data) {
+      const cfg = data.config || {};
+      const setVal = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; };
+      const en = document.getElementById('propertyAutoEnabled');
+      if (en && document.activeElement !== en) en.checked = !!cfg.scheduler_enabled;
+      setVal('propertyAutoInterval', cfg.interval_minutes ?? 15);
+      setVal('propertyAutoRetries', cfg.max_attempts ?? 3);
+      const badge = document.getElementById('propertyAutoStatusBadge');
+      if (badge) { badge.textContent = cfg.scheduler_enabled ? '● 自动化运行中' : '○ 已关闭'; badge.style.color = cfg.scheduler_enabled ? '#16a34a' : '#94a3b8'; }
+      const setBadge = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+      setBadge('propertyAutoDone', '已产出 ' + (data.done_count || 0));
+      setBadge('propertyAutoPending', '待重试 ' + (data.failed_pending_count || 0));
+      setBadge('propertyAutoSkipped', '已跳过 ' + (data.skipped_count || 0));
+      const running = document.getElementById('propertyAutoRunning');
+      if (running) running.textContent = (data.running_task_id || data.producing_count) ? '● 正在制作中…' : (data.configured === false ? '⚠ 未配置接口令牌' : '');
+      const list = document.getElementById('propertyAutoRecentList');
+      if (list) {
+        const recs = data.recent_records || [];
+        if (!recs.length) list.innerHTML = '<div class="helper">还没有记录。开启自动化，或点“立即拉取并制作一条”。</div>';
+        else {
+          const label = s => s === 'done' ? '<span style="color:#16a34a;">✓ 已产出</span>' : (s === 'skipped' ? '<span style="color:#ef4444;">✗ 已跳过</span>' : (s === 'failed' ? '<span style="color:#f59e0b;">↻ 待重试</span>' : (s === 'producing' ? '<span style="color:#3b82f6;">● 制作中</span>' : escapeHtml(s))));
+          list.innerHTML = recs.map(r => `<div class="history-topic" style="padding:5px 0; border-bottom:1px solid rgba(148,163,184,0.15);">${label(r.status)}${r.attempts ? '（失败'+r.attempts+'次）' : ''} · ${escapeHtml((r.name || '').slice(0, 50) || r.record_id || '')}</div>`).join('');
+        }
+      }
+    }
+
+    async function savePropertyAuto() {
+      const msg = document.getElementById('propertyAutoMsg');
+      const body = {
+        scheduler_enabled: !!document.getElementById('propertyAutoEnabled')?.checked,
+        interval_minutes: Number(document.getElementById('propertyAutoInterval')?.value || 15),
+        max_attempts: Number(document.getElementById('propertyAutoRetries')?.value || 3),
+      };
+      if (msg) msg.textContent = '';
+      try {
+        const res = await fetch('/api/property-auto/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        await readApiJson(res, '保存房源自动化配置');
+        if (msg) { msg.textContent = '✓ 已保存' + (body.scheduler_enabled ? '，自动化已开启' : '，自动化已关闭'); msg.style.color = '#16a34a'; }
+        loadPropertyAuto();
+      } catch (e) { if (msg) { msg.textContent = friendlyRequestError(e, '保存失败'); msg.style.color = '#ef4444'; } }
+    }
+
+    async function runPropertyAutoNow() {
+      const msg = document.getElementById('propertyAutoMsg');
+      const btn = document.getElementById('propertyAutoRunNowBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '拉取中…'; }
+      if (msg) msg.textContent = '';
+      try {
+        const res = await fetch('/api/property-auto/run-now', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await readApiJson(res, '触发房源自动化');
+        if (msg) { msg.textContent = data.message || '已触发'; msg.style.color = '#16a34a'; }
+        loadPropertyAuto();
+      } catch (e) { if (msg) { msg.textContent = friendlyRequestError(e, '触发失败'); msg.style.color = '#ef4444'; } }
+      finally { if (btn) { btn.disabled = false; btn.textContent = '立即拉取并制作一条'; } }
+    }
+
+    function renderPropertyList(props) {
+      const box = document.getElementById('propertyListBox');
+      if (!box) return;
+      const hideDone = !!document.getElementById('propertyListHideDone')?.checked;
+      let list = props || [];
+      if (hideDone) list = list.filter(p => p.status !== 'done' && p.status !== 'skipped');
+      if (!list.length) { box.innerHTML = '<div class="helper">没有可做的房源（需带实拍视频）。点“拉取房源列表”刷新。</div>'; return; }
+      const badge = s => s === 'done' ? '<span style="color:#16a34a;">✓已产出</span>' : (s === 'skipped' ? '<span style="color:#ef4444;">✗已跳过</span>' : (s === 'failed' ? '<span style="color:#f59e0b;">↻待重试</span>' : (s === 'producing' ? '<span style="color:#3b82f6;">●制作中</span>' : '<span style="color:#94a3b8;">○未制作</span>')));
+      box.innerHTML = list.map(p => `
+        <label style="display:flex; gap:8px; align-items:center; padding:8px 4px; border-bottom:1px solid rgba(148,163,184,0.15); cursor:pointer;">
+          <input type="checkbox" class="property-list-cb" value="${escapeHtml(p.record_id)}">
+          <span style="flex:1;"><span style="font-size:12px;">${badge(p.status)}${p.attempts ? '（失败'+p.attempts+'次）' : ''}</span>
+          <div style="font-weight:600;">${escapeHtml(p.name || '')} <small style="color:#94a3b8;">· ${p.video_count||0} 个视频</small></div></span>
+        </label>`).join('');
+    }
+
+    async function loadPropertyList() {
+      const box = document.getElementById('propertyListBox');
+      const msg = document.getElementById('propertyListMsg');
+      const btn = document.getElementById('propertyListLoadBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '拉取中…'; }
+      if (box) box.innerHTML = '<div class="helper">正在拉取房源接口…</div>';
+      if (msg) msg.textContent = '';
+      try {
+        const res = await fetch('/api/property-auto/properties');
+        const data = await readApiJson(res, '拉取房源列表');
+        state.propertyList = data.properties || [];
+        renderPropertyList(state.propertyList);
+        if (msg) { msg.textContent = `接口共 ${data.total || 0} 个房源`; msg.style.color = '#94a3b8'; }
+      } catch (e) { if (box) box.innerHTML = ''; if (msg) { msg.textContent = friendlyRequestError(e, '拉取失败'); msg.style.color = '#ef4444'; } }
+      finally { if (btn) { btn.disabled = false; btn.textContent = '拉取房源列表'; } }
+    }
+
+    async function produceSelectedProperties() {
+      const msg = document.getElementById('propertyListMsg');
+      const ids = Array.from(document.querySelectorAll('.property-list-cb:checked')).map(cb => cb.value);
+      if (!ids.length) { if (msg) { msg.textContent = '请先勾选要制作的房源'; msg.style.color = '#ef4444'; } return; }
+      const btn = document.getElementById('propertyListProduceBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '提交中…'; }
+      try {
+        const res = await fetch('/api/property-auto/produce-selected', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ record_ids: ids }) });
+        const data = await readApiJson(res, '制作选中房源');
+        if (msg) { msg.textContent = data.message || '已提交'; msg.style.color = '#16a34a'; }
+        loadPropertyAuto();
+        setTimeout(loadPropertyList, 800);
+      } catch (e) { if (msg) { msg.textContent = friendlyRequestError(e, '制作失败'); msg.style.color = '#ef4444'; } }
+      finally { if (btn) { btn.disabled = false; btn.textContent = '制作选中'; } }
+    }
+
+    if (!window.__ihousePropertyAutoBound) {
+      window.__ihousePropertyAutoBound = true;
+      document.getElementById('propertyAutoSaveBtn')?.addEventListener('click', savePropertyAuto);
+      document.getElementById('propertyAutoRunNowBtn')?.addEventListener('click', runPropertyAutoNow);
+      document.getElementById('propertyListLoadBtn')?.addEventListener('click', loadPropertyList);
+      document.getElementById('propertyListProduceBtn')?.addEventListener('click', produceSelectedProperties);
+      document.getElementById('propertyListHideDone')?.addEventListener('change', () => renderPropertyList(state.propertyList || []));
     }
 
     if (!window.__ihouseTopicAutoBound) {
@@ -5689,6 +5859,12 @@
         setHeroStatus('OpenNews 新闻视频工作台已就绪');
       } else if (propertyMode) {
         renderPropertyVideoOptions();
+        const pAuto = document.getElementById('propertyAutoPanel');
+        if (pAuto) {
+          const isAdmin = !!state.currentUser && state.currentUser.role === 'admin';
+          pAuto.style.display = isAdmin ? '' : 'none';
+          if (isAdmin) loadPropertyAuto();
+        }
         setHeroStatus('房源实拍成片工作台已就绪');
       } else {
         setHeroStatus(copyText('heroReady', '工作台已就绪'));
