@@ -2668,6 +2668,27 @@
       return raw || fallbackMessage || '请求失败';
     }
 
+    // 安全读取接口 JSON：当服务器/代理返回的是 HTML 错误页（413/502/504 等）时，
+    // 不再抛出隐晦的 "Unexpected token '<'"，而是给出人话提示。
+    async function readApiJson(res, actionLabel) {
+      const label = actionLabel || '请求';
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('application/json')) {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `${label}失败（${res.status}）`);
+        return data;
+      }
+      // 非 JSON：多半是反向代理返回的 HTML 错误页
+      await res.text().catch(() => '');
+      let msg;
+      if (res.status === 413) msg = `${label}失败：上传文件过大，超过服务器上限。请压缩视频或减少数量后重试。`;
+      else if (res.status === 502 || res.status === 503 || res.status === 504) msg = `${label}失败：服务暂时繁忙或超时，请稍后重试。`;
+      else if (res.status === 401 || res.status === 403) msg = `${label}失败：登录已过期，请刷新页面重新登录后再试。`;
+      else if (!res.ok) msg = `${label}失败（${res.status}）：服务返回异常，请稍后重试。`;
+      else msg = `${label}失败：服务返回了非预期内容，请稍后重试。`;
+      throw new Error(msg);
+    }
+
     async function loadActiveTasks() {
       if (!state.currentUser) return;
       try {
@@ -5740,8 +5761,7 @@
       }
       try {
         const res = await fetch('/api/property-video/analyze', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'AI 视频分析失败');
+        const data = await readApiJson(res, 'AI 视频分析');
         renderPropertyVideoAnalysis(data);
         if (els.propertyVideoAnalyzeStatus) els.propertyVideoAnalyzeStatus.textContent = 'AI 分析完成，文案已填入下方';
         setHeroStatus('AI 已根据实拍视频生成解说文案');
@@ -5820,8 +5840,7 @@
       if (els.propertyVideoLogPanel) els.propertyVideoLogPanel.innerHTML = '';
       try {
         const res = await fetch('/api/property-video/jobs', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '创建房源视频任务失败');
+        const data = await readApiJson(res, '创建房源视频任务');
         state.propertyVideoTaskId = data.task_id;
         appendPropertyVideoLog('任务已提交，开始处理房源实拍视频。');
         subscribePropertyVideoProgress(data.task_id);
