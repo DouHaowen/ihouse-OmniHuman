@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import threading
 import requests
@@ -755,15 +756,48 @@ def _opennews_bind_channel_account(channel_id: str, language: str, platform: str
         return hit
 
 
+def _opennews_x_profile_logged_in(profile_dir: str) -> bool:
+    """X 浏览器 profile 是否真登录成功：Cookies 里存在 x.com/twitter.com 的 auth_token。
+    面板据此显示“已登录”而不是仅仅“建了档”，避免误判为已绑定。"""
+    pdir = str(profile_dir or "").strip()
+    if not pdir:
+        return False
+    base = Path(pdir)
+    if not base.exists():
+        return False
+    try:
+        cookies_files = list(base.rglob("Cookies"))[:6]
+    except Exception:
+        return False
+    for cookies in cookies_files:
+        try:
+            con = sqlite3.connect(f"file:{cookies}?mode=ro&immutable=1", uri=True)
+            row = con.execute(
+                "SELECT 1 FROM cookies WHERE name='auth_token' "
+                "AND (host_key LIKE '%x.com' OR host_key LIKE '%twitter.com') LIMIT 1"
+            ).fetchone()
+            con.close()
+            if row:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _public_opennews_channels_config(config: dict) -> dict:
     public_config = copy.deepcopy(config)
     for channel in public_config.get("channels") or []:
         for account in (channel.get("accounts") or {}).values():
-            facebook = account.get("facebook") if isinstance(account, dict) else None
+            if not isinstance(account, dict):
+                continue
+            facebook = account.get("facebook")
             if isinstance(facebook, dict):
                 token = str(facebook.get("page_access_token") or "").strip()
                 facebook["page_access_token_configured"] = bool(token)
                 facebook["page_access_token"] = ""
+            x_account = account.get("x")
+            if isinstance(x_account, dict):
+                x_account["logged_in"] = _opennews_x_profile_logged_in(x_account.get("profile_dir"))
     return public_config
 
 

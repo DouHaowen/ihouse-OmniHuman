@@ -80,8 +80,32 @@ def _terminate_pid(pid: int) -> None:
         pass
 
 
+def _playwright_chromium_path() -> str:
+    """定位 Playwright 自带的 chromium 二进制（与发布器使用的一致，协议匹配、不会崩）。
+    动态 glob，不写死版本号，避免 Playwright 升级后失效。"""
+    import glob
+    bases = [
+        os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright"),
+        "/root/.cache/ms-playwright",
+        "/ms-playwright",
+    ]
+    for base in bases:
+        for candidate in sorted(glob.glob(os.path.join(base, "chromium-*/chrome-linux/chrome")), reverse=True):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return ""
+
+
 def _resolve_cmd(name: str) -> str:
     if name == "chromium":
+        # 优先用 Playwright 自带 chromium：系统 chromium(如 Debian 150)常与 Playwright 协议不兼容，
+        # 登录窗口一启动就崩、profile 存不下登录 Cookie。除非用户显式用非默认路径覆盖。
+        env_override = (X_BROWSER_LOGIN_CHROMIUM_PATH or "").strip()
+        if env_override and env_override != "/usr/bin/chromium" and Path(env_override).is_file():
+            return env_override
+        bundled = _playwright_chromium_path()
+        if bundled:
+            return bundled
         path = Path(X_BROWSER_LOGIN_CHROMIUM_PATH)
         if path.is_file():
             return str(path)

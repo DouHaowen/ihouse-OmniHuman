@@ -4057,9 +4057,11 @@
         const facebook = account.facebook || {};
         const youtube = account.youtube || {};
         const chId = channel.id || '';
-        const ytBound = !!(youtube.token_store_path || '').trim();
+        const ytBound = !!(youtube.token_store_path || '').trim() || !!(youtube.channel_name || '').trim();
         const fbBound = !!(facebook.page_id || '') || !!facebook.page_access_token_configured;
-        const xBound = !!(x.profile_dir || '').trim();
+        // X 以“真实登录成功”为准（后端检测 auth_token Cookie）：仅建了 profile 但没登录不算已绑定
+        const xStarted = !!(x.profile_dir || '').trim();
+        const xBound = !!x.logged_in;
         const block = (o) => `
           <div class="field" style="border:1px solid rgba(148,163,184,0.35); border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px;">
             <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
@@ -4068,9 +4070,9 @@
                 <input class="${o.enableClass}" type="checkbox" ${o.enabled ? 'checked' : ''}> 发布
               </label>
             </div>
-            <div style="font-size:12px; min-height:18px;">${o.bound
+            <div style="font-size:12px; min-height:18px;">${o.statusHtml || (o.bound
               ? `<span style="color:#16a34a; font-weight:600;">✓ 已绑定：${escapeHtml(o.boundName || '（已授权）')}</span>`
-              : `<span style="color:#94a3b8;">○ 未绑定 · 发布走全局账号</span>`}</div>
+              : `<span style="color:#94a3b8;">○ 未绑定 · 发布走全局账号</span>`)}</div>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
               <button type="button" class="${o.actionClass}" data-channel="${escapeHtml(chId)}" data-language="${escapeHtml(lang.id)}" style="${authBtnStyle}">${o.bound ? '重新' + o.actionLabel : o.actionLabel}</button>
               ${o.bound ? `<button type="button" class="opennews-account-unbind" data-channel="${escapeHtml(chId)}" data-language="${escapeHtml(lang.id)}" data-platform="${o.platform}" style="${unbindBtnStyle}">解绑</button>` : ''}
@@ -4089,7 +4091,12 @@
             <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); margin-top:12px;">
               ${block({name:'▶ YouTube', platform:'youtube', enabled: !!youtube.enabled, enableClass:'opennews-account-yt-enabled', bound: ytBound, boundName: youtube.channel_name, actionClass:'opennews-account-yt-auth', actionLabel:'授权 YouTube'})}
               ${block({name:'f Facebook', platform:'facebook', enabled: facebook.enabled !== false, enableClass:'opennews-account-fb-enabled', bound: fbBound, boundName: facebook.page_name, actionClass:'opennews-account-fb-auth', actionLabel:'授权 Facebook'})}
-              ${block({name:'𝕏 (Twitter)', platform:'x', enabled: x.enabled !== false, enableClass:'opennews-account-x-enabled', bound: xBound, boundName: x.account_label || x.handle, actionClass:'opennews-account-x-auth', actionLabel:'登录 X'})}
+              ${block({name:'𝕏 (Twitter)', platform:'x', enabled: x.enabled !== false, enableClass:'opennews-account-x-enabled', bound: xBound, boundName: x.account_label || x.handle, actionClass:'opennews-account-x-auth', actionLabel:'登录 X',
+                statusHtml: xBound
+                  ? `<span style="color:#16a34a; font-weight:600;">✓ 已登录：${escapeHtml(x.account_label || x.handle || '（该频道专属）')}</span>`
+                  : (xStarted
+                    ? `<span style="color:#f59e0b; font-weight:600;">⚠ 登录窗口已建档，但尚未完成登录——点“登录 X”在弹窗里登进去</span>`
+                    : `<span style="color:#94a3b8;">○ 未绑定 · 发布走全局账号</span>`)})}
             </div>
           </div>
         `;
