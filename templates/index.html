@@ -4043,9 +4043,12 @@
               </div>
               <span class="badge">${(channel.languages || []).includes(lang.id) ? '已启用语言' : '未启用语言'}</span>
             </div>
-            <div class="topbar-status" style="margin-top:10px;">
-              全局 X：${escapeHtml(globalX)}　｜　全局 Facebook：${escapeHtml(globalFacebook)}
+            <div class="topbar-status" style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+              <span class="badge">X：${x.enabled === false ? '未启用' : (xCustom ? '专属账号' : '全局')}</span>
+              <span class="badge">Facebook：${facebook.enabled === false ? '未启用' : (facebookCustom ? '专属 Page' : '全局')}</span>
+              <span class="badge">YouTube：${youtube.enabled ? ((youtube.token_store_path || '').trim() ? '专属账号' : '全局') : '未启用'}</span>
             </div>
+            <div class="history-topic" style="margin-top:6px;">全局 X：${escapeHtml(globalX)}　｜　全局 Facebook：${escapeHtml(globalFacebook)}　（留空=用全局账号，填了=用该频道专属账号）</div>
             <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(180px,1fr)); margin-top:10px;">
               <div class="field">
                 <label>X 绑定方式</label>
@@ -4095,14 +4098,14 @@
             <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr)); margin-top:10px;">
               <div class="field">
                 <label>YouTube 频道名称</label>
-                <input class="select-input opennews-account-yt-name" type="text" value="${escapeHtml(youtube.channel_name || '')}" placeholder="预留">
+                <input class="select-input opennews-account-yt-name" type="text" value="${escapeHtml(youtube.channel_name || '')}" placeholder="OpenNews ${escapeHtml(lang.label)}">
               </div>
               <div class="field">
                 <label>YouTube Token 路径</label>
-                <input class="select-input opennews-account-yt-token" type="text" value="${escapeHtml(youtube.token_store_path || '')}" placeholder="预留，暂不自动发布">
+                <input class="select-input opennews-account-yt-token" type="text" value="${escapeHtml(youtube.token_store_path || '')}" placeholder="留空=用全局；填该频道专属 token 路径">
               </div>
               <label class="check-card" style="min-height:auto; padding:12px;">
-                <span><strong>启用 YouTube</strong><small>当前建议关闭</small></span>
+                <span><strong>启用 YouTube</strong><small>该语言发布 YouTube</small></span>
                 <input class="opennews-account-yt-enabled" type="checkbox" ${youtube.enabled ? 'checked' : ''}>
               </label>
             </div>

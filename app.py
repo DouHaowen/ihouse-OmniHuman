@@ -6553,6 +6553,14 @@ def _run_youtube_upload_job(job_id: str) -> None:
         _update_youtube_upload_job(job_id, status="failed", message=str(exc), error=str(exc))
 
 
+def _opennews_youtube_token_path_for(channel_id: str, target_market: str):
+    """取某频道某语言绑定的 YouTube token 路径；频道未单独配置时回退到全局 token。
+    这样不同频道/语言可以发布到不同 YouTube 账号，只需在频道配置里设置各自的 token_store_path。"""
+    account = _opennews_publish_account_for(channel_id, target_market, "youtube").get("account") or {}
+    token_path = str(account.get("token_store_path") or "").strip()
+    return Path(token_path) if token_path else YOUTUBE_TOKEN_STORE_PATH
+
+
 def _publish_opennews_result_to_youtube(
     output_dir: Path,
     result: dict,
@@ -6579,7 +6587,7 @@ def _publish_opennews_result_to_youtube(
         thumbnail_path = _resolve_youtube_thumbnail(output_dir, result, aspect_ratio=aspect_key)
         upload_metadata = _build_youtube_shorts_metadata(metadata) if aspect_key == "vertical" else metadata
         upload_result = upload_video_to_youtube(
-            YOUTUBE_TOKEN_STORE_PATH,
+            _opennews_youtube_token_path_for(channel_id, target_market),
             video_path,
             title=upload_metadata["title"],
             description=upload_metadata["description"],
@@ -6632,7 +6640,7 @@ def _publish_opennews_result_to_youtube(
                 thumbnail_path = _resolve_youtube_thumbnail(output_dir, version, aspect_ratio=aspect_key)
                 version_upload_metadata = _build_youtube_shorts_metadata(version_metadata) if aspect_key == "vertical" else version_metadata
                 upload_result = upload_video_to_youtube(
-                    YOUTUBE_TOKEN_STORE_PATH,
+                    _opennews_youtube_token_path_for(channel_id, target_market),
                     video_path,
                     title=version_upload_metadata["title"],
                     description=version_upload_metadata["description"],
