@@ -145,10 +145,12 @@ from youtube_publisher import (
     exchange_youtube_code_for_tokens,
     get_youtube_channel,
     get_youtube_video_metrics,
+    save_youtube_oauth_app_config,
     save_youtube_refresh_token,
     set_youtube_thumbnail,
     upload_video_to_youtube,
     youtube_env_config,
+    youtube_oauth_app_source,
 )
 from x_publisher import (
     X_SCOPE,
@@ -8508,6 +8510,61 @@ async def youtube_status(request: Request):
         except Exception as exc:
             payload["error"] = str(exc)
     return payload
+
+
+@app.get("/api/youtube/oauth-app")
+async def youtube_oauth_app_get(request: Request):
+    """读取当前 YouTube 授权应用凭据配置（不返回密钥明文，只返回是否已配置）。"""
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    config = youtube_env_config()
+    return {
+        "ok": True,
+        "client_id": config.get("client_id") or "",
+        "client_secret_configured": bool(config.get("client_secret")),
+        "redirect_uri": config.get("redirect_uri") or "",
+        "source": youtube_oauth_app_source(),
+    }
+
+
+@app.post("/api/youtube/oauth-app")
+async def youtube_oauth_app_save(request: Request):
+    """在面板上填写并保存 YouTube 授权应用的客户端 ID / 密钥。保存后立即生效，无需重启。"""
+    user, error = _require_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error()
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    client_id = str(payload.get("client_id") or "").strip()
+    client_secret = str(payload.get("client_secret") or "").strip()
+    redirect_uri = str(payload.get("redirect_uri") or "").strip()
+    if not client_id:
+        return JSONResponse({"error": "请填写客户端 ID"}, status_code=400)
+    # 密钥留空表示“沿用已保存的密钥”（避免前端不显示明文时误清空）
+    if not client_secret:
+        existing = youtube_env_config()
+        client_secret = existing.get("client_secret") or ""
+        if not client_secret:
+            return JSONResponse({"error": "请填写客户端密钥"}, status_code=400)
+    try:
+        save_youtube_oauth_app_config(client_id, client_secret, redirect_uri)
+    except Exception as exc:
+        return JSONResponse({"error": f"保存失败：{exc}"}, status_code=500)
+    saved = youtube_env_config()
+    return {
+        "ok": True,
+        "client_id": saved.get("client_id") or "",
+        "client_secret_configured": bool(saved.get("client_secret")),
+        "redirect_uri": saved.get("redirect_uri") or "",
+        "source": youtube_oauth_app_source(),
+    }
 
 
 @app.get("/api/youtube/oauth/start")

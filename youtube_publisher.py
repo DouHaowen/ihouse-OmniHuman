@@ -22,11 +22,59 @@ class YouTubePublishError(RuntimeError):
     pass
 
 
+# 面板可填写的 OAuth 应用凭据存储文件（优先于环境变量），实现“在页面上填客户端 ID/密钥”。
+YOUTUBE_OAUTH_APP_CONFIG_PATH = Path(
+    os.getenv("YOUTUBE_OAUTH_APP_CONFIG_PATH", "output/youtube_auth/oauth_app_config.json")
+).resolve()
+
+
+def _load_youtube_oauth_app_override() -> dict[str, str]:
+    try:
+        if YOUTUBE_OAUTH_APP_CONFIG_PATH.exists():
+            data = json.loads(YOUTUBE_OAUTH_APP_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {
+                    "client_id": str(data.get("client_id") or "").strip(),
+                    "client_secret": str(data.get("client_secret") or "").strip(),
+                    "redirect_uri": str(data.get("redirect_uri") or "").strip(),
+                }
+    except Exception:
+        pass
+    return {}
+
+
+def save_youtube_oauth_app_config(client_id: str, client_secret: str, redirect_uri: str = "") -> None:
+    """把面板填写的 OAuth 应用凭据落盘。redirect_uri 留空则沿用当前（环境变量）值。"""
+    YOUTUBE_OAUTH_APP_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    redirect_uri = str(redirect_uri or "").strip() or os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    payload = {
+        "client_id": str(client_id or "").strip(),
+        "client_secret": str(client_secret or "").strip(),
+        "redirect_uri": redirect_uri,
+        "updated_at": time.time(),
+    }
+    tmp = YOUTUBE_OAUTH_APP_CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(YOUTUBE_OAUTH_APP_CONFIG_PATH)
+
+
+def youtube_oauth_app_source() -> str:
+    """当前 OAuth 凭据来自面板(panel)还是环境变量(env)还是未配置(none)。"""
+    override = _load_youtube_oauth_app_override()
+    if override.get("client_id") and override.get("client_secret"):
+        return "panel"
+    if os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip() and os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip():
+        return "env"
+    return "none"
+
+
 def youtube_env_config() -> dict[str, str]:
+    # 优先用面板填写的凭据，未填则回退到环境变量。每次调用实时读取，改完立即生效、无需重启。
+    override = _load_youtube_oauth_app_override()
     return {
-        "client_id": os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip(),
-        "client_secret": os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip(),
-        "redirect_uri": os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip(),
+        "client_id": override.get("client_id") or os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip(),
+        "client_secret": override.get("client_secret") or os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip(),
+        "redirect_uri": override.get("redirect_uri") or os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip(),
         "refresh_token": os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip() or os.getenv("YOUTUBE_REFRESH_TOKEN", "").strip(),
     }
 

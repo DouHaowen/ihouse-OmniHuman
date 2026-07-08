@@ -1645,6 +1645,38 @@
               </div>
               <div class="topbar-status" id="openNewsChannelStatus">正在加载频道配置...</div>
               <div class="insight-grid" id="openNewsBoundAccounts" style="margin-top:6px;"></div>
+
+              <div class="history-card" id="youtubeOAuthAppCard" style="margin-top:10px; border:1px solid rgba(59,130,246,0.35);">
+                <div class="history-top">
+                  <div>
+                    <div class="history-title">YouTube 授权应用（全局，一次性）</div>
+                    <div class="history-topic">同事在 Google 后台建好授权应用后，把客户端 ID / 密钥填到这里保存，之后各频道就能直接点“授权 YouTube”登录绑定。保存即时生效，无需重启。</div>
+                  </div>
+                  <span class="badge" id="youtubeOAuthAppStatusBadge">加载中…</span>
+                </div>
+                <div class="field" style="margin-top:10px;">
+                  <label>授权回调地址（把这一行登记到 Google OAuth 客户端的“已获授权的重定向 URI”里）</label>
+                  <div style="display:flex; gap:8px; align-items:center;">
+                    <input class="select-input" id="youtubeOAuthRedirectUri" type="text" readonly style="flex:1; background:rgba(148,163,184,0.12);">
+                    <button type="button" class="btn btn-secondary" id="youtubeOAuthCopyRedirectBtn">复制</button>
+                  </div>
+                </div>
+                <div class="field-grid" style="grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); margin-top:10px;">
+                  <div class="field">
+                    <label>客户端 ID（Client ID）</label>
+                    <input class="select-input" id="youtubeOAuthClientId" type="text" placeholder="xxxx.apps.googleusercontent.com">
+                  </div>
+                  <div class="field">
+                    <label>客户端密钥（Client secret）</label>
+                    <input class="select-input" id="youtubeOAuthClientSecret" type="password" placeholder="留空=不修改已保存的密钥">
+                  </div>
+                </div>
+                <div style="display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+                  <button type="button" class="btn btn-primary" id="youtubeOAuthAppSaveBtn">保存授权应用</button>
+                  <span class="history-topic" id="youtubeOAuthAppMsg"></span>
+                </div>
+              </div>
+
               <div class="opennews-channel-layout" style="display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; margin-top:6px;">
               <div id="openNewsChannelCards" style="flex:0 0 250px; display:flex; flex-direction:column; gap:8px;"></div>
               <div class="history-card" id="openNewsChannelEditor" style="display:none; flex:1 1 460px; min-width:320px; margin:0;">
@@ -4170,6 +4202,66 @@
       } catch (e) {}
     }
 
+    function applyYoutubeOAuthApp(data) {
+      const badge = document.getElementById('youtubeOAuthAppStatusBadge');
+      const redirect = document.getElementById('youtubeOAuthRedirectUri');
+      const cid = document.getElementById('youtubeOAuthClientId');
+      const secret = document.getElementById('youtubeOAuthClientSecret');
+      if (redirect) redirect.value = data.redirect_uri || '';
+      if (cid) cid.value = data.client_id || '';
+      if (secret) secret.placeholder = data.client_secret_configured ? '已保存，留空=不修改' : '客户端密钥 Client secret';
+      if (badge) {
+        const ok = !!(data.client_id && data.client_secret_configured);
+        const srcText = data.source === 'panel' ? '面板已配置' : (data.source === 'env' ? '环境变量配置' : '未配置');
+        badge.textContent = ok ? '✓ ' + srcText : '未配置';
+        badge.style.color = ok ? '#16a34a' : '#f59e0b';
+      }
+    }
+
+    async function loadYoutubeOAuthApp() {
+      if (!document.getElementById('youtubeOAuthAppCard')) return;
+      try {
+        const res = await fetch('/api/youtube/oauth-app');
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) applyYoutubeOAuthApp(data);
+      } catch (e) {}
+    }
+
+    async function saveYoutubeOAuthApp() {
+      const msg = document.getElementById('youtubeOAuthAppMsg');
+      const cid = (document.getElementById('youtubeOAuthClientId')?.value || '').trim();
+      const secret = (document.getElementById('youtubeOAuthClientSecret')?.value || '').trim();
+      if (!cid) { if (msg) { msg.textContent = '请填写客户端 ID'; msg.style.color = '#ef4444'; } return; }
+      const btn = document.getElementById('youtubeOAuthAppSaveBtn');
+      if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+      if (msg) { msg.textContent = ''; }
+      try {
+        const res = await fetch('/api/youtube/oauth-app', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_id: cid, client_secret: secret }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || '保存失败');
+        applyYoutubeOAuthApp(data);
+        const s = document.getElementById('youtubeOAuthClientSecret');
+        if (s) s.value = '';
+        if (msg) { msg.textContent = '✓ 已保存，现在可以去各频道点“授权 YouTube”登录绑定了'; msg.style.color = '#16a34a'; }
+      } catch (error) {
+        if (msg) { msg.textContent = friendlyRequestError(error, '保存失败'); msg.style.color = '#ef4444'; }
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '保存授权应用'; }
+      }
+    }
+
+    if (!window.__ihouseYoutubeOAuthAppBound) {
+      window.__ihouseYoutubeOAuthAppBound = true;
+      document.getElementById('youtubeOAuthAppSaveBtn')?.addEventListener('click', saveYoutubeOAuthApp);
+      document.getElementById('youtubeOAuthCopyRedirectBtn')?.addEventListener('click', () => {
+        const el = document.getElementById('youtubeOAuthRedirectUri');
+        if (el) { navigator.clipboard?.writeText(el.value); const m = document.getElementById('youtubeOAuthAppMsg'); if (m) { m.textContent = '已复制回调地址'; m.style.color = '#16a34a'; } }
+      });
+    }
+
     if (!window.__ihouseOAuthListenerBound) {
       window.__ihouseOAuthListenerBound = true;
       window.addEventListener('message', (ev) => {
@@ -4460,6 +4552,7 @@
         state.openNewsAccountSummary = data.accounts_summary || state.openNewsAccountSummary;
         if (!state.openNewsSelectedChannelId && openNewsChannels()[0]) state.openNewsSelectedChannelId = openNewsChannels()[0].id;
         applyOpenNewsBatchConfig(data.config || {}, !!data.is_admin, data.presenter_state || {});
+        loadYoutubeOAuthApp();
       } catch (error) {
         setOpenNewsBatchStatus(friendlyRequestError(error, '自动抓取设置加载失败'), true);
       }
