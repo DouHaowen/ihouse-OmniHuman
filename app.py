@@ -1194,8 +1194,15 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
             # 已合成（或无需再合成）的 OpenNews 成片：若有可发布视频但从未发布过，
             # 补触发一次发布。覆盖 produce 自身发布未成功、或历史遗留未发的情况。
             try:
+                # 跳过刚改动过(最近 15 分钟)的成片：它多半正被自己的生产流程发布，
+                # 恢复工人此时插手会和主发布并发，导致同一条视频重复上传。恢复只管“旧的卡住的”。
+                try:
+                    recently_touched = (time.time() - result_path.stat().st_mtime) < 900
+                except Exception:
+                    recently_touched = False
                 if (
-                    output_dir.name not in _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED
+                    not recently_touched
+                    and output_dir.name not in _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED
                     and _history_is_opennews_result(result)
                     and _opennews_result_has_publishable_video(output_dir, result)
                 ):
@@ -5915,11 +5922,49 @@ def _find_reusable_running_task(*, owner_username: str, submission_key: str, ded
 
 
 
+def _acquire_publish_lock(output_dir: Path, ttl_seconds: int = 1800) -> bool:
+    """为某条成片获取“正在发布”互斥锁（原子创建锁文件）。已被占用则返回 False。
+    防止生产流程自身的发布与后台恢复工人并发发布同一条视频，导致重复上传。"""
+    lock = output_dir / ".publish.lock"
+    try:
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, str(time.time()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        # 处理僵尸锁（进程异常退出未释放）：超过 TTL 视为过期，可抢占
+        try:
+            ts = float((lock.read_text(encoding="utf-8") or "0").strip() or 0)
+        except Exception:
+            ts = 0.0
+        if time.time() - ts > ttl_seconds:
+            try:
+                lock.write_text(str(time.time()), encoding="utf-8")
+                return True
+            except Exception:
+                return False
+        return False
+    except Exception:
+        return True  # 锁机制自身异常不应阻断正常发布
+
+
+def _release_publish_lock(output_dir: Path) -> None:
+    try:
+        (output_dir / ".publish.lock").unlink()
+    except Exception:
+        pass
+
+
 def _schedule_opennews_post_compose_publish(task_id: str, output_dir: str, result_data: dict) -> None:
     """在 OpenNews 流水线尾部自动发布到 X、Facebook 与 YouTube。"""
     def _runner() -> None:
+        path = Path(output_dir)
+        if not _acquire_publish_lock(path):
+            print(f"[opennews_auto_publish] 跳过 {path.name}：已有发布流程在进行（避免重复发布）", flush=True)
+            return
         try:
-            path = Path(output_dir)
             result = _load_result_from_output_dir(path) or result_data
             material_review = _opennews_material_review_status(result, path)
             if material_review.get("reason"):
@@ -5943,6 +5988,8 @@ def _schedule_opennews_post_compose_publish(task_id: str, output_dir: str, resul
                 pass
         except Exception as exc:
             print(f"[opennews_auto_publish] task {task_id} failed: {exc!r}")
+        finally:
+            _release_publish_lock(path)
 
     threading.Thread(target=_runner, name=f"opennews-auto-publish-{task_id}", daemon=True).start()
 
