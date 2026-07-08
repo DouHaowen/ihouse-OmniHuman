@@ -1635,8 +1635,8 @@
               <div class="panel-header" style="margin-bottom:0;">
                 <div>
                   <div class="section-kicker">Channel Matrix</div>
-                  <h3 class="section-title" style="font-size:22px;">OpenNews 频道矩阵</h3>
-                  <p class="section-desc">按科技、军事、政治、金融等频道分开抓取、制作和发布；每个频道可以为中文、日文、英文分别配置 X、Facebook、YouTube 账号。</p>
+                  <h3 class="section-title" style="font-size:22px;">OpenNews 频道</h3>
+                  <p class="section-desc">左侧勾选要启用的频道（可多选），点击某个频道后在右侧配置：抓取与制作 → 语言版本 → 发布平台 → 每个语言的发布账号。配好点“保存频道配置”，再开启自动化即可无人值守。</p>
                 </div>
                 <div class="actions" style="justify-content:flex-end;">
                   <button class="btn btn-secondary" id="openNewsChannelReloadBtn" type="button">刷新频道</button>
@@ -1645,16 +1645,18 @@
               </div>
               <div class="topbar-status" id="openNewsChannelStatus">正在加载频道配置...</div>
               <div class="insight-grid" id="openNewsBoundAccounts" style="margin-top:6px;"></div>
-              <div class="insight-grid" id="openNewsChannelCards"></div>
-              <div class="history-card" id="openNewsChannelEditor" style="display:none;">
+              <div class="opennews-channel-layout" style="display:flex; gap:16px; align-items:flex-start; flex-wrap:wrap; margin-top:6px;">
+              <div id="openNewsChannelCards" style="flex:0 0 250px; display:flex; flex-direction:column; gap:8px;"></div>
+              <div class="history-card" id="openNewsChannelEditor" style="display:none; flex:1 1 460px; min-width:320px; margin:0;">
                 <div class="history-top">
                   <div>
                     <div class="section-kicker">Channel Settings</div>
                     <div class="history-title" id="openNewsChannelEditorTitle">频道配置</div>
-                    <div class="history-topic">保存后，2 小时自动化会按启用频道分别抓取并发布。</div>
+                    <div class="history-topic">在左侧勾选启用频道、点频道切换；右侧配置好后点上方“保存频道配置”。</div>
                   </div>
                   <span class="badge" id="openNewsChannelEditorBadge">未选择</span>
                 </div>
+                <div class="section-kicker" style="margin-top:14px;">① 抓取与制作</div>
                 <div class="field-grid" style="grid-template-columns: 150px 180px minmax(0,1fr) 120px 120px; margin-top:12px;">
                   <label class="check-card" style="min-height:auto; padding:12px;">
                     <span><strong>启用频道</strong><small>参与自动化</small></span>
@@ -1682,7 +1684,8 @@
                     </select>
                   </div>
                 </div>
-                <div class="field-grid" style="grid-template-columns: repeat(4, minmax(0,1fr)); margin-top:12px;">
+                <div class="section-kicker" style="margin-top:16px;">② 语言版本（勾选后，下方按语言配置发布账号）</div>
+                <div class="field-grid" style="grid-template-columns: repeat(4, minmax(0,1fr)); margin-top:8px;">
                   <label class="check-card" style="min-height:auto; padding:12px;">
                     <span><strong>中文</strong><small>生成并发布中文竖屏</small></span>
                     <input class="opennews-channel-language" type="checkbox" value="cn">
@@ -1705,7 +1708,8 @@
                     </select>
                   </div>
                 </div>
-                <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr)); margin-top:12px;">
+                <div class="section-kicker" style="margin-top:16px;">③ 发布平台（该频道整体发到哪些平台）</div>
+                <div class="field-grid" style="grid-template-columns: repeat(3, minmax(0,1fr)); margin-top:8px;">
                   <label class="check-card" style="min-height:auto; padding:12px;">
                     <span><strong>X</strong><small>浏览器自动发布</small></span>
                     <input id="openNewsChannelPlatformX" type="checkbox">
@@ -1715,11 +1719,13 @@
                     <input id="openNewsChannelPlatformFacebook" type="checkbox">
                   </label>
                   <label class="check-card" style="min-height:auto; padding:12px;">
-                    <span><strong>YouTube</strong><small>账号预留，默认关闭</small></span>
+                    <span><strong>YouTube</strong><small>Shorts 自动发布</small></span>
                     <input id="openNewsChannelPlatformYoutube" type="checkbox">
                   </label>
                 </div>
-                <div class="file-board" id="openNewsChannelAccountMatrix" style="margin-top:12px;"></div>
+                <div class="section-kicker" style="margin-top:16px;">④ 发布账号（按语言绑定；留空=用全局账号，选“专属”才填该频道自己的账号）</div>
+                <div class="file-board" id="openNewsChannelAccountMatrix" style="margin-top:8px;"></div>
+              </div>
               </div>
             </div>
 
@@ -3998,25 +4004,35 @@
       }
       els.openNewsChannelCards.innerHTML = channels.map(channel => {
         const active = channel.id === state.openNewsSelectedChannelId;
-        const nextRun = channel.next_run_at ? `下次：${formatHistoryTime(channel.next_run_at)}` : '未排程';
+        const langs = (Array.isArray(channel.languages) ? channel.languages : []).map(id => ({ cn: '中', jp: '日', en: '英' }[id] || id)).join('/') || '未选语言';
+        const plats = [channel.platforms?.x ? 'X' : '', channel.platforms?.facebook ? 'FB' : '', channel.platforms?.youtube ? 'YT' : ''].filter(Boolean).join('/') || '未选平台';
         return `
-          <button class="history-card opennews-channel-card" type="button" data-channel-id="${escapeHtml(channel.id || '')}" style="text-align:left; border-color:${active ? 'rgba(9,106,94,.55)' : ''}; background:${active ? 'rgba(9,106,94,.06)' : ''};">
-            <div class="history-top">
-              <div>
-                <div class="section-kicker">${escapeHtml(channel.category || 'all')}</div>
-                <div class="history-title">${escapeHtml(channel.name || channel.id || 'OpenNews 频道')}</div>
-                <div class="history-topic">${escapeHtml(openNewsChannelSummary(channel))}</div>
-                <div class="history-topic">${escapeHtml(nextRun)}</div>
-              </div>
-              <span class="badge">${channel.enabled ? '启用' : '关闭'}</span>
+          <div class="opennews-channel-row" data-channel-id="${escapeHtml(channel.id || '')}" style="display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid ${active ? 'rgba(9,106,94,.55)' : 'rgba(0,0,0,.10)'}; border-radius:12px; background:${active ? 'rgba(9,106,94,.07)' : '#fff'}; cursor:pointer;">
+            <input class="opennews-channel-enable-toggle" type="checkbox" data-channel-id="${escapeHtml(channel.id || '')}" ${channel.enabled ? 'checked' : ''} title="启用/停用该频道" style="width:18px; height:18px; flex:0 0 auto;">
+            <div style="flex:1 1 auto; min-width:0;">
+              <div class="history-title" style="font-size:15px;">${escapeHtml(channel.name || channel.id || '频道')}</div>
+              <div class="history-topic" style="font-size:12px;">${channel.enabled ? escapeHtml(langs + ' · ' + plats) : '未启用'}</div>
             </div>
-          </button>
+            <span class="badge" style="flex:0 0 auto; background:${channel.enabled ? 'rgba(9,106,94,.12)' : 'rgba(0,0,0,.06)'};">${channel.enabled ? '启用' : '关闭'}</span>
+          </div>
         `;
       }).join('');
-      els.openNewsChannelCards.querySelectorAll('.opennews-channel-card').forEach(btn => {
-        btn.addEventListener('click', () => {
+      els.openNewsChannelCards.querySelectorAll('.opennews-channel-row').forEach(row => {
+        row.addEventListener('click', (event) => {
+          if (event.target.classList.contains('opennews-channel-enable-toggle')) return;
           syncOpenNewsChannelEditorToState();
-          state.openNewsSelectedChannelId = btn.dataset.channelId || state.openNewsSelectedChannelId;
+          state.openNewsSelectedChannelId = row.dataset.channelId || state.openNewsSelectedChannelId;
+          renderOpenNewsChannels();
+        });
+      });
+      els.openNewsChannelCards.querySelectorAll('.opennews-channel-enable-toggle').forEach(cb => {
+        cb.addEventListener('change', () => {
+          syncOpenNewsChannelEditorToState();
+          const channel = openNewsChannels().find(item => item.id === cb.dataset.channelId);
+          if (channel) channel.enabled = cb.checked;
+          if (cb.dataset.channelId === state.openNewsSelectedChannelId && els.openNewsChannelEnabled) {
+            els.openNewsChannelEnabled.checked = cb.checked;
+          }
           renderOpenNewsChannels();
         });
       });
@@ -4027,7 +4043,13 @@
       const accounts = channel.accounts || {};
       const globalX = openNewsBoundAccountDisplay('x');
       const globalFacebook = openNewsBoundAccountDisplay('facebook');
-      els.openNewsChannelAccountMatrix.innerHTML = OPENNEWS_CHANNEL_LANGUAGES.map(lang => {
+      const selectedLangs = Array.isArray(channel.languages) ? channel.languages : [];
+      const visibleLangs = OPENNEWS_CHANNEL_LANGUAGES.filter(lang => selectedLangs.includes(lang.id));
+      if (!visibleLangs.length) {
+        els.openNewsChannelAccountMatrix.innerHTML = '<div class="empty-box">先在上面「② 语言版本」勾选语言，再在这里配置该语言的发布账号。</div>';
+        return;
+      }
+      els.openNewsChannelAccountMatrix.innerHTML = visibleLangs.map(lang => {
         const account = accounts[lang.id] || {};
         const x = account.x || {};
         const facebook = account.facebook || {};
@@ -4146,6 +4168,12 @@
       if (els.openNewsChannelProduceLimitSelect) els.openNewsChannelProduceLimitSelect.value = String(channel.produce_limit || 6);
       document.querySelectorAll('.opennews-channel-language').forEach(input => {
         input.checked = (channel.languages || []).includes(input.value);
+        input.onchange = () => {
+          const current = selectedOpenNewsChannel();
+          if (!current) return;
+          current.languages = Array.from(document.querySelectorAll('.opennews-channel-language')).filter(item => item.checked).map(item => item.value);
+          renderOpenNewsChannelAccountMatrix(current);
+        };
       });
       if (els.openNewsChannelPlatformX) els.openNewsChannelPlatformX.checked = channel.platforms?.x !== false;
       if (els.openNewsChannelPlatformFacebook) els.openNewsChannelPlatformFacebook.checked = channel.platforms?.facebook !== false;
