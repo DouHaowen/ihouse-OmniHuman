@@ -3398,6 +3398,12 @@ def run_property_video_with_progress(
         _persist_task_result(task)
         tracker.finish(result)
         _push_live_event("task_completed", "房源实拍成片已完成", task, {"scope": "property_video"})
+        # 房源自动化任务：做完自动发 YouTube（与话题共用账号，只发 Shorts）
+        if (task.get("workflow_config") or {}).get("property_auto"):
+            try:
+                _maybe_publish_property_video_to_youtube(Path(task["output_dir"]), result, title_hint=task.get("topic") or "")
+            except Exception as _prop_pub_exc:
+                print(f"[property-auto youtube] hook error: {_prop_pub_exc!r}", flush=True)
     except Exception as exc:
         tracker.fail(str(exc))
         _push_live_event("task_failed", str(exc), task, {"scope": "property_video"})
@@ -4762,6 +4768,7 @@ def _load_property_auto_config() -> dict:
         "scheduler_enabled": False,
         "interval_minutes": 15,
         "max_attempts": 3,
+        "youtube_auto_publish": True,   # 房源视频做完自动发 YouTube（共用话题绑定的账号，只发 Shorts）
         "next_run_at": 0,
         "last_run_at": 0,
         "last_run_message": "",
@@ -4805,6 +4812,52 @@ def _property_video_final_exists(output_dir: Path) -> bool:
     except Exception:
         pass
     return False
+
+
+def _maybe_publish_property_video_to_youtube(output_dir: Path, result: Optional[dict] = None, title_hint: str = "") -> None:
+    """房源视频做完后，若开启，则发布到（与话题共用的）YouTube 账号，只发 Shorts。"""
+    pcfg = _load_property_auto_config()
+    if not pcfg.get("youtube_auto_publish", True):
+        return
+    tcfg = _load_topic_auto_config()  # 共用话题绑定的同一个 YouTube 账号
+    yt = tcfg.get("youtube") if isinstance(tcfg.get("youtube"), dict) else {}
+    token_path = Path(str(yt.get("token_store_path") or ""))
+    if not (yt.get("enabled") and token_path.exists()):
+        return
+    result = result if isinstance(result, dict) else (_load_result_from_output_dir(output_dir) or {})
+    if result.get("youtube_publish_records"):
+        return
+    video = None
+    fvp = str(result.get("final_video_path") or "")
+    if fvp and Path(fvp).exists():
+        video = Path(fvp)
+    else:
+        for p in sorted(output_dir.rglob("*.mp4")):
+            if "final" in p.name.lower():
+                video = p
+                break
+    if not video or not video.exists():
+        return
+    try:
+        base_title = (title_hint or result.get("title") or output_dir.name or "房源实拍").strip()
+        desc = str(result.get("social_post") or result.get("script_text") or base_title)
+        meta = _build_youtube_shorts_metadata({"title": base_title, "description": desc, "tags": ["房源", "日本房产", "iHouse"]})
+        up = upload_video_to_youtube(
+            token_path, video,
+            title=meta["title"], description=meta["description"], tags=meta["tags"],
+            privacy_status="public", category_id="22", made_for_kids=False, thumbnail_path=None,
+        )
+        rec = {"job_id": f"property_yt_{int(time.time())}", "history_id": output_dir.name,
+               "aspect_ratio": "vertical", "video_path": str(video), "created_at": time.time(), **up}
+        result["youtube_publish_records"] = [rec] + list(result.get("youtube_publish_records") or [])
+        result["youtube_publish_latest"] = rec
+        result.pop("youtube_auto_publish_error", None)
+        _save_result_to_output_dir(output_dir, result)
+        print(f"[property-auto youtube] published {output_dir.name}: {up.get('youtube_url')}", flush=True)
+    except Exception as exc:
+        result["youtube_auto_publish_error"] = str(exc)
+        _save_result_to_output_dir(output_dir, result)
+        print(f"[property-auto youtube] publish failed {output_dir.name}: {exc!r}", flush=True)
 
 
 def _create_property_auto_video(prop: dict) -> dict:
@@ -16439,12 +16492,19 @@ async def property_auto_status(request: Request):
     recent = sorted([dict(v, record_id=k) for k, v in rec.items() if isinstance(v, dict)],
                     key=lambda v: v.get("updated_at") or 0, reverse=True)[:20]
     running = _find_running_property_auto_task()
+    tcfg = _load_topic_auto_config()
+    tyt = tcfg.get("youtube") if isinstance(tcfg.get("youtube"), dict) else {}
     return {
         "ok": True,
         "configured": property_auto.property_auto_is_configured(),
         "done_count": done_count, "skipped_count": skipped_count,
         "failed_pending_count": failed_pending, "producing_count": producing,
         "running_task_id": running or "",
+        "youtube": {
+            "shared_bound": bool(tyt.get("token_store_path")),
+            "shared_channel_name": tyt.get("channel_name") or "",
+            "auto_publish": bool(config.get("youtube_auto_publish", True)),
+        },
         "config": config,
         "recent_records": [
             {"record_id": v.get("record_id"), "name": v.get("name") or "", "status": v.get("status") or "",
@@ -16474,6 +16534,8 @@ async def property_auto_set_config(request: Request):
         config["interval_minutes"] = max(5, int(payload.get("interval_minutes") or 15))
     if "max_attempts" in payload:
         config["max_attempts"] = max(1, min(10, int(payload.get("max_attempts") or 3)))
+    if "youtube_auto_publish" in payload:
+        config["youtube_auto_publish"] = bool(payload.get("youtube_auto_publish"))
     _save_property_auto_config(config)
     return {"ok": True, "config": config}
 
