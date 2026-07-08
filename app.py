@@ -8595,7 +8595,9 @@ async def youtube_oauth_start(request: Request):
         "&response_type=code"
         f"&scope={quote(YOUTUBE_SCOPE, safe='')}"
         "&access_type=offline"
-        "&prompt=consent"
+        # select_account：每次都让选 Google 账号（对接多个账号时能选对）；
+        # 若所选账号名下有多个 YouTube 子频道(品牌账号)，Google 会接着让选具体频道。
+        "&prompt=select_account%20consent"
         f"&state={quote(state, safe='')}"
     )
     return RedirectResponse(auth_url)
