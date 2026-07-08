@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,11 @@ class XBrowserPublishError(RuntimeError):
 X_BROWSER_STATE_DIR = Path(os.getenv("X_BROWSER_STATE_DIR", "output/x_browser")).resolve()
 X_BROWSER_USER_DATA_DIR = Path(os.getenv("X_BROWSER_USER_DATA_DIR", str(X_BROWSER_STATE_DIR / "profile"))).resolve()
 X_BROWSER_SCREENSHOT_DIR = Path(os.getenv("X_BROWSER_SCREENSHOT_DIR", str(X_BROWSER_STATE_DIR / "screenshots"))).resolve()
-X_BROWSER_HEADLESS = (os.getenv("X_BROWSER_HEADLESS", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
+# X 会把无头(headless)浏览器卡在启动 logo 画面，SPA 不加载 → 发帖框永远找不到、发布失败。
+# 因此默认改为「有头 + 虚拟显示(Xvfb)」运行，行为与真实浏览器一致；可用 X_BROWSER_HEADLESS=1 强制无头。
+X_BROWSER_HEADLESS = (os.getenv("X_BROWSER_HEADLESS", "0") or "0").strip().lower() not in {"0", "false", "no", "off"}
+X_BROWSER_DISPLAY = (os.getenv("X_BROWSER_DISPLAY", ":98") or ":98").strip()
+X_BROWSER_SCREEN = (os.getenv("X_BROWSER_SCREEN", "1365x900x24") or "1365x900x24").strip()
 X_BROWSER_SLOW_MO_MS = max(0, int(os.getenv("X_BROWSER_SLOW_MO_MS", "0") or "0"))
 X_BROWSER_UPLOAD_TIMEOUT_SECONDS = max(60, int(os.getenv("X_BROWSER_UPLOAD_TIMEOUT_SECONDS", "900") or "900"))
 X_BROWSER_POST_TIMEOUT_SECONDS = max(20, int(os.getenv("X_BROWSER_POST_TIMEOUT_SECONDS", "120") or "120"))
@@ -25,6 +31,32 @@ X_BROWSER_POST_SETTLE_SECONDS = max(5, int(os.getenv("X_BROWSER_POST_SETTLE_SECO
 X_BROWSER_COMPOSE_URL = os.getenv("X_BROWSER_COMPOSE_URL", "https://x.com/compose/post").strip() or "https://x.com/compose/post"
 X_BROWSER_EXECUTABLE_PATH = os.getenv("X_BROWSER_EXECUTABLE_PATH", "").strip()
 X_BROWSER_DEBUG_DIR = Path(os.getenv("X_BROWSER_DEBUG_DIR", str(X_BROWSER_STATE_DIR / "debug"))).resolve()
+
+
+def _ensure_publish_display() -> str:
+    """确保有一个可用的虚拟显示(Xvfb)供有头发布使用。返回 DISPLAY 值；失败返回空串。
+    幂等：显示已在运行(存在 X lock 文件)则直接复用。"""
+    display = X_BROWSER_DISPLAY
+    if not display:
+        return ""
+    lock = Path(f"/tmp/.X{display.lstrip(':')}-lock")
+    if lock.exists():
+        return display
+    xvfb = shutil.which("Xvfb")
+    if not xvfb:
+        return ""
+    try:
+        subprocess.Popen(
+            [xvfb, display, "-screen", "0", X_BROWSER_SCREEN, "-ac", "+extension", "RANDR"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(1.5)
+        return display if lock.exists() else display
+    except Exception:
+        return ""
 
 
 def _resolve_browser_executable() -> str:
@@ -335,13 +367,19 @@ def _wait_video_ready(page: Any, video_name: str, *, debug_events: list[dict[str
         has_video_chip = False
         uploading_bar = False
         try:
-            previews = page.locator('div[data-testid="attachments"] video, div[data-testid="attachments"] img')
-            remove_btn = page.locator('[data-testid="removeMedia"], button[aria-label*="Remove"], div[aria-label*="移除"]')
-            has_video_chip = previews.count() > 0 or remove_btn.count() > 0
+            # 强信号：本地预览缩略图(blob:)/video 元素/附件预览/移除媒体按钮。
+            chip = page.locator(
+                'div[data-testid="attachments"] video, div[data-testid="attachments"] img, '
+                'img[src^="blob:"], video[src^="blob:"], video[poster], '
+                '[data-testid="removeMedia"], button[aria-label*="Remove"], '
+                'div[aria-label*="移除"], div[aria-label*="削除"]'
+            )
+            has_video_chip = chip.count() > 0
         except Exception:
             has_video_chip = False
         try:
-            uploading_bar = page.locator('div[role="progressbar"]').count() > 0
+            # 只看附件区域内的进度条，避免命中 X 顶部页面加载条导致永远“上传中”
+            uploading_bar = page.locator('div[data-testid="attachments"] div[role="progressbar"]').count() > 0
         except Exception:
             uploading_bar = False
         uploading = uploading_bar or any(mark in lowered for mark in ("processing", "uploading", "正在上传", "处理中"))
@@ -602,6 +640,15 @@ def publish_video_to_x_browser(
     debug_events: list[dict[str, Any]] = []
     debug_log_path = _debug_log_path()
     sync_playwright, _ = _import_playwright()
+    # 有头模式需要一个显示；无 DISPLAY 时启动虚拟显示 Xvfb。启动失败才退回无头。
+    headless = X_BROWSER_HEADLESS
+    launch_env: dict[str, str] | None = None
+    if not headless:
+        display = os.environ.get("DISPLAY") or _ensure_publish_display()
+        if display:
+            launch_env = {**os.environ, "DISPLAY": display}
+        else:
+            headless = True
     with sync_playwright() as playwright:
         browser_type = playwright.chromium
         executable_path = _resolve_browser_executable() or None
@@ -609,7 +656,8 @@ def publish_video_to_x_browser(
             debug_events,
             "launch_start",
             executable_path=executable_path or "",
-            headless=X_BROWSER_HEADLESS,
+            headless=headless,
+            display=(launch_env or {}).get("DISPLAY", ""),
             compose_url=X_BROWSER_COMPOSE_URL,
             video_path=str(video_path),
             user_data_dir=str(profile_dir),
@@ -617,7 +665,8 @@ def publish_video_to_x_browser(
         context = browser_type.launch_persistent_context(
             str(profile_dir),
             executable_path=executable_path,
-            headless=X_BROWSER_HEADLESS,
+            headless=headless,
+            env=launch_env,
             slow_mo=X_BROWSER_SLOW_MO_MS,
             viewport={"width": 1365, "height": 900},
             locale="ja-JP",
