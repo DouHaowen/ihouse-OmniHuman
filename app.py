@@ -4423,6 +4423,12 @@ def _run_auto_digital_batch(batch_id: str) -> None:
                 item["updated_at"] = time.time()
                 item["history_id"] = output_dir.name if output_dir.exists() else ""
                 item["error"] = ""
+                # 话题自动化批次：单条做完后自动发到话题 YouTube 账号（若已配置并开启）
+                if str(job.get("source") or "") == "topic_auto" and output_dir.exists():
+                    try:
+                        _maybe_publish_topic_video_to_youtube(output_dir)
+                    except Exception as _topic_pub_exc:
+                        print(f"[topic-auto youtube] hook error: {_topic_pub_exc!r}", flush=True)
             elif status == "cancelled":
                 item["status"] = "cancelled"
                 item["updated_at"] = time.time()
@@ -4519,6 +4525,8 @@ def _load_topic_auto_config() -> dict:
         "produce_limit": 5,        # 每次触发最多创建几条（逐条顺序生产）；剩余的下一轮继续，等于持续清空
         "interval_minutes": 10,     # 轮询间隔（分钟）：抓不定时新内容用小间隔
         "max_attempts": 3,          # 单条失败最多重试次数，达到后跳过并记录
+        "youtube": {},              # 话题视频的 YouTube 发布账号：{enabled, channel_name, token_store_path}
+        "youtube_auto_publish": False,  # 每条话题视频做完是否自动发 YouTube
         "next_run_at": 0,
         "last_run_at": 0,
         "last_run_message": "",
@@ -4546,6 +4554,43 @@ def _find_running_topic_auto_batch() -> Optional[dict]:
         if job.get("source") == "topic_auto" and job.get("status") in {"queued", "running"}:
             return job
     return None
+
+
+def _maybe_publish_topic_video_to_youtube(output_dir: Path) -> None:
+    """话题视频做完后，若已绑定话题 YouTube 账号且开启自动发布，则发布到该账号。失败记录不影响主流程。"""
+    cfg = _load_topic_auto_config()
+    yt = cfg.get("youtube") if isinstance(cfg.get("youtube"), dict) else {}
+    if not (cfg.get("youtube_auto_publish") and yt.get("enabled") and yt.get("token_store_path")):
+        return
+    token_path = Path(str(yt.get("token_store_path")))
+    if not token_path.exists():
+        return
+    result = _load_result_from_output_dir(output_dir)
+    if not result or result.get("youtube_publish_records"):
+        return  # 无结果或已发过，避免重复
+    try:
+        video = _resolve_youtube_publish_video(output_dir, result, aspect_ratio="vertical")
+    except Exception:
+        return  # 还没有成片
+    try:
+        meta = _build_youtube_shorts_metadata(_build_default_youtube_metadata(result))
+        up = upload_video_to_youtube(
+            token_path, video,
+            title=meta["title"], description=meta["description"], tags=meta["tags"],
+            privacy_status="public", category_id="22", made_for_kids=False,
+            thumbnail_path=_resolve_youtube_thumbnail(output_dir, result, aspect_ratio="vertical"),
+        )
+        rec = {"job_id": f"topic_yt_{int(time.time())}", "history_id": output_dir.name,
+               "aspect_ratio": "vertical", "video_path": str(video), "created_at": time.time(), **up}
+        result["youtube_publish_records"] = [rec] + list(result.get("youtube_publish_records") or [])
+        result["youtube_publish_latest"] = rec
+        result.pop("youtube_auto_publish_error", None)
+        _save_result_to_output_dir(output_dir, result)
+        print(f"[topic-auto youtube] published {output_dir.name}: {up.get('youtube_url')}", flush=True)
+    except Exception as exc:
+        result["youtube_auto_publish_error"] = str(exc)
+        _save_result_to_output_dir(output_dir, result)
+        print(f"[topic-auto youtube] publish failed {output_dir.name}: {exc!r}", flush=True)
 
 
 def _start_topic_auto_batch(selected: list[dict]) -> dict:
@@ -8715,6 +8760,22 @@ async def youtube_oauth_callback(request: Request, code: str = "", state: str = 
         meta = {"token_response": {k: v for k, v in tokens.items() if k != "refresh_token"}}
         oauth_channel = str(request.session.pop("youtube_oauth_channel", "") or "").strip()
         oauth_language = str(request.session.pop("youtube_oauth_language", "") or "").strip()
+        if oauth_channel == "topic_auto":
+            # 话题自动化专属 YouTube 账号绑定
+            token_path = YOUTUBE_AUTH_DIR / "youtube_token_topic_auto.json"
+            save_youtube_refresh_token(token_path, refresh_token, meta)
+            channel = get_youtube_channel(token_path)
+            cfg = _load_topic_auto_config()
+            cfg["youtube"] = {"enabled": True, "channel_name": channel.get("title") or "", "token_store_path": str(token_path)}
+            cfg["youtube_auto_publish"] = True
+            _save_topic_auto_config(cfg)
+            return HTMLResponse(
+                "<h2>YouTube 授权成功</h2>"
+                f"<p>已绑定为<b>话题自动化</b>的发布账号。</p>"
+                f"<p>YouTube 频道：{channel.get('title') or ''}</p>"
+                "<p>以后每条话题视频做完会自动发到这个频道。可关闭本页回到面板刷新。</p>"
+                "<script>try{window.opener&&window.opener.postMessage({type:'ihouse-oauth-done',platform:'youtube'},'*');}catch(e){}</script>"
+            )
         if oauth_channel and oauth_language:
             # 按频道绑定：凭据存到该频道独立文件，并写入该频道账号槽。
             token_path = _opennews_channel_account_token_path(oauth_channel, oauth_language, "youtube")
@@ -16007,6 +16068,7 @@ async def topic_auto_status(request: Request):
         if job.get("source") == "topic_auto"
     ]
     running = _find_running_topic_auto_batch()
+    yt = config.get("youtube") if isinstance(config.get("youtube"), dict) else {}
     return {
         "ok": True,
         "configured": topic_auto.topic_auto_is_configured(),
@@ -16015,6 +16077,12 @@ async def topic_auto_status(request: Request):
         "skipped_count": skipped_count,
         "failed_pending_count": failed_pending,
         "running_batch_id": (running or {}).get("batch_id") if running else "",
+        "youtube": {
+            "bound": bool(yt.get("token_store_path")),
+            "enabled": bool(yt.get("enabled")),
+            "channel_name": yt.get("channel_name") or "",
+            "auto_publish": bool(config.get("youtube_auto_publish")),
+        },
         "config": config,
         "recent_records": [
             {"record_id": v.get("record_id"), "topic": v.get("topic") or "", "status": v.get("status") or "",
@@ -16055,6 +16123,8 @@ async def topic_auto_set_config(request: Request):
         config["interval_minutes"] = max(5, int(payload.get("interval_minutes") or 10))
     if "max_attempts" in payload:
         config["max_attempts"] = max(1, min(10, int(payload.get("max_attempts") or 3)))
+    if "youtube_auto_publish" in payload:
+        config["youtube_auto_publish"] = bool(payload.get("youtube_auto_publish"))
     _save_topic_auto_config(config)
     return {"ok": True, "config": config}
 

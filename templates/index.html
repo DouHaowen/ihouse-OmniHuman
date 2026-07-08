@@ -1402,7 +1402,17 @@
                         <span class="helper" id="topicListMsg"></span>
                       </div>
                       <div class="file-board" id="topicAutoRecentList" style="margin-top:12px;"></div>
-                      <div class="helper" style="margin-top:8px;">发布账号（YouTube/Facebook）绑定位预留——接好账号后这里可配置自动发布。</div>
+                      <div style="margin-top:12px; border-top:1px solid rgba(148,163,184,0.2); padding-top:12px;">
+                        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                          <strong style="font-size:14px;">发布账号 · YouTube</strong>
+                          <span id="topicYtStatus" style="font-size:12px; color:#94a3b8;">未绑定</span>
+                        </div>
+                        <div style="display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap;">
+                          <button class="btn btn-secondary" id="topicYtAuthBtn" type="button">授权 YouTube 账号</button>
+                          <label style="display:flex; align-items:center; gap:6px; font-size:12px; margin:0;"><input type="checkbox" id="topicYtAutoPublish"> 每条视频做完自动发布</label>
+                        </div>
+                        <div class="helper" style="margin-top:6px;">需先配置「YouTube 授权应用」凭据(client_id/密钥，全系统共用一次；在 OpenNews 频道面板顶部那张卡片里填)，再点这里授权你的 YouTube 账号。Facebook 以后同理接入。</div>
+                      </div>
                     </div>
 
                     <div class="field">
@@ -3660,6 +3670,14 @@
       setBadge('topicAutoSkipped', '已跳过 ' + (data.skipped_count || 0));
       const running = document.getElementById('topicAutoRunning');
       if (running) running.textContent = data.running_batch_id ? '● 正在制作中…' : (data.configured === false ? '⚠ 未配置接口令牌' : '');
+      const yt = data.youtube || {};
+      const ytStatus = document.getElementById('topicYtStatus');
+      if (ytStatus) {
+        if (yt.bound) { ytStatus.textContent = '✓ 已绑定：' + (yt.channel_name || '（已授权）'); ytStatus.style.color = '#16a34a'; }
+        else { ytStatus.textContent = '未绑定'; ytStatus.style.color = '#94a3b8'; }
+      }
+      const ap = document.getElementById('topicYtAutoPublish');
+      if (ap && document.activeElement !== ap) ap.checked = !!yt.auto_publish;
       const list = document.getElementById('topicAutoRecentList');
       if (list) {
         const recs = data.recent_records || [];
@@ -3764,6 +3782,14 @@
       document.getElementById('topicListLoadBtn')?.addEventListener('click', loadTopicList);
       document.getElementById('topicListProduceBtn')?.addEventListener('click', produceSelectedTopics);
       document.getElementById('topicListHideDone')?.addEventListener('change', () => renderTopicList(state.topicList || []));
+      document.getElementById('topicYtAuthBtn')?.addEventListener('click', () => openOpenNewsOAuth('youtube', 'topic_auto', 'cn'));
+      document.getElementById('topicYtAutoPublish')?.addEventListener('change', async (e) => {
+        try {
+          const res = await fetch('/api/topic-auto/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ youtube_auto_publish: !!e.target.checked }) });
+          await readApiJson(res, '保存自动发布开关');
+          const m = document.getElementById('topicAutoMsg'); if (m) { m.textContent = e.target.checked ? '✓ 已开启自动发布' : '已关闭自动发布'; m.style.color = '#16a34a'; }
+        } catch (err) { const m = document.getElementById('topicAutoMsg'); if (m) { m.textContent = friendlyRequestError(err, '保存失败'); m.style.color = '#ef4444'; } }
+      });
     }
 
     function visibleVoiceIdsForMarket(marketId) {
@@ -4477,7 +4503,8 @@
       window.__ihouseOAuthListenerBound = true;
       window.addEventListener('message', (ev) => {
         if (ev && ev.data && ev.data.type === 'ihouse-oauth-done') {
-          refreshOpenNewsChannelsFromServer();
+          if (typeof refreshOpenNewsChannelsFromServer === 'function') refreshOpenNewsChannelsFromServer();
+          if (typeof loadTopicAuto === 'function') loadTopicAuto();
         }
       });
     }
