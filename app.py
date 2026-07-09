@@ -1266,6 +1266,8 @@ def _start_opennews_channel_scheduler(poll_seconds: int = 20) -> None:
 
 # 已在本进程内触发过"补发布"的成片目录名，避免同一条被重复触发发布。
 _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED: set[str] = set()
+# 本进程内已尝试过重合成的目录:避免"永远合成失败"(如缺配音)的旧目录被无限重做，堵死合成/GPU 管线。
+_COMPOSE_READY_RECOVERY_ATTEMPTED: set[str] = set()
 
 
 _STALE_PUBLISH_ERROR_MARKERS = ("还没有可上传的成片", "请先生成成片", "没有可上传的成片")
@@ -1360,6 +1362,10 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
             except Exception as pub_exc:
                 print(f"[publish-ready recovery] trigger failed dir={output_dir.name} err={pub_exc!r}", flush=True)
             continue
+        # 本进程内同一目录只重合成一次:缺配音等永久错误不再无限重做,避免堵死管线。
+        if output_dir.name in _COMPOSE_READY_RECOVERY_ATTEMPTED:
+            continue
+        _COMPOSE_READY_RECOVERY_ATTEMPTED.add(output_dir.name)
         try:
             print(
                 f"[compose-ready recovery] composing dir={output_dir.name} topic={str(result.get('topic') or '')[:80]}",
