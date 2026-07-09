@@ -11961,7 +11961,10 @@ def _opennews_event_identity_dedupe_key(identity: dict) -> str:
     return f"tokens:{' '.join(tokens[:10])}" if tokens else ""
 
 
-def _opennews_recent_completed_event_identities(*, limit: int = 800, exclude_job_id: str = "") -> list[dict]:
+def _opennews_recent_completed_event_identities(*, limit: int = 0, exclude_job_id: str = "") -> list[dict]:
+    # 去重只对比“最近 N 条”已完成新闻，而不是全部历史——历史越大越容易把同话题新新闻误判为重复。
+    if not limit:
+        limit = max(50, int(os.getenv("OPENNEWS_DEDUP_HISTORY_LIMIT", "200") or "200"))
     identities: list[dict] = []
     seen_keys: set[str] = set()
 

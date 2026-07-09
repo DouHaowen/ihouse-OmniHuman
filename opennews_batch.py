@@ -59,6 +59,9 @@ EVENT_DUPLICATE_MIN_TOKENS = max(
     4,
     min(12, int(os.getenv("OPENNEWS_BATCH_EVENT_DUPLICATE_MIN_TOKENS", "5") or "5")),
 )
+# 标题相似判定阈值（放宽以减少对同话题不同新闻的误杀）：共同词数下限、词重叠比例
+TITLE_SIMILAR_OVERLAP_MIN = max(4, int(os.getenv("OPENNEWS_TITLE_SIMILAR_OVERLAP_MIN", "7") or "7"))
+TITLE_SIMILAR_RATIO = max(0.5, min(0.95, float(os.getenv("OPENNEWS_TITLE_SIMILAR_RATIO", "0.72") or "0.72")))
 FETCH_OVERFETCH_MULTIPLIER = max(
     1,
     min(8, int(os.getenv("OPENNEWS_BATCH_FETCH_OVERFETCH_MULTIPLIER", "4") or "4")),
@@ -582,10 +585,10 @@ def _candidate_title_similar(left: str, right: str) -> bool:
     left_set = set(left_tokens)
     right_set = set(right_tokens)
     overlap = len(left_set & right_set)
-    if overlap >= 5:
+    if overlap >= TITLE_SIMILAR_OVERLAP_MIN:
         return True
     denominator = max(1, min(len(left_set), len(right_set)))
-    return overlap / denominator >= 0.62
+    return overlap / denominator >= TITLE_SIMILAR_RATIO
 
 
 def _is_duplicate_event(candidate_tokens: list[str], existing_tokens: list[str]) -> bool:
