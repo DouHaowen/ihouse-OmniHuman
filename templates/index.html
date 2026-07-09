@@ -1411,7 +1411,15 @@
                           <button class="btn btn-secondary" id="topicYtAuthBtn" type="button">授权 YouTube 账号</button>
                           <label style="display:flex; align-items:center; gap:6px; font-size:12px; margin:0;"><input type="checkbox" id="topicYtAutoPublish"> 每条视频做完自动发布</label>
                         </div>
-                        <div class="helper" style="margin-top:6px;">需先配置「YouTube 授权应用」凭据(client_id/密钥，全系统共用一次；在 OpenNews 频道面板顶部那张卡片里填)，再点这里授权你的 YouTube 账号。Facebook 以后同理接入。</div>
+                        <div class="helper" style="margin-top:6px;">需先配置「YouTube 授权应用」凭据(client_id/密钥，全系统共用一次；在 OpenNews 频道面板顶部那张卡片里填)，再点这里授权你的 YouTube 账号。</div>
+                        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; margin-top:14px;">
+                          <strong style="font-size:14px;">发布账号 · Facebook</strong>
+                          <span id="topicFbStatus" style="font-size:12px; color:#94a3b8;">未绑定</span>
+                        </div>
+                        <div style="display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap;">
+                          <label style="display:flex; align-items:center; gap:6px; font-size:12px; margin:0;"><input type="checkbox" id="topicFbAutoPublish"> 每条视频做完自动发布</label>
+                        </div>
+                        <div class="helper" style="margin-top:6px;">Facebook 发布用在 OpenNews 频道面板授权的同一个账号下的 Page（已绑 iHouse株式会社），只发中文单帖。</div>
                       </div>
                     </div>
 
@@ -2067,6 +2075,12 @@
                   <label style="display:flex; align-items:center; gap:6px; font-size:12px; margin:0;"><input type="checkbox" id="propertyYtAutoPublish"> 做完自动发布</label>
                 </div>
                 <div class="helper" style="margin-top:6px;">房源视频发布到与「话题自动化」相同的 YouTube 账号（在话题面板授权的那个），只发 Shorts。</div>
+                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:12px;">
+                  <strong style="font-size:14px;">发布 · Facebook（中文单帖）</strong>
+                  <span id="propertyFbStatus" style="font-size:12px; color:#94a3b8;">—</span>
+                  <label style="display:flex; align-items:center; gap:6px; font-size:12px; margin:0;"><input type="checkbox" id="propertyFbAutoPublish"> 做完自动发布</label>
+                </div>
+                <div class="helper" style="margin-top:6px;">房源视频发布到与「话题自动化」相同的 Facebook Page（iHouse株式会社），只发中文一帖。</div>
               </div>
             </div>
 
@@ -3749,6 +3763,14 @@
       }
       const ap = document.getElementById('topicYtAutoPublish');
       if (ap && document.activeElement !== ap) ap.checked = !!yt.auto_publish;
+      const tfb = data.facebook || {};
+      const tfbStatus = document.getElementById('topicFbStatus');
+      if (tfbStatus) {
+        if (tfb.bound) { tfbStatus.textContent = '✓ 已绑定：' + (tfb.page_name || '（已授权）'); tfbStatus.style.color = '#16a34a'; }
+        else { tfbStatus.textContent = '未绑定'; tfbStatus.style.color = '#94a3b8'; }
+      }
+      const tfbAp = document.getElementById('topicFbAutoPublish');
+      if (tfbAp && document.activeElement !== tfbAp) tfbAp.checked = !!tfb.auto_publish;
       const list = document.getElementById('topicAutoRecentList');
       if (list) {
         const recs = data.recent_records || [];
@@ -3878,6 +3900,14 @@
       }
       const pap = document.getElementById('propertyYtAutoPublish');
       if (pap && document.activeElement !== pap) pap.checked = !!yt.auto_publish;
+      const pfb = data.facebook || {};
+      const pfbStatus = document.getElementById('propertyFbStatus');
+      if (pfbStatus) {
+        if (pfb.shared_bound) { pfbStatus.textContent = 'Page：' + (pfb.shared_page_name || '（话题已授权）'); pfbStatus.style.color = '#16a34a'; }
+        else { pfbStatus.textContent = '⚠ 还没绑定 Page（去话题面板授权 Facebook）'; pfbStatus.style.color = '#f59e0b'; }
+      }
+      const pfbAp = document.getElementById('propertyFbAutoPublish');
+      if (pfbAp && document.activeElement !== pfbAp) pfbAp.checked = !!pfb.auto_publish;
       const list = document.getElementById('propertyAutoRecentList');
       if (list) {
         const recs = data.recent_records || [];
@@ -3982,6 +4012,13 @@
           const m = document.getElementById('propertyAutoMsg'); if (m) { m.textContent = e.target.checked ? '✓ 已开启自动发布(Shorts)' : '已关闭自动发布'; m.style.color = '#16a34a'; }
         } catch (err) { const m = document.getElementById('propertyAutoMsg'); if (m) { m.textContent = friendlyRequestError(err, '保存失败'); m.style.color = '#ef4444'; } }
       });
+      document.getElementById('propertyFbAutoPublish')?.addEventListener('change', async (e) => {
+        try {
+          const res = await fetch('/api/property-auto/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ facebook_auto_publish: !!e.target.checked }) });
+          await readApiJson(res, '保存 Facebook 发布开关');
+          const m = document.getElementById('propertyAutoMsg'); if (m) { m.textContent = e.target.checked ? '✓ 已开启 Facebook 自动发布(中文单帖)' : '已关闭 Facebook 自动发布'; m.style.color = '#16a34a'; }
+        } catch (err) { const m = document.getElementById('propertyAutoMsg'); if (m) { m.textContent = friendlyRequestError(err, '保存失败'); m.style.color = '#ef4444'; } }
+      });
     }
 
     if (!window.__ihouseTopicAutoBound) {
@@ -3998,6 +4035,13 @@
           const res = await fetch('/api/topic-auto/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ youtube_auto_publish: !!e.target.checked }) });
           await readApiJson(res, '保存自动发布开关');
           const m = document.getElementById('topicAutoMsg'); if (m) { m.textContent = e.target.checked ? '✓ 已开启自动发布' : '已关闭自动发布'; m.style.color = '#16a34a'; }
+        } catch (err) { const m = document.getElementById('topicAutoMsg'); if (m) { m.textContent = friendlyRequestError(err, '保存失败'); m.style.color = '#ef4444'; } }
+      });
+      document.getElementById('topicFbAutoPublish')?.addEventListener('change', async (e) => {
+        try {
+          const res = await fetch('/api/topic-auto/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ facebook_auto_publish: !!e.target.checked }) });
+          await readApiJson(res, '保存 Facebook 发布开关');
+          const m = document.getElementById('topicAutoMsg'); if (m) { m.textContent = e.target.checked ? '✓ 已开启 Facebook 自动发布(中文单帖)' : '已关闭 Facebook 自动发布'; m.style.color = '#16a34a'; }
         } catch (err) { const m = document.getElementById('topicAutoMsg'); if (m) { m.textContent = friendlyRequestError(err, '保存失败'); m.style.color = '#ef4444'; } }
       });
     }

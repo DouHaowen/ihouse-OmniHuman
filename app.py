@@ -16631,6 +16631,7 @@ async def topic_auto_status(request: Request):
     ]
     running = _find_running_topic_auto_batch()
     yt = config.get("youtube") if isinstance(config.get("youtube"), dict) else {}
+    fb = config.get("facebook") if isinstance(config.get("facebook"), dict) else {}
     return {
         "ok": True,
         "configured": topic_auto.topic_auto_is_configured(),
@@ -16645,7 +16646,13 @@ async def topic_auto_status(request: Request):
             "channel_name": yt.get("channel_name") or "",
             "auto_publish": bool(config.get("youtube_auto_publish")),
         },
-        "config": config,
+        "facebook": {
+            "bound": bool(fb.get("page_id") and fb.get("page_access_token")),
+            "enabled": bool(fb.get("enabled")),
+            "page_name": fb.get("page_name") or "",
+            "auto_publish": bool(config.get("facebook_auto_publish")),
+        },
+        "config": _sanitize_topic_auto_config_for_client(config),
         "recent_records": [
             {"record_id": v.get("record_id"), "topic": v.get("topic") or "", "status": v.get("status") or "",
              "attempts": v.get("attempts") or 0, "updated_at": v.get("updated_at") or 0}
@@ -16660,7 +16667,18 @@ async def topic_auto_get_config(request: Request):
     user, error = _require_admin_user(request, "只有管理员可以查看话题自动化配置")
     if error:
         return error
-    return {"ok": True, "configured": topic_auto.topic_auto_is_configured(), "config": _load_topic_auto_config()}
+    return {"ok": True, "configured": topic_auto.topic_auto_is_configured(), "config": _sanitize_topic_auto_config_for_client(_load_topic_auto_config())}
+
+
+def _sanitize_topic_auto_config_for_client(config: dict) -> dict:
+    """给前端的配置副本:抹掉 Facebook page_access_token 等敏感凭据,只留是否已绑定/页名。"""
+    safe = copy.deepcopy(config) if isinstance(config, dict) else {}
+    fb = safe.get("facebook") if isinstance(safe.get("facebook"), dict) else {}
+    if fb:
+        fb["page_access_token_configured"] = bool(fb.get("page_access_token"))
+        fb.pop("page_access_token", None)
+        safe["facebook"] = fb
+    return safe
 
 
 @app.post("/api/topic-auto/config")
@@ -16687,6 +16705,8 @@ async def topic_auto_set_config(request: Request):
         config["max_attempts"] = max(1, min(10, int(payload.get("max_attempts") or 3)))
     if "youtube_auto_publish" in payload:
         config["youtube_auto_publish"] = bool(payload.get("youtube_auto_publish"))
+    if "facebook_auto_publish" in payload:
+        config["facebook_auto_publish"] = bool(payload.get("facebook_auto_publish"))
     _save_topic_auto_config(config)
     return {"ok": True, "config": config}
 
@@ -16782,6 +16802,7 @@ async def property_auto_status(request: Request):
     running = _find_running_property_auto_task()
     tcfg = _load_topic_auto_config()
     tyt = tcfg.get("youtube") if isinstance(tcfg.get("youtube"), dict) else {}
+    tfb = tcfg.get("facebook") if isinstance(tcfg.get("facebook"), dict) else {}
     return {
         "ok": True,
         "configured": property_auto.property_auto_is_configured(),
@@ -16792,6 +16813,11 @@ async def property_auto_status(request: Request):
             "shared_bound": bool(tyt.get("token_store_path")),
             "shared_channel_name": tyt.get("channel_name") or "",
             "auto_publish": bool(config.get("youtube_auto_publish", True)),
+        },
+        "facebook": {
+            "shared_bound": bool(tfb.get("page_id") and tfb.get("page_access_token")),
+            "shared_page_name": tfb.get("page_name") or "",
+            "auto_publish": bool(config.get("facebook_auto_publish", True)),
         },
         "config": config,
         "recent_records": [
@@ -16824,6 +16850,8 @@ async def property_auto_set_config(request: Request):
         config["max_attempts"] = max(1, min(10, int(payload.get("max_attempts") or 3)))
     if "youtube_auto_publish" in payload:
         config["youtube_auto_publish"] = bool(payload.get("youtube_auto_publish"))
+    if "facebook_auto_publish" in payload:
+        config["facebook_auto_publish"] = bool(payload.get("facebook_auto_publish"))
     _save_property_auto_config(config)
     return {"ok": True, "config": config}
 
