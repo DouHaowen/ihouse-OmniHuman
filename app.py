@@ -12433,7 +12433,17 @@ def _supplement_opennews_auto_collection_items(
     return expanded
 
 
-def _select_opennews_auto_collection_items(items: list[dict], *, time_range: str = "6h") -> list[dict]:
+def _select_opennews_auto_collection_items(items: list[dict], *, time_range: str = "6h", category: str = "") -> list[dict]:
+    # ai/robotics/other 配比 + 补抓 只对科技类频道有意义;对房产/金融等频道会去补抓科技(ai/robotics)
+    # 内容来填配比,把跨题材新闻塞进本频道 job,造成串台。所以非科技类目直接用已按题材过滤好的本频道料。
+    category = str(category or "").strip().lower()
+    if category and category not in {"technology", "ai", "all"}:
+        ranked = sorted(
+            [item for item in items if isinstance(item, dict)],
+            key=_opennews_batch_item_score,
+            reverse=True,
+        )
+        return ranked
     counts = _opennews_auto_collection_mix_counts()
     total = sum(counts.values())
     if total <= 0:
@@ -12690,6 +12700,7 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
     selected = _select_opennews_auto_collection_items(
         items,
         time_range=str(payload.get("time_range") or config.get("time_range") or "6h"),
+        category=str((channel or {}).get("category") or payload.get("category") or ""),
     )
     if channel:
         selected = selected[: max(1, int(channel.get("produce_limit") or 6))]
