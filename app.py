@@ -1764,6 +1764,13 @@ INFINITETALK_ENGINE_ID = "infinitetalk_local"
 VOLC_ENGINE_ID = "volc_omnihuman"
 LOCAL_DIGITAL_HUMAN_GPU_PROFILE = os.getenv("LOCAL_DIGITAL_HUMAN_GPU_PROFILE", "digital_intro").strip() or "digital_intro"
 LOCAL_DIGITAL_HUMAN_RESTORE_PROFILE = os.getenv("LOCAL_DIGITAL_HUMAN_RESTORE_PROFILE", "material").strip()
+
+
+def _digital_keep_warm_enabled() -> bool:
+    # 保持 InfiniteTalk 常驻:数字人任务做完后不立刻切回 restore 档(不停服务),
+    # 让连续的数字人段/条之间 InfiniteTalk 一直在,避免反复 stop/start 打断+重载模型。
+    # 后续的 TTS 任务需要显存时会自行切档停掉它。默认开启;置 0 可回退旧行为。
+    return (os.getenv("LOCAL_DIGITAL_HUMAN_KEEP_WARM", "1").strip().lower() not in {"0", "false", "no", "off"})
 SCRIPT_MODEL_CLAUDE = "claude"
 SCRIPT_MODEL_API_RELAY = "api_relay"
 SCRIPT_MODEL_LOCAL_QWEN = "local_qwen"
@@ -2189,6 +2196,11 @@ def _run_with_5090_digital_restore(reason: str, runner):
     try:
         return runner()
     finally:
+        # keep-warm:数字人任务做完后不切回 restore 档(保持 InfiniteTalk 常驻),
+        # 避免连续数字人段/条之间反复 stop/start InfiniteTalk(打断在跑的生成 + 重载模型)。
+        # 后面若有 TTS 任务需要显存,那个任务会自行切档停掉 InfiniteTalk。
+        if _digital_keep_warm_enabled():
+            return
         if LOCAL_DIGITAL_HUMAN_RESTORE_PROFILE:
             _switch_5090_gpu_profile(LOCAL_DIGITAL_HUMAN_RESTORE_PROFILE, reason=f"finished {reason}")
 
