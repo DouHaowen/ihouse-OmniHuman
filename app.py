@@ -462,39 +462,67 @@ def _is_facebook_frequency_block(error_text: str) -> bool:
     )
 
 
-def _facebook_publish_cooldown_remaining() -> float:
+def _facebook_page_state_bucket(state: dict, page_id: str) -> dict:
+    """按 Page 分桶节流/冷却:不同 Page(OpenNews / iHouse株式会社)互不影响。
+    兼容旧的顶层扁平字段(迁移到 default 桶)。"""
+    key = str(page_id or "").strip() or "default"
+    pages = state.get("pages")
+    if not isinstance(pages, dict):
+        pages = {}
+        # 迁移旧的扁平字段
+        legacy = {}
+        if state.get("last_post_at"):
+            legacy["last_post_at"] = state.get("last_post_at")
+        if state.get("cooldown_until"):
+            legacy["cooldown_until"] = state.get("cooldown_until")
+            legacy["cooldown_reason"] = state.get("cooldown_reason")
+        if legacy:
+            pages["default"] = legacy
+        state["pages"] = pages
+    bucket = pages.get(key)
+    if not isinstance(bucket, dict):
+        bucket = {}
+        pages[key] = bucket
+    return bucket
+
+
+def _facebook_publish_cooldown_remaining(page_id: str = "") -> float:
     state = _load_facebook_publish_state()
-    until = float(state.get("cooldown_until") or 0)
+    bucket = _facebook_page_state_bucket(state, page_id)
+    until = float(bucket.get("cooldown_until") or 0)
     return max(0.0, until - time.time())
 
 
-def _trigger_facebook_publish_cooldown(reason: str = "") -> float:
+def _trigger_facebook_publish_cooldown(reason: str = "", page_id: str = "") -> float:
     cooldown = _facebook_frequency_cooldown_seconds()
     until = time.time() + cooldown
     state = _load_facebook_publish_state()
-    state["cooldown_until"] = until
-    state["cooldown_reason"] = str(reason or "")[:300]
-    state["cooldown_set_at"] = time.time()
+    bucket = _facebook_page_state_bucket(state, page_id)
+    bucket["cooldown_until"] = until
+    bucket["cooldown_reason"] = str(reason or "")[:300]
+    bucket["cooldown_set_at"] = time.time()
     _save_facebook_publish_state(state)
-    print(f"[facebook throttle] 触发 368 频率封锁冷却，暂停 FB 发布 {int(cooldown/60)} 分钟", flush=True)
+    print(f"[facebook throttle] Page={page_id or 'default'} 触发 368 冷却，暂停 {int(cooldown/60)} 分钟", flush=True)
     return until
 
 
-def _facebook_publish_throttle_remaining() -> float:
+def _facebook_publish_throttle_remaining(page_id: str = "") -> float:
     interval = _facebook_min_post_interval_seconds()
     if interval <= 0:
         return 0.0
     state = _load_facebook_publish_state()
-    last = float(state.get("last_post_at") or 0)
+    bucket = _facebook_page_state_bucket(state, page_id)
+    last = float(bucket.get("last_post_at") or 0)
     return max(0.0, (last + interval) - time.time())
 
 
-def _record_facebook_publish_success() -> None:
+def _record_facebook_publish_success(page_id: str = "") -> None:
     state = _load_facebook_publish_state()
-    state["last_post_at"] = time.time()
-    # 发成功即清掉冷却(说明已解封)。
-    state.pop("cooldown_until", None)
-    state.pop("cooldown_reason", None)
+    bucket = _facebook_page_state_bucket(state, page_id)
+    bucket["last_post_at"] = time.time()
+    # 发成功即清掉该 Page 的冷却(说明已解封)。
+    bucket.pop("cooldown_until", None)
+    bucket.pop("cooldown_reason", None)
     _save_facebook_publish_state(state)
 
 
@@ -3493,12 +3521,16 @@ def run_property_video_with_progress(
         _persist_task_result(task)
         tracker.finish(result)
         _push_live_event("task_completed", "房源实拍成片已完成", task, {"scope": "property_video"})
-        # 房源自动化任务：做完自动发 YouTube（与话题共用账号，只发 Shorts）
+        # 房源自动化任务：做完自动发 YouTube（与话题共用账号，只发 Shorts）+ Facebook（共用话题 Page，中文单帖）
         if (task.get("workflow_config") or {}).get("property_auto"):
             try:
                 _maybe_publish_property_video_to_youtube(Path(task["output_dir"]), result, title_hint=task.get("topic") or "")
             except Exception as _prop_pub_exc:
                 print(f"[property-auto youtube] hook error: {_prop_pub_exc!r}", flush=True)
+            try:
+                _maybe_publish_property_video_to_facebook(Path(task["output_dir"]), result, title_hint=task.get("topic") or "")
+            except Exception as _prop_fb_exc:
+                print(f"[property-auto facebook] hook error: {_prop_fb_exc!r}", flush=True)
     except Exception as exc:
         tracker.fail(str(exc))
         _push_live_event("task_failed", str(exc), task, {"scope": "property_video"})
@@ -4527,12 +4559,16 @@ def _run_auto_digital_batch(batch_id: str) -> None:
                 item["updated_at"] = time.time()
                 item["history_id"] = output_dir.name if output_dir.exists() else ""
                 item["error"] = ""
-                # 话题自动化批次：单条做完后自动发到话题 YouTube 账号（若已配置并开启）
+                # 话题自动化批次：单条做完后自动发到话题 YouTube 账号 + Facebook Page（若已配置并开启）
                 if str(job.get("source") or "") == "topic_auto" and output_dir.exists():
                     try:
                         _maybe_publish_topic_video_to_youtube(output_dir)
                     except Exception as _topic_pub_exc:
                         print(f"[topic-auto youtube] hook error: {_topic_pub_exc!r}", flush=True)
+                    try:
+                        _maybe_publish_topic_video_to_facebook(output_dir)
+                    except Exception as _topic_fb_exc:
+                        print(f"[topic-auto facebook] hook error: {_topic_fb_exc!r}", flush=True)
             elif status == "cancelled":
                 item["status"] = "cancelled"
                 item["updated_at"] = time.time()
@@ -4631,6 +4667,8 @@ def _load_topic_auto_config() -> dict:
         "max_attempts": 3,          # 单条失败最多重试次数，达到后跳过并记录
         "youtube": {},              # 话题视频的 YouTube 发布账号：{enabled, channel_name, token_store_path}
         "youtube_auto_publish": False,  # 每条话题视频做完是否自动发 YouTube
+        "facebook": {},             # 话题视频的 Facebook 发布 Page：{enabled, page_name, page_id, page_access_token}
+        "facebook_auto_publish": False, # 每条话题视频做完是否自动发 Facebook（只发中文单帖）
         "next_run_at": 0,
         "last_run_at": 0,
         "last_run_message": "",
@@ -4695,6 +4733,52 @@ def _maybe_publish_topic_video_to_youtube(output_dir: Path) -> None:
         result["youtube_auto_publish_error"] = str(exc)
         _save_result_to_output_dir(output_dir, result)
         print(f"[topic-auto youtube] publish failed {output_dir.name}: {exc!r}", flush=True)
+
+
+def _maybe_publish_topic_video_to_facebook(output_dir: Path) -> None:
+    """话题视频做完后，若已绑定 FB Page 且开启自动发布，则发到该 Page（只发中文单帖，带节流/368冷却）。"""
+    cfg = _load_topic_auto_config()
+    fb = cfg.get("facebook") if isinstance(cfg.get("facebook"), dict) else {}
+    if not (cfg.get("facebook_auto_publish") and fb.get("enabled") and fb.get("page_id") and fb.get("page_access_token")):
+        return
+    page_id = str(fb.get("page_id"))
+    page_token = str(fb.get("page_access_token"))
+    result = _load_result_from_output_dir(output_dir)
+    if not result or result.get("facebook_publish_records"):
+        return  # 无结果或已发过，避免重复
+    if _facebook_publish_cooldown_remaining(page_id) > 0:
+        result["facebook_auto_publish_error"] = "Facebook 368 频率封锁冷却中，已跳过本条。"
+        _save_result_to_output_dir(output_dir, result)
+        return
+    if _facebook_publish_throttle_remaining(page_id) > 0:
+        result["facebook_publish_throttled"] = "距上次 Facebook 发帖不足最小间隔，已跳过本条。"
+        _save_result_to_output_dir(output_dir, result)
+        return
+    try:
+        video = _resolve_youtube_publish_video(output_dir, result, aspect_ratio="vertical")
+    except Exception:
+        return  # 还没有成片
+    try:
+        title = str(result.get("title") or result.get("topic") or "iHouse 话题")
+        desc = _build_default_facebook_post_text(result)
+        up = upload_video_to_facebook_page(
+            FACEBOOK_TOKEN_STORE_PATH, video,
+            description=desc, title=title, page_id=page_id, page_access_token=page_token,
+        )
+        _record_facebook_publish_success(page_id)
+        rec = {"job_id": f"topic_fb_{int(time.time())}", "history_id": output_dir.name,
+               "aspect_ratio": "vertical", "video_path": str(video), "created_at": time.time(), **up}
+        result["facebook_publish_records"] = [rec] + list(result.get("facebook_publish_records") or [])
+        result["facebook_publish_latest"] = rec
+        result.pop("facebook_auto_publish_error", None)
+        _save_result_to_output_dir(output_dir, result)
+        print(f"[topic-auto facebook] published {output_dir.name}: {up.get('facebook_url')}", flush=True)
+    except Exception as exc:
+        if _is_facebook_frequency_block(str(exc)):
+            _trigger_facebook_publish_cooldown(str(exc), page_id=page_id)
+        result["facebook_auto_publish_error"] = str(exc)
+        _save_result_to_output_dir(output_dir, result)
+        print(f"[topic-auto facebook] publish failed {output_dir.name}: {exc!r}", flush=True)
 
 
 def _start_topic_auto_batch(selected: list[dict]) -> dict:
@@ -4864,6 +4948,7 @@ def _load_property_auto_config() -> dict:
         "interval_minutes": 15,
         "max_attempts": 3,
         "youtube_auto_publish": True,   # 房源视频做完自动发 YouTube（共用话题绑定的账号，只发 Shorts）
+        "facebook_auto_publish": True,  # 房源视频做完自动发 Facebook（共用话题绑定的 Page，只发中文单帖）
         "next_run_at": 0,
         "last_run_at": 0,
         "last_run_message": "",
@@ -4953,6 +5038,56 @@ def _maybe_publish_property_video_to_youtube(output_dir: Path, result: Optional[
         result["youtube_auto_publish_error"] = str(exc)
         _save_result_to_output_dir(output_dir, result)
         print(f"[property-auto youtube] publish failed {output_dir.name}: {exc!r}", flush=True)
+
+
+def _maybe_publish_property_video_to_facebook(output_dir: Path, result: Optional[dict] = None, title_hint: str = "") -> None:
+    """房源视频做完后，若开启，则发到（与话题共用的）FB Page，只发中文单帖，带节流/368冷却。"""
+    pcfg = _load_property_auto_config()
+    if not pcfg.get("facebook_auto_publish", True):
+        return
+    tcfg = _load_topic_auto_config()  # 共用话题绑定的同一个 FB Page
+    fb = tcfg.get("facebook") if isinstance(tcfg.get("facebook"), dict) else {}
+    if not (fb.get("enabled") and fb.get("page_id") and fb.get("page_access_token")):
+        return
+    page_id = str(fb.get("page_id"))
+    page_token = str(fb.get("page_access_token"))
+    result = result if isinstance(result, dict) else (_load_result_from_output_dir(output_dir) or {})
+    if result.get("facebook_publish_records"):
+        return
+    if _facebook_publish_cooldown_remaining(page_id) > 0 or _facebook_publish_throttle_remaining(page_id) > 0:
+        return
+    video = None
+    fvp = str(result.get("final_video_path") or "")
+    if fvp and Path(fvp).exists():
+        video = Path(fvp)
+    else:
+        for p in sorted(output_dir.rglob("*.mp4")):
+            if "final" in p.name.lower():
+                video = p
+                break
+    if not video or not video.exists():
+        return
+    try:
+        base_title = (title_hint or result.get("title") or output_dir.name or "房源实拍").strip()
+        desc = str(result.get("social_post") or result.get("script_text") or base_title)
+        up = upload_video_to_facebook_page(
+            FACEBOOK_TOKEN_STORE_PATH, video,
+            description=desc, title=base_title, page_id=page_id, page_access_token=page_token,
+        )
+        _record_facebook_publish_success(page_id)
+        rec = {"job_id": f"property_fb_{int(time.time())}", "history_id": output_dir.name,
+               "aspect_ratio": "vertical", "video_path": str(video), "created_at": time.time(), **up}
+        result["facebook_publish_records"] = [rec] + list(result.get("facebook_publish_records") or [])
+        result["facebook_publish_latest"] = rec
+        result.pop("facebook_auto_publish_error", None)
+        _save_result_to_output_dir(output_dir, result)
+        print(f"[property-auto facebook] published {output_dir.name}: {up.get('facebook_url')}", flush=True)
+    except Exception as exc:
+        if _is_facebook_frequency_block(str(exc)):
+            _trigger_facebook_publish_cooldown(str(exc), page_id=page_id)
+        result["facebook_auto_publish_error"] = str(exc)
+        _save_result_to_output_dir(output_dir, result)
+        print(f"[property-auto facebook] publish failed {output_dir.name}: {exc!r}", flush=True)
 
 
 def _create_property_auto_video(prop: dict) -> dict:
@@ -7612,8 +7747,12 @@ def _publish_opennews_result_to_facebook(
     if not isinstance(existing_records, list):
         existing_records = []
     channel_id = _opennews_result_channel_id(result)
+    # 该频道主语言用哪个 Page(用于按 Page 分桶节流/冷却)。
+    _primary_market = str((result.get("workflow_config") or {}).get("target_market") or "cn")
+    _primary_pt = _opennews_publish_account_for(channel_id, _primary_market, "facebook")
+    fb_page_key = str((_primary_pt.get("account") or {}).get("page_id") or "")
     # 368 频率封锁冷却中:直接跳过 FB 发布,记明原因,不硬撞。
-    cooldown_remaining = _facebook_publish_cooldown_remaining()
+    cooldown_remaining = _facebook_publish_cooldown_remaining(fb_page_key)
     if cooldown_remaining > 0:
         note = f"Facebook 频率封锁(368)冷却中，暂停发布约 {int(cooldown_remaining/60)} 分钟后自动恢复。"
         result["facebook_auto_publish_error"] = note
@@ -7627,8 +7766,10 @@ def _publish_opennews_result_to_facebook(
         publish_target = _opennews_publish_account_for(channel_id, target_market, "facebook")
         if not publish_target.get("enabled", True):
             continue
+        account_config = publish_target.get("account") or {}
+        page_key = str(account_config.get("page_id") or "") or fb_page_key
         # 发帖最小间隔节流:距上次成功发帖太近则本条跳过(不算失败),让发帖节奏拉开避免被封。
-        throttle_remaining = _facebook_publish_throttle_remaining()
+        throttle_remaining = _facebook_publish_throttle_remaining(page_key)
         if throttle_remaining > 0:
             note = f"距上次 Facebook 发帖不足最小间隔，本条跳过(约 {int(throttle_remaining/60)} 分钟后可再发)。"
             result["facebook_publish_throttled"] = note
@@ -7636,7 +7777,6 @@ def _publish_opennews_result_to_facebook(
             continue
         video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_key)
         post_text = str(text or "").strip() or _build_default_facebook_post_text(result)
-        account_config = publish_target.get("account") or {}
         try:
             upload_result = upload_video_to_facebook_page(
                 FACEBOOK_TOKEN_STORE_PATH,
@@ -7648,9 +7788,9 @@ def _publish_opennews_result_to_facebook(
             )
         except Exception as exc:
             if _is_facebook_frequency_block(str(exc)):
-                _trigger_facebook_publish_cooldown(str(exc))
+                _trigger_facebook_publish_cooldown(str(exc), page_id=page_key)
             raise
-        _record_facebook_publish_success()
+        _record_facebook_publish_success(page_key)
         record = {
             "job_id": f"auto_opennews_facebook_{aspect_key}_{int(time.time())}",
             "history_id": output_dir.name,
