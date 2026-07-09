@@ -1312,6 +1312,13 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
         except Exception as exc:
             print(f"[compose-ready recovery] read error dir={output_dir.name} err={exc!r}", flush=True)
             continue
+        # 已发布过的 OpenNews 成片视为完成：不再重合成或补发，避免重合成丢记录后又重新上传同一条。
+        if _history_is_opennews_result(result) and (
+            result.get("youtube_publish_records")
+            or result.get("facebook_publish_records")
+            or result.get("x_publish_records")
+        ):
+            continue
         lifecycle = _build_history_lifecycle(output_dir, result)
         if lifecycle.get("live_task_id"):
             continue
@@ -15182,6 +15189,22 @@ def _auto_publish_opennews_result_data(
         facebook_auto_publish = False
     if _opennews_youtube_auto_publish_disabled():
         youtube_auto_publish = False
+    # 幂等防重:重新读盘上的已发记录并合并,某平台已发过就不再重发。
+    # 修复恢复worker重合成丢记录、或多个触发点并发导致同一条视频被多次上传的问题。
+    _disk_result = _load_result_from_output_dir(output_dir) or {}
+    for _rk in (
+        "youtube_publish_records", "youtube_publish_latest",
+        "facebook_publish_records", "facebook_publish_latest",
+        "x_publish_records", "x_publish_latest",
+    ):
+        if _disk_result.get(_rk) and not result.get(_rk):
+            result[_rk] = _disk_result[_rk]
+    if result.get("youtube_publish_records"):
+        youtube_auto_publish = False
+    if result.get("facebook_publish_records"):
+        facebook_auto_publish = False
+    if result.get("x_publish_records"):
+        x_auto_publish = False
     youtube_aspects_raw = workflow_config.get("youtube_aspects") or ["vertical"]
     if isinstance(youtube_aspects_raw, str):
         youtube_aspects = ["horizontal", "vertical"] if youtube_aspects_raw == "both" else [part.strip() for part in youtube_aspects_raw.split(",") if part.strip()]
