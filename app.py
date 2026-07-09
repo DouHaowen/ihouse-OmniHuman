@@ -12249,10 +12249,13 @@ def _opennews_event_identity_dedupe_key(identity: dict) -> str:
     return f"tokens:{' '.join(tokens[:10])}" if tokens else ""
 
 
-def _opennews_recent_completed_event_identities(*, limit: int = 0, exclude_job_id: str = "") -> list[dict]:
+def _opennews_recent_completed_event_identities(*, limit: int = 0, exclude_job_id: str = "", channel_id: str = "") -> list[dict]:
     # 去重只对比“最近 N 条”已完成新闻，而不是全部历史——历史越大越容易把同话题新新闻误判为重复。
+    # channel_id 非空时：只对比“同一频道”的历史，避免不同频道(如科技/话题/综合的房产题材)
+    # 把某频道(如房产频道)的新新闻误判为重复而整批跳过不生产。
     if not limit:
         limit = max(50, int(os.getenv("OPENNEWS_DEDUP_HISTORY_LIMIT", "200") or "200"))
+    scope_channel = _safe_opennews_channel_id(channel_id) if channel_id else ""
     identities: list[dict] = []
     seen_keys: set[str] = set()
 
@@ -12277,11 +12280,16 @@ def _opennews_recent_completed_event_identities(*, limit: int = 0, exclude_job_i
                 job_data = json.loads(job_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            job_channel = _safe_opennews_channel_id(job_data.get("opennews_channel_id") or job_data.get("channel_id") or "")
             for item in job_data.get("items", []) or []:
                 if str(item.get("status") or "") != "completed":
                     continue
                 if not str(item.get("history_id") or "").strip():
                     continue
+                if scope_channel:
+                    item_channel = _safe_opennews_channel_id(item.get("opennews_channel_id") or job_channel or "")
+                    if item_channel != scope_channel:
+                        continue
                 add_item(item)
                 if len(identities) >= limit:
                     break
@@ -12299,6 +12307,8 @@ def _opennews_recent_completed_event_identities(*, limit: int = 0, exclude_job_i
             except Exception:
                 continue
             if not _is_opennews_result(result):
+                continue
+            if scope_channel and _opennews_result_channel_id(result) != scope_channel:
                 continue
             source_article = (
                 ((result.get("workflow_config") or {}).get("source") or {}).get("article")
@@ -12544,7 +12554,8 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
     top_item = _select_opennews_batch_top_item(items) or _select_opennews_batch_top_item(selected)
     if not selected:
         return
-    completed_history = _opennews_recent_completed_event_identities()
+    # 只与“同一频道”的历史去重:避免其它频道(科技/话题/综合)的同题材成片把本频道新料整批误判为重复。
+    completed_history = _opennews_recent_completed_event_identities(channel_id=channel_id)
     job_items: list[dict] = []
     skipped_history_ids: list[str] = []
     for item in selected:
