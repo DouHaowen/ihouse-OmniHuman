@@ -664,6 +664,11 @@ def run_batch_fetch_once(root: Path, *, triggered_by: str = "manual", override: 
     config = load_batch_config(root)
     if isinstance(override, dict):
         config.update({k: v for k, v in override.items() if v not in (None, "", [])})
+        # 频道级字段应为权威:即便传空串也要能覆盖批次配置里的残留值
+        # (否则频道清空 keyword 后,批次仍沿用旧的收窄关键词,把候选 AND 到极少)。
+        for _authoritative in ("keyword", "category", "time_range"):
+            if _authoritative in override:
+                config[_authoritative] = str(override.get(_authoritative) or "")
         config = _normalize_config(config)
     category = str(config.get("category") or "all")
     keyword = str(config.get("keyword") or config.get("query") or "").strip()

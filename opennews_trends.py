@@ -361,24 +361,46 @@ def _fetch_newsdata_articles(*, category: TrendCategory, keyword: str = "", hour
         query = re.sub(rf"\b{re.escape(short)}\b", replacement, query, flags=re.I)
     query = re.sub(r"\bOR\b|\bAND\b|\bNOT\b|[()]", " ", query, flags=re.I)
     query = re.sub(r"\s+", " ", query).strip()[:90] or "breaking news"
-    params = {
+    base_params = {
         "apikey": api_key,
         "language": "en",
         "q": query,
     }
     category_param = NEWSDATA_CATEGORY_MAP.get(category.id)
     if category_param:
-        params["category"] = category_param
-    response = requests.get(NEWSDATA_LATEST_URL, params=params, headers=DEFAULT_HEADERS, timeout=10)
-    response.raise_for_status()
-    payload = response.json()
-    status = str(payload.get("status") or "").lower()
-    if status and status not in {"success", "ok"}:
-        raise RuntimeError(str(payload.get("message") or payload.get("results") or "NewsData.io 返回失败"))
-    raw_results = payload.get("results") if isinstance(payload, dict) else []
-    if not isinstance(raw_results, list):
-        raw_results = []
-    articles = [_article_from_newsdata(item, category) for item in raw_results[:max_records] if isinstance(item, dict)]
+        base_params["category"] = category_param
+    # NewsData 免费版每页 10 条,用 nextPage 分页多拉几页以提升净新增(每页 1 credit)。
+    max_pages = max(1, min(5, int(os.getenv("NEWSDATA_MAX_PAGES", "3") or "3")))
+    collected: list[dict] = []
+    next_page = None
+    last_error = None
+    for _ in range(max_pages):
+        params = dict(base_params)
+        if next_page:
+            params["page"] = next_page
+        try:
+            response = requests.get(NEWSDATA_LATEST_URL, params=params, headers=DEFAULT_HEADERS, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:  # 分页中途失败:保留已拿到的,停止翻页
+            last_error = exc
+            break
+        status = str(payload.get("status") or "").lower()
+        if status and status not in {"success", "ok"}:
+            last_error = RuntimeError(str(payload.get("message") or "NewsData.io 返回失败"))
+            break
+        raw_results = payload.get("results") if isinstance(payload, dict) else []
+        if not isinstance(raw_results, list):
+            raw_results = []
+        collected.extend(item for item in raw_results if isinstance(item, dict))
+        if len(collected) >= max_records:
+            break
+        next_page = payload.get("nextPage") if isinstance(payload, dict) else None
+        if not next_page:
+            break
+    if not collected and last_error is not None:
+        raise last_error
+    articles = [_article_from_newsdata(item, category) for item in collected[:max_records]]
     return [item for item in articles if item.get("title") and item.get("url")]
 
 
