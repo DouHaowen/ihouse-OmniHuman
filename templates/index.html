@@ -1752,7 +1752,7 @@
                   <span class="badge" id="openNewsChannelEditorBadge">未选择</span>
                 </div>
                 <div class="section-kicker" style="margin-top:14px;">① 抓取与制作</div>
-                <div class="field-grid" style="grid-template-columns: 150px 180px minmax(0,1fr) 120px 120px; margin-top:12px;">
+                <div class="field-grid" style="grid-template-columns: 140px 160px minmax(0,1fr) 120px 100px 120px; margin-top:12px;">
                   <label class="check-card" style="min-height:auto; padding:12px;">
                     <span><strong>启用频道</strong><small>参与自动化</small></span>
                     <input id="openNewsChannelEnabled" type="checkbox">
@@ -1763,7 +1763,7 @@
                   </div>
                   <div class="field">
                     <label for="openNewsChannelKeywordInput">关键词聚焦</label>
-                    <input id="openNewsChannelKeywordInput" class="select-input" type="text" placeholder="AI chip semiconductor robotics">
+                    <input id="openNewsChannelKeywordInput" class="select-input" type="text" placeholder="留空=用分类内置词库（推荐）">
                   </div>
                   <div class="field">
                     <label for="openNewsChannelCategorySelect">分类</label>
@@ -1778,6 +1778,21 @@
                       <option value="50">50</option>
                     </select>
                   </div>
+                  <div class="field">
+                    <label for="openNewsChannelIntervalSelect">抓取间隔</label>
+                    <select id="openNewsChannelIntervalSelect" class="select-input">
+                      <option value="15">每15分钟</option>
+                      <option value="30">每30分钟</option>
+                      <option value="60">每1小时</option>
+                      <option value="120">每2小时</option>
+                      <option value="180">每3小时</option>
+                      <option value="360">每6小时</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="actions" style="margin-top:10px; justify-content:flex-start;">
+                  <button class="btn btn-secondary" id="openNewsChannelRunNowBtn" type="button">▶ 立即运行本频道一次</button>
+                  <span class="helper" style="align-self:center;">手动抓取并制作本频道一批（不影响自动调度）。</span>
                 </div>
                 <div class="section-kicker" style="margin-top:16px;">② 语言版本（勾选后，下方按语言配置发布账号）</div>
                 <div class="field-grid" style="grid-template-columns: repeat(4, minmax(0,1fr)); margin-top:8px;">
@@ -1827,9 +1842,9 @@
             <div class="panel" style="padding:16px; gap:12px; margin-bottom:16px;">
               <div class="panel-header" style="margin-bottom:0;">
                 <div>
-                  <div class="section-kicker">Auto Radar</div>
-                  <h3 class="section-title" style="font-size:22px;">2小时自动化 OpenNews</h3>
-                  <p class="section-desc">开启后，系统每 2 小时抓取 20 条热点，按 AI 3 条、机器人 1 条、其他热点 2 条制作 6 条新闻短片；中/日/英竖屏版本会同步发布到 X 和 Facebook。男女配音按批次交替并持久记录，关闭后再开启会继续切换。</p>
+                  <div class="section-kicker">Channel Automation</div>
+                  <h3 class="section-title" style="font-size:22px;">OpenNews 频道自动化总控</h3>
+                  <p class="section-desc">总开关：开启后，下方每个「启用」的新闻频道都会按各自设置的 分类 / 关键词 / 抓取数量 / 抓取间隔 / 每批制作 / 发布平台，独立地抓取、制作并发布，互不影响。单个频道的节奏在下方「频道配置」里调；这里只负责一键开关全部、以及一键把所有启用频道各跑一次。</p>
                 </div>
               </div>
               <div class="field-grid" style="grid-template-columns: repeat(2, minmax(0,1fr));">
@@ -1874,10 +1889,10 @@
                 </div>
                 <div class="field">
                   <label>&nbsp;</label>
-                  <button class="btn btn-primary" id="openNewsBatchRunBtn" type="button" style="width:100%;">立即运行一次自动化批次</button>
+                  <button class="btn btn-primary" id="openNewsBatchRunBtn" type="button" style="width:100%;">立即运行全部启用频道各一次</button>
                 </div>
               </div>
-              <div class="topbar-status" id="openNewsBatchStatus">频道自动化已关闭；开启后会按频道矩阵分别抓取、制作并发布。</div>
+              <div class="topbar-status" id="openNewsBatchStatus">频道自动化总开关已关闭；开启后每个启用频道会按各自间隔独立抓取、制作并发布。</div>
             </div>
 
             <div class="field-grid" style="grid-template-columns: 180px minmax(0,1fr) 190px; display:none;">
@@ -2417,6 +2432,8 @@
       openNewsChannelKeywordInput: document.getElementById('openNewsChannelKeywordInput'),
       openNewsChannelCategorySelect: document.getElementById('openNewsChannelCategorySelect'),
       openNewsChannelLimitSelect: document.getElementById('openNewsChannelLimitSelect'),
+      openNewsChannelIntervalSelect: document.getElementById('openNewsChannelIntervalSelect'),
+      openNewsChannelRunNowBtn: document.getElementById('openNewsChannelRunNowBtn'),
       openNewsChannelProduceLimitSelect: document.getElementById('openNewsChannelProduceLimitSelect'),
       openNewsChannelPlatformX: document.getElementById('openNewsChannelPlatformX'),
       openNewsChannelPlatformFacebook: document.getElementById('openNewsChannelPlatformFacebook'),
@@ -4714,6 +4731,7 @@
       if (els.openNewsChannelKeywordInput) els.openNewsChannelKeywordInput.value = channel.keyword || '';
       if (els.openNewsChannelCategorySelect) els.openNewsChannelCategorySelect.value = channel.category || 'all';
       if (els.openNewsChannelLimitSelect) els.openNewsChannelLimitSelect.value = String(channel.limit || 20);
+      if (els.openNewsChannelIntervalSelect) els.openNewsChannelIntervalSelect.value = String(channel.interval_minutes || 120);
       if (els.openNewsChannelProduceLimitSelect) els.openNewsChannelProduceLimitSelect.value = String(channel.produce_limit || 6);
       document.querySelectorAll('.opennews-channel-language').forEach(input => {
         input.checked = (channel.languages || []).includes(input.value);
@@ -4736,7 +4754,7 @@
       renderOpenNewsChannelEditor();
       const config = state.openNewsChannelsConfig || {};
       const enabledCount = openNewsChannels().filter(item => item.enabled).length;
-      const schedulerText = config.scheduler_enabled ? `频道自动化已开启：${enabledCount} 个频道参与 2 小时调度。` : '频道自动化已关闭；保存并开启后会按频道矩阵分别抓取。';
+      const schedulerText = config.scheduler_enabled ? `频道自动化已开启：${enabledCount} 个启用频道各按自己的间隔独立运行。` : '频道自动化已关闭；保存并开启后每个启用频道会按各自间隔独立运行。';
       setOpenNewsChannelStatus(schedulerText);
     }
 
@@ -4748,6 +4766,7 @@
       channel.keyword = els.openNewsChannelKeywordInput?.value?.trim() || '';
       channel.category = els.openNewsChannelCategorySelect?.value || channel.category || 'all';
       channel.limit = Number(els.openNewsChannelLimitSelect?.value || channel.limit || 20);
+      channel.interval_minutes = Number(els.openNewsChannelIntervalSelect?.value || channel.interval_minutes || 120);
       channel.produce_limit = Number(els.openNewsChannelProduceLimitSelect?.value || channel.produce_limit || 6);
       channel.languages = Array.from(document.querySelectorAll('.opennews-channel-language:checked')).map(input => input.value);
       if (!channel.languages.length) channel.languages = ['cn'];
@@ -4963,13 +4982,10 @@
       const intervalText = openNewsBatchIntervalText(config.interval_minutes);
       const nextRun = config.next_run_at ? `｜下次自动启动：${formatHistoryTime(config.next_run_at)}` : '';
       const nextPresenter = presenterState.next_label ? `｜下一批主播：${presenterState.next_label}` : '';
-      const ruleText = '抓取20条热点，按 AI 3、机器人 1、其他热点 2 制作6条；中/日/英竖屏版同步发布 X 和 Facebook，YouTube 自动发布暂时关闭。';
-      const baseMessage = config.last_run_message || '自动化等待下一轮。';
+      const baseMessage = config.last_run_message || '等待下一轮频道调度。';
       const channelCount = openNewsChannels().filter(item => item.enabled).length;
-      const enabledStatus = channelSchedulerEnabled
-        ? `每2小时按频道矩阵自动执行：${channelCount} 个频道分别抓取、制作并发布。${nextPresenter}${nextRun}`
-        : `${intervalText}自动执行：${ruleText}${nextPresenter}${nextRun}`;
-      const disabledStatus = `2小时自动化已关闭；现在可以手动开启新批次并直接批量制作。开启后按频道矩阵分别发布 X/Facebook。${nextPresenter}`;
+      const enabledStatus = `频道自动化运行中：${channelCount} 个启用频道各按自己的间隔独立抓取、制作并发布。${nextPresenter}${nextRun}`;
+      const disabledStatus = `频道自动化总开关已关闭；开启后每个启用频道会按各自间隔独立运行。也可随时用上方按钮手动跑一次。${nextPresenter}`;
       setOpenNewsBatchStatus(`${baseMessage}｜${channelSchedulerEnabled ? enabledStatus : disabledStatus}`);
     }
 
@@ -5081,39 +5097,69 @@
       }
     }
 
-    async function runOpenNewsBatchNow() {
-      if (els.openNewsBatchRunBtn) {
-        els.openNewsBatchRunBtn.disabled = true;
-        els.openNewsBatchRunBtn.textContent = '抓取中...';
-      }
+    // 跑单个频道一次:抓取 + 触发制作(后端 run-now 会按频道配置抓取并进制作队列)。
+    async function runOpenNewsChannelBatchOnce(channel) {
+      const res = await fetch('/api/opennews/batches/run-now', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel_id: channel?.id || '',
+          category: channel?.category || 'all',
+          keyword: channel?.keyword || '',
+          time_range: channel?.time_range || '6h',
+          limit: Number(channel?.limit || 20),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || data.message || '抓取失败');
+      return data;
+    }
+
+    // B — 编辑器:只运行当前选中的这个频道一次。
+    async function runSelectedOpenNewsChannelNow() {
       syncOpenNewsChannelEditorToState();
       const channel = selectedOpenNewsChannel();
-      setOpenNewsBatchStatus(`正在手动抓取「${channel?.name || 'OpenNews'}」频道热点批次...`);
+      if (!channel) { setOpenNewsChannelStatus('请先在左侧选择一个频道。', true); return; }
+      const btn = els.openNewsChannelRunNowBtn;
+      if (btn) { btn.disabled = true; btn.textContent = '运行中...'; }
+      setOpenNewsChannelStatus(`正在手动运行「${channel.name || channel.id}」频道一次...`);
       try {
-        const res = await fetch('/api/opennews/batches/run-now', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            channel_id: channel?.id || '',
-            category: channel?.category || els.openNewsCategorySelect?.value || 'all',
-            keyword: channel?.keyword || '',
-            time_range: channel?.time_range || els.openNewsTrendRangeSelect?.value || '6h',
-            limit: Number(channel?.limit || els.openNewsBatchLimitSelect?.value || 20),
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || data.message || '抓取失败');
-        setOpenNewsBatchStatus(`${data.message || '新批次抓取完成'}｜现在可以在下方勾选新闻，再点“直接制作并发布”。`);
-        await loadOpenNewsBatchConfig();
-        await loadOpenNewsBatches();
+        const data = await runOpenNewsChannelBatchOnce(channel);
+        setOpenNewsChannelStatus(`「${channel.name || channel.id}」：${data.message || '批次已抓取，进入制作队列。'}`);
+        if (typeof loadOpenNewsBatches === 'function') await loadOpenNewsBatches();
       } catch (error) {
-        setOpenNewsBatchStatus(friendlyRequestError(error, '批次抓取失败'), true);
+        setOpenNewsChannelStatus(friendlyRequestError(error, '频道运行失败'), true);
       } finally {
-        if (els.openNewsBatchRunBtn) {
-          els.openNewsBatchRunBtn.disabled = false;
-          els.openNewsBatchRunBtn.textContent = '第1步：手动开启新批次';
+        if (btn) { btn.disabled = false; btn.textContent = '▶ 立即运行本频道一次'; }
+      }
+    }
+
+    // C — 总控:把所有「启用」频道各跑一次。
+    async function runOpenNewsBatchNow() {
+      syncOpenNewsChannelEditorToState();
+      const enabled = openNewsChannels().filter(item => item.enabled);
+      const btn = els.openNewsBatchRunBtn;
+      if (!enabled.length) {
+        setOpenNewsBatchStatus('没有启用的频道；请先在下方「频道配置」里启用至少一个频道。', true);
+        return;
+      }
+      if (btn) { btn.disabled = true; btn.textContent = '运行中...'; }
+      let done = 0;
+      const msgs = [];
+      for (const channel of enabled) {
+        setOpenNewsBatchStatus(`正在运行「${channel.name || channel.id}」(${done + 1}/${enabled.length})...`);
+        try {
+          const data = await runOpenNewsChannelBatchOnce(channel);
+          done += 1;
+          msgs.push(`${channel.name || channel.id}：${data.message || '完成'}`);
+        } catch (error) {
+          msgs.push(`${channel.name || channel.id}：失败(${(error && error.message) || '异常'})`);
         }
       }
+      setOpenNewsBatchStatus(`已运行 ${done}/${enabled.length} 个启用频道。｜${msgs.join('；')}`);
+      if (btn) { btn.disabled = false; btn.textContent = '立即运行全部启用频道各一次'; }
+      if (typeof loadOpenNewsBatchConfig === 'function') await loadOpenNewsBatchConfig();
+      if (typeof loadOpenNewsBatches === 'function') await loadOpenNewsBatches();
     }
 
     function openNewsBatchItemStatusLabel(item = {}) {
@@ -7923,6 +7969,7 @@
     els.openNewsBatchStartBtn?.addEventListener('click', startOpenNewsBatchAutomation);
     els.openNewsBatchStopBtn?.addEventListener('click', stopOpenNewsBatchAutomation);
     els.openNewsBatchRunBtn?.addEventListener('click', runOpenNewsBatchNow);
+    els.openNewsChannelRunNowBtn?.addEventListener('click', runSelectedOpenNewsChannelNow);
     els.openNewsBatchRefreshBtn?.addEventListener('click', loadOpenNewsBatches);
     els.openNewsBatchProduceBtn?.addEventListener('click', produceOpenNewsBatchVideos);
     els.openNewsChannelSaveBtn?.addEventListener('click', () => saveOpenNewsChannelsConfig());
