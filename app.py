@@ -9340,14 +9340,36 @@ async def facebook_oauth_start(request: Request):
 
 
 @app.get("/api/facebook/oauth/callback")
-async def facebook_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-    if error:
-        return HTMLResponse(f"<h2>Facebook 授权失败</h2><p>{error}</p>", status_code=400)
+async def facebook_oauth_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+    error_reason: str = "",
+    error_description: str = "",
+    error_code: str = "",
+    error_message: str = "",
+):
+    # Facebook 授权失败时可能只回传 error_code/error_message(而非 error),这里一并捕获,避免误报“缺少 code”。
+    fb_error = error or error_message or error_description or error_reason
+    if fb_error:
+        def _esc(v: str) -> str:
+            return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        detail = _esc(error_message or error_description or error or error_reason)
+        code_hint = f"（错误码 {_esc(error_code)}）" if error_code else ""
+        tip = ""
+        if "invalid scopes" in str(fb_error).lower() or "pages_manage_posts" in str(fb_error).lower():
+            tip = (
+                "<p style='color:#555'>原因:该 Facebook 应用尚未启用 "
+                "<b>pages_show_list / pages_read_engagement / pages_manage_posts</b> 这三个 Page 权限。"
+                "请到应用后台把这三个权限加上(见下),并确保用应用管理员账号授权。</p>"
+            )
+        return HTMLResponse(f"<h2>Facebook 授权失败</h2><p>{code_hint}{detail}</p>{tip}", status_code=400)
     expected_state = request.session.get("facebook_oauth_state")
     if expected_state and state and not hmac.compare_digest(str(expected_state), str(state)):
         return HTMLResponse("<h2>Facebook 授权失败</h2><p>state 校验失败。</p>", status_code=400)
     if not code:
-        return HTMLResponse("<h2>Facebook 授权失败</h2><p>缺少 code。</p>", status_code=400)
+        return HTMLResponse("<h2>Facebook 授权失败</h2><p>缺少 code(Facebook 未返回授权码,通常是权限或回调地址配置问题)。</p>", status_code=400)
     try:
         short_lived = exchange_facebook_code_for_tokens(code)
         long_lived = exchange_facebook_long_lived_user_token(str(short_lived.get("access_token") or ""))
