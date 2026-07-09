@@ -12540,6 +12540,106 @@ def _select_opennews_batch_top_item(items: list[dict]) -> Optional[dict]:
     return dict(ranked[0]) if ranked else None
 
 
+# 各频道题材白名单:命中任一关键词才算"属于该频道题材"(中英都匹配)。
+# 只对这些题材明确的频道过滤;综合/其它不在表内的频道不过滤。
+_OPENNEWS_CHANNEL_TOPIC_KEYWORDS = {
+    "real_estate_immigration": [
+        "real estate", "real-estate", "housing", "house price", "home price", "home prices",
+        "mortgage", "property", "properties", "apartment", "condo", "rent", "rental", "landlord",
+        "tenant", "reit", "homebuilder", "home builder", "housing market", "realty", "home sales",
+        "homebuyer", "home buyer", "commercial property", "residential",
+        "immigration", "immigrant", "migrant", "visa", "citizenship", "green card",
+        "permanent resident", "asylum", "border policy", "work permit", "international student",
+        "住房", "房产", "房价", "房贷", "楼市", "租金", "租房", "房东", "置业", "购房", "买房",
+        "公寓", "地产", "不动产", "物业", "移民", "签证", "入籍", "绿卡", "永居", "居留", "留学生",
+    ],
+    "real_estate": [
+        "real estate", "real-estate", "housing", "house price", "home price", "mortgage", "property",
+        "apartment", "condo", "rent", "rental", "landlord", "tenant", "reit", "homebuilder",
+        "housing market", "realty", "home sales", "homebuyer", "residential",
+        "住房", "房产", "房价", "房贷", "楼市", "租金", "租房", "房东", "置业", "购房", "买房", "公寓", "地产", "不动产", "物业",
+    ],
+    "immigration": [
+        "immigration", "immigrant", "migrant", "visa", "citizenship", "green card",
+        "permanent resident", "asylum", "border policy", "work permit", "international student",
+        "移民", "签证", "入籍", "绿卡", "永居", "居留", "留学生", "国际学生",
+    ],
+    "technology": [
+        "ai", "artificial intelligence", "chip", "semiconductor", "software", "robot", "robotics",
+        "tech", "technology", "startup", "nvidia", "amd", "intel", "apple", "google", "microsoft",
+        "amazon", "meta", "openai", "quantum", "data center", "data centre", "gpu", "cloud",
+        "smartphone", "cyber", "blockchain", "chatbot", "algorithm", "5g", "satellite",
+        "科技", "芯片", "半导体", "人工智能", "机器人", "软件", "算法", "量子", "数据中心", "智能", "互联网", "云计算",
+    ],
+    "ai": [
+        "ai", "artificial intelligence", "generative", "openai", "anthropic", "nvidia", "chip",
+        "machine learning", "large language model", "chatbot", "算法", "人工智能", "大模型", "智能", "芯片",
+    ],
+}
+
+
+def _opennews_item_matches_channel_topic(item: dict, keywords: list) -> bool:
+    if not isinstance(item, dict):
+        return False
+    text = " ".join(
+        str(item.get(k) or "")
+        for k in ("title", "title_zh", "topic", "topic_zh", "headline", "summary", "summary_zh")
+    ).lower()
+    if not text.strip():
+        return True  # 没有可判定文本时不误杀
+    return any(str(kw).lower() in text for kw in keywords)
+
+
+def _filter_items_for_channel_topic(items: list, channel: dict) -> list:
+    """按频道题材白名单过滤:把明显跑题的条目丢掉,避免'科技内容发到房产频道'这类串台。"""
+    category = str((channel or {}).get("category") or "").strip().lower()
+    keywords = _OPENNEWS_CHANNEL_TOPIC_KEYWORDS.get(category)
+    if not keywords:
+        return items  # 无题材白名单的频道不过滤
+    kept = [it for it in items if _opennews_item_matches_channel_topic(it, keywords)]
+    dropped = len(items) - len(kept)
+    if dropped:
+        print(
+            f"[topic filter] 频道题材={category} 丢弃跑题 {dropped} 条，保留 {len(kept)} 条",
+            flush=True,
+        )
+    return kept
+
+
+def _opennews_channel_published_event_keys(channel_id: str, *, platform: str = "youtube", exclude_dir: str = "", limit: int = 150) -> set:
+    """扫描最近成片，收集'已发布到该频道该平台'的事件指纹集合(用于跨目录防重复发布)。"""
+    channel_id = _safe_opennews_channel_id(channel_id)
+    rec_field = {"youtube": "youtube_publish_records", "facebook": "facebook_publish_records", "x": "x_publish_records"}.get(platform, "youtube_publish_records")
+    keys: set = set()
+    if not OUTPUT_DIR.exists():
+        return keys
+    try:
+        dirs = sorted(
+            [p for p in OUTPUT_DIR.iterdir() if p.is_dir()],
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )[: max(20, limit)]
+    except Exception:
+        return keys
+    for output_dir in dirs:
+        if exclude_dir and output_dir.name == exclude_dir:
+            continue
+        result_path = output_dir / "result.json"
+        if not result_path.exists():
+            continue
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(result, dict) or not result.get(rec_field):
+            continue
+        if _opennews_result_channel_id(result) != channel_id:
+            continue
+        key = _opennews_event_identity_dedupe_key(_opennews_item_event_identity(result))
+        if key:
+            keys.add(key)
+    return keys
+
+
 def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
     if os.getenv("OPENNEWS_BATCH_AUTO_COLLECTION_PRODUCE", "1").strip().lower() in {"0", "false", "no", "off"}:
         return
@@ -12550,6 +12650,9 @@ def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
     if not channel and triggered_by != "scheduler" and not config.get("enabled"):
         return
     items = [item for item in (payload.get("items") or []) if isinstance(item, dict)]
+    # 题材相关性过滤:只让属于本频道题材的内容进入生产,避免串台(如科技新闻发到房产频道)。
+    if channel:
+        items = _filter_items_for_channel_topic(items, channel)
     if not items:
         print(
             "[OpenNews auto collection] skip production: current batch has no fresh unique items "
@@ -15234,6 +15337,16 @@ def _auto_publish_opennews_result_data(
         facebook_auto_publish = False
     if result.get("x_publish_records"):
         x_auto_publish = False
+    # 跨目录防重复发布:同一条新闻事件若已由别的成片发到本频道,则本条不再重发(修复"同一条发两遍")。
+    _pub_channel_id = _opennews_result_channel_id(result)
+    _this_event_key = _opennews_event_identity_dedupe_key(_opennews_item_event_identity(result))
+    if _this_event_key:
+        if youtube_auto_publish and _this_event_key in _opennews_channel_published_event_keys(_pub_channel_id, platform="youtube", exclude_dir=output_dir.name):
+            youtube_auto_publish = False
+            result["youtube_auto_publish_error"] = "同一新闻事件已在本频道发布过，跳过重复发布。"
+            print(f"[dedup publish] 跳过 YouTube 重复发布 dir={output_dir.name} channel={_pub_channel_id}", flush=True)
+        if facebook_auto_publish and _this_event_key in _opennews_channel_published_event_keys(_pub_channel_id, platform="facebook", exclude_dir=output_dir.name):
+            facebook_auto_publish = False
     youtube_aspects_raw = workflow_config.get("youtube_aspects") or ["vertical"]
     if isinstance(youtube_aspects_raw, str):
         youtube_aspects = ["horizontal", "vertical"] if youtube_aspects_raw == "both" else [part.strip() for part in youtube_aspects_raw.split(",") if part.strip()]
