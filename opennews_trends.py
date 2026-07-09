@@ -59,6 +59,71 @@ TREND_CATEGORIES: list[TrendCategory] = [
 
 FOCUSED_TREND_CATEGORY_IDS = ["ai", "real_estate", "immigration", "technology", "finance", "military", "politics"]
 
+# 类目题材白名单(英文标题匹配):命中任一才算属于该类目,用于把源头(尤其 NewsData business 大类)
+# 返回的跑题新闻过滤掉。未列入的类目(如 all)不过滤。
+_CATEGORY_RELEVANCE_KEYWORDS = {
+    "real_estate": [
+        "real estate", "real-estate", "housing", "house price", "home price", "home prices", "mortgage",
+        "property", "properties", "apartment", "condo", "rent", "rental", "landlord", "tenant", "reit",
+        "homebuilder", "home builder", "housing market", "realty", "home sales", "homebuyer", "residential",
+        "commercial property", "real estate investment",
+    ],
+    "immigration": [
+        "immigration", "immigrant", "migrant", "visa", "citizenship", "green card", "permanent resident",
+        "asylum", "border", "work permit", "international student", "deportation", "refugee",
+    ],
+    "real_estate_immigration": [
+        "real estate", "real-estate", "housing", "house price", "home price", "home prices", "mortgage",
+        "property", "properties", "apartment", "condo", "rent", "rental", "landlord", "tenant", "reit",
+        "homebuilder", "home builder", "housing market", "realty", "home sales", "homebuyer", "residential",
+        "commercial property", "real estate investment",
+        "immigration", "immigrant", "migrant", "visa", "citizenship", "green card", "permanent resident",
+        "asylum", "work permit", "international student", "deportation", "refugee",
+    ],
+    "technology": [
+        "ai", "artificial intelligence", "chip", "chipmaker", "semiconductor", "software", "robot", "robotics",
+        "tech", "technology", "startup", "nvidia", "amd", "intel", "apple", "google", "microsoft", "amazon",
+        "meta", "openai", "quantum", "data center", "data centre", "gpu", "cloud", "smartphone", "cyber",
+        "blockchain", "chatbot", "5g", "satellite", "electric vehicle", "autonomous",
+    ],
+    "ai": [
+        "ai", "artificial intelligence", "generative", "openai", "anthropic", "nvidia", "chip",
+        "machine learning", "large language model", "llm", "chatbot", "neural", "deep learning",
+    ],
+    "finance": [
+        "federal reserve", "interest rate", "inflation", "stock", "market", "economy", "recession", "oil",
+        "gold", "dollar", "earnings", "ipo", "crypto", "bitcoin", "bond", "gdp", "bank", "fed", "nasdaq", "dow",
+    ],
+    "military": [
+        "military", "defense", "defence", "missile", "drone", "navy", "army", "air force", "warship",
+        "fighter jet", "nuclear", "nato", "ukraine", "taiwan", "weapon", "troops", "ceasefire", "war",
+    ],
+    "politics": [
+        "white house", "congress", "senate", "election", "president", "government", "foreign policy",
+        "sanction", "diplomacy", "summit", "legislation", "parliament", "policy", "minister", "vote",
+    ],
+}
+
+
+def _filter_articles_by_category_relevance(articles: list, category_id: str) -> list:
+    keywords = _CATEGORY_RELEVANCE_KEYWORDS.get(str(category_id or "").strip().lower())
+    if not keywords:
+        return articles
+    kept = []
+    for art in articles:
+        if not isinstance(art, dict):
+            continue
+        text = " ".join(str(art.get(k) or "") for k in ("title", "seendate", "domain", "snippet", "summary")).lower()
+        # 主要看标题;标题为空时保留(不误杀)。
+        title = str(art.get("title") or "").lower()
+        haystack = (title + " " + text).strip()
+        if not title:
+            kept.append(art)
+            continue
+        if any(kw in haystack for kw in keywords):
+            kept.append(art)
+    return kept
+
 BING_TREND_QUERIES = {
     "all": "AI real estate immigration technology finance military politics latest news",
     "ai": "AI OpenAI Nvidia Anthropic AI chip latest news",
@@ -601,6 +666,11 @@ def _search_english_trends_single(*, category: str = "all", time_range: str = "6
             raw_articles.extend(item for item in bing_articles if item.get("url") not in existing_urls)
         except Exception as exc:
             source_errors.append(f"Bing News RSS: {exc}")
+    if not raw_articles and source_errors:
+        raise RuntimeError("；".join(source_errors[:2]))
+    # 源头题材过滤:NewsData 的 business 等大类会返回大量跑题新闻(如'房产'类目抓到 Meta 数据中心)。
+    # 这里按类目题材白名单，只保留标题确实属于该类目的文章，保证'抓下来的就是对应类别的新闻'。
+    raw_articles = _filter_articles_by_category_relevance(raw_articles, trend_category.id)
     if not raw_articles and source_errors:
         raise RuntimeError("；".join(source_errors[:2]))
     clusters = _cluster_articles(raw_articles)
