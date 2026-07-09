@@ -12674,7 +12674,22 @@ def _opennews_channel_published_event_keys(channel_id: str, *, platform: str = "
         key = _opennews_event_identity_dedupe_key(_opennews_item_event_identity(result))
         if key:
             keys.add(key)
+        u = _opennews_result_source_url(result)
+        if u:
+            keys.add("url:" + u)
     return keys
+
+
+def _opennews_result_source_url(result: dict) -> str:
+    if not isinstance(result, dict):
+        return ""
+    wc = result.get("workflow_config") if isinstance(result.get("workflow_config"), dict) else {}
+    for src in (wc.get("source"), result.get("source")):
+        if isinstance(src, dict):
+            art = src.get("article")
+            if isinstance(art, dict) and art.get("url"):
+                return str(art.get("url")).strip().lower()
+    return ""
 
 
 def _handle_opennews_batch_after_fetch(root: Path, payload: dict) -> None:
@@ -15353,6 +15368,13 @@ def _auto_publish_opennews_result_data(
     x_auto_publish = _parse_bool_form(workflow_config.get("x_auto_publish")) if "x_auto_publish" in workflow_config else _opennews_x_auto_publish_default()
     facebook_auto_publish = _parse_bool_form(workflow_config.get("facebook_auto_publish")) if "facebook_auto_publish" in workflow_config else _opennews_facebook_auto_publish_default()
     youtube_auto_publish = _parse_bool_form(workflow_config.get("youtube_auto_publish")) if "youtube_auto_publish" in workflow_config else _opennews_youtube_auto_publish_default()
+    # 未归属任何配置频道的内容(channel_id=general,多为旧积压/恢复重合成)一律不自动发布,
+    # 避免它走全局 token 发到别的频道(如把 general 里的房产/科技混合内容误发到某个频道)。
+    _pub_cid = _opennews_result_channel_id(result)
+    if _pub_cid == "general" or not _find_opennews_channel(_pub_cid):
+        if x_auto_publish or facebook_auto_publish or youtube_auto_publish:
+            print(f"[publish guard] 跳过未归属频道(channel={_pub_cid})的自动发布 dir={output_dir.name}", flush=True)
+        x_auto_publish = facebook_auto_publish = youtube_auto_publish = False
     if _opennews_x_auto_publish_disabled():
         x_auto_publish = False
     if _opennews_facebook_auto_publish_disabled():
@@ -15375,16 +15397,22 @@ def _auto_publish_opennews_result_data(
         facebook_auto_publish = False
     if result.get("x_publish_records"):
         x_auto_publish = False
-    # 跨目录防重复发布:同一条新闻事件若已由别的成片发到本频道,则本条不再重发(修复"同一条发两遍")。
+    # 跨目录防重复发布:同一条新闻(按事件指纹 或 源文章URL)若已由别的成片发到本频道,则本条不再重发。
     _pub_channel_id = _opennews_result_channel_id(result)
     _this_event_key = _opennews_event_identity_dedupe_key(_opennews_item_event_identity(result))
-    if _this_event_key:
-        if youtube_auto_publish and _this_event_key in _opennews_channel_published_event_keys(_pub_channel_id, platform="youtube", exclude_dir=output_dir.name):
-            youtube_auto_publish = False
-            result["youtube_auto_publish_error"] = "同一新闻事件已在本频道发布过，跳过重复发布。"
-            print(f"[dedup publish] 跳过 YouTube 重复发布 dir={output_dir.name} channel={_pub_channel_id}", flush=True)
-        if facebook_auto_publish and _this_event_key in _opennews_channel_published_event_keys(_pub_channel_id, platform="facebook", exclude_dir=output_dir.name):
-            facebook_auto_publish = False
+    _this_url = _opennews_result_source_url(result)
+    _this_url_key = ("url:" + _this_url) if _this_url else ""
+
+    def _already_pub(platform: str) -> bool:
+        published = _opennews_channel_published_event_keys(_pub_channel_id, platform=platform, exclude_dir=output_dir.name)
+        return (bool(_this_event_key) and _this_event_key in published) or (bool(_this_url_key) and _this_url_key in published)
+
+    if youtube_auto_publish and _already_pub("youtube"):
+        youtube_auto_publish = False
+        result["youtube_auto_publish_error"] = "同一新闻已在本频道发布过，跳过重复发布。"
+        print(f"[dedup publish] 跳过 YouTube 重复发布 dir={output_dir.name} channel={_pub_channel_id}", flush=True)
+    if facebook_auto_publish and _already_pub("facebook"):
+        facebook_auto_publish = False
     youtube_aspects_raw = workflow_config.get("youtube_aspects") or ["vertical"]
     if isinstance(youtube_aspects_raw, str):
         youtube_aspects = ["horizontal", "vertical"] if youtube_aspects_raw == "both" else [part.strip() for part in youtube_aspects_raw.split(",") if part.strip()]
