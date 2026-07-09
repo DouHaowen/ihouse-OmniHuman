@@ -307,6 +307,7 @@ X_AUTH_DIR = OUTPUT_DIR / "x_auth"
 X_TOKEN_STORE_PATH = X_AUTH_DIR / "x_token.json"
 FACEBOOK_AUTH_DIR = OUTPUT_DIR / "facebook_auth"
 FACEBOOK_TOKEN_STORE_PATH = FACEBOOK_AUTH_DIR / "facebook_token.json"
+FACEBOOK_PUBLISH_STATE_PATH = FACEBOOK_AUTH_DIR / "publish_state.json"
 AUTO_DIGITAL_BATCH_DIR.mkdir(parents=True, exist_ok=True)
 FLOORPLAN_NAV_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_AUTO_DIR.mkdir(parents=True, exist_ok=True)
@@ -410,7 +411,91 @@ def _opennews_x_publish_mode_label() -> str:
 
 
 def _opennews_facebook_publish_language_versions_enabled() -> bool:
-    return _env_flag("OPENNEWS_FACEBOOK_PUBLISH_LANGUAGE_VERSIONS_ENABLED", "1")
+    # 默认关闭:FB 只发主语言(频道首个语言,通常中文)一帖,避免中/日/英各发一帖触发频率封锁。
+    return _env_flag("OPENNEWS_FACEBOOK_PUBLISH_LANGUAGE_VERSIONS_ENABLED", "0")
+
+
+# ===== Facebook 发帖节流 + 368 频率封锁自动冷却 =====
+def _facebook_min_post_interval_seconds() -> int:
+    try:
+        return max(0, int(os.getenv("OPENNEWS_FACEBOOK_MIN_POST_INTERVAL_SECONDS", "1800") or "1800"))
+    except Exception:
+        return 1800
+
+
+def _facebook_frequency_cooldown_seconds() -> int:
+    try:
+        return max(600, int(os.getenv("OPENNEWS_FACEBOOK_FREQUENCY_COOLDOWN_SECONDS", "7200") or "7200"))
+    except Exception:
+        return 7200
+
+
+def _load_facebook_publish_state() -> dict:
+    try:
+        if FACEBOOK_PUBLISH_STATE_PATH.exists():
+            data = json.loads(FACEBOOK_PUBLISH_STATE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_facebook_publish_state(state: dict) -> None:
+    try:
+        FACEBOOK_PUBLISH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        FACEBOOK_PUBLISH_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[facebook throttle] 写入发帖状态失败: {exc}", flush=True)
+
+
+def _is_facebook_frequency_block(error_text: str) -> bool:
+    text = str(error_text or "")
+    lowered = text.lower()
+    return (
+        '"code":368' in lowered
+        or "code': 368" in lowered
+        or "1390008" in text
+        or "免受垃圾信息打扰" in text
+        or "限制了你" in text
+        or ("368" in text and "oauth" in lowered)
+    )
+
+
+def _facebook_publish_cooldown_remaining() -> float:
+    state = _load_facebook_publish_state()
+    until = float(state.get("cooldown_until") or 0)
+    return max(0.0, until - time.time())
+
+
+def _trigger_facebook_publish_cooldown(reason: str = "") -> float:
+    cooldown = _facebook_frequency_cooldown_seconds()
+    until = time.time() + cooldown
+    state = _load_facebook_publish_state()
+    state["cooldown_until"] = until
+    state["cooldown_reason"] = str(reason or "")[:300]
+    state["cooldown_set_at"] = time.time()
+    _save_facebook_publish_state(state)
+    print(f"[facebook throttle] 触发 368 频率封锁冷却，暂停 FB 发布 {int(cooldown/60)} 分钟", flush=True)
+    return until
+
+
+def _facebook_publish_throttle_remaining() -> float:
+    interval = _facebook_min_post_interval_seconds()
+    if interval <= 0:
+        return 0.0
+    state = _load_facebook_publish_state()
+    last = float(state.get("last_post_at") or 0)
+    return max(0.0, (last + interval) - time.time())
+
+
+def _record_facebook_publish_success() -> None:
+    state = _load_facebook_publish_state()
+    state["last_post_at"] = time.time()
+    # 发成功即清掉冷却(说明已解封)。
+    state.pop("cooldown_until", None)
+    state.pop("cooldown_reason", None)
+    _save_facebook_publish_state(state)
 
 
 def _opennews_material_review_blocks_publish() -> bool:
@@ -7527,6 +7612,13 @@ def _publish_opennews_result_to_facebook(
     if not isinstance(existing_records, list):
         existing_records = []
     channel_id = _opennews_result_channel_id(result)
+    # 368 频率封锁冷却中:直接跳过 FB 发布,记明原因,不硬撞。
+    cooldown_remaining = _facebook_publish_cooldown_remaining()
+    if cooldown_remaining > 0:
+        note = f"Facebook 频率封锁(368)冷却中，暂停发布约 {int(cooldown_remaining/60)} 分钟后自动恢复。"
+        result["facebook_auto_publish_error"] = note
+        print(f"[facebook throttle] 跳过 {output_dir.name}：{note}", flush=True)
+        return records
     for aspect in aspects:
         aspect_key = str(aspect or "").strip().lower()
         if aspect_key not in {"horizontal", "vertical"}:
@@ -7535,17 +7627,30 @@ def _publish_opennews_result_to_facebook(
         publish_target = _opennews_publish_account_for(channel_id, target_market, "facebook")
         if not publish_target.get("enabled", True):
             continue
+        # 发帖最小间隔节流:距上次成功发帖太近则本条跳过(不算失败),让发帖节奏拉开避免被封。
+        throttle_remaining = _facebook_publish_throttle_remaining()
+        if throttle_remaining > 0:
+            note = f"距上次 Facebook 发帖不足最小间隔，本条跳过(约 {int(throttle_remaining/60)} 分钟后可再发)。"
+            result["facebook_publish_throttled"] = note
+            print(f"[facebook throttle] 跳过 {output_dir.name}：{note}", flush=True)
+            continue
         video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_key)
         post_text = str(text or "").strip() or _build_default_facebook_post_text(result)
         account_config = publish_target.get("account") or {}
-        upload_result = upload_video_to_facebook_page(
-            FACEBOOK_TOKEN_STORE_PATH,
-            video_path,
-            description=post_text,
-            title=str(result.get("title") or result.get("topic") or "OpenNews"),
-            page_id=str(account_config.get("page_id") or ""),
-            page_access_token=str(account_config.get("page_access_token") or ""),
-        )
+        try:
+            upload_result = upload_video_to_facebook_page(
+                FACEBOOK_TOKEN_STORE_PATH,
+                video_path,
+                description=post_text,
+                title=str(result.get("title") or result.get("topic") or "OpenNews"),
+                page_id=str(account_config.get("page_id") or ""),
+                page_access_token=str(account_config.get("page_access_token") or ""),
+            )
+        except Exception as exc:
+            if _is_facebook_frequency_block(str(exc)):
+                _trigger_facebook_publish_cooldown(str(exc))
+            raise
+        _record_facebook_publish_success()
         record = {
             "job_id": f"auto_opennews_facebook_{aspect_key}_{int(time.time())}",
             "history_id": output_dir.name,
@@ -7582,20 +7687,28 @@ def _publish_opennews_result_to_facebook(
                 if aspect_key not in {"horizontal", "vertical"}:
                     continue
                 try:
+                    if _facebook_publish_cooldown_remaining() > 0 or _facebook_publish_throttle_remaining() > 0:
+                        continue
                     publish_target = _opennews_publish_account_for(channel_id, target_market, "facebook")
                     if not publish_target.get("enabled", True):
                         continue
                     video_path = _resolve_youtube_publish_video(output_dir, version, aspect_ratio=aspect_key)
                     post_text = str(text or "").strip() or _build_default_facebook_post_text(version, title=str(version.get("title") or ""))
                     account_config = publish_target.get("account") or {}
-                    upload_result = upload_video_to_facebook_page(
-                        FACEBOOK_TOKEN_STORE_PATH,
-                        video_path,
-                        description=post_text,
-                        title=str(version.get("title") or ""),
-                        page_id=str(account_config.get("page_id") or ""),
-                        page_access_token=str(account_config.get("page_access_token") or ""),
-                    )
+                    try:
+                        upload_result = upload_video_to_facebook_page(
+                            FACEBOOK_TOKEN_STORE_PATH,
+                            video_path,
+                            description=post_text,
+                            title=str(version.get("title") or ""),
+                            page_id=str(account_config.get("page_id") or ""),
+                            page_access_token=str(account_config.get("page_access_token") or ""),
+                        )
+                    except Exception as up_exc:
+                        if _is_facebook_frequency_block(str(up_exc)):
+                            _trigger_facebook_publish_cooldown(str(up_exc))
+                        raise
+                    _record_facebook_publish_success()
                     record = {
                         "job_id": f"auto_opennews_facebook_{target_market}_{aspect_key}_{int(time.time())}",
                         "history_id": output_dir.name,
