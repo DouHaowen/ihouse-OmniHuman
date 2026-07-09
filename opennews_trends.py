@@ -47,13 +47,14 @@ class TrendCategory:
 
 TREND_CATEGORIES: list[TrendCategory] = [
     TrendCategory("all", "全部指定热点", ""),
-    TrendCategory("ai", "AI相关", "artificial intelligence OR generative AI OR OpenAI OR Anthropic OR Nvidia OR AI chip OR AI regulation"),
-    TrendCategory("real_estate", "房产类", "real estate OR housing market OR home prices OR mortgage rates OR property investment OR rental market"),
-    TrendCategory("immigration", "移民类", "immigration OR visa policy OR migrant OR citizenship OR border policy OR international students"),
-    TrendCategory("technology", "科技类", "semiconductor OR chip OR software OR Apple OR Tesla OR Microsoft OR Google OR startup OR robotics"),
-    TrendCategory("finance", "金融类", "Federal Reserve OR interest rates OR inflation OR stocks OR market OR oil OR dollar OR earnings"),
-    TrendCategory("military", "军事类", "military OR defense OR missile OR drone OR navy OR air force OR Taiwan Strait OR Ukraine"),
-    TrendCategory("politics", "政治类", "White House OR Congress OR election OR government OR foreign policy OR sanctions"),
+    TrendCategory("ai", "AI相关", "artificial intelligence OR generative AI OR OpenAI OR Anthropic OR Nvidia OR AI chip OR AI model OR large language model OR machine learning OR AI regulation OR chatbot"),
+    TrendCategory("real_estate", "房产类", "real estate OR housing market OR home prices OR mortgage rates OR property investment OR rental market OR apartment OR homebuilder OR construction OR commercial property OR REIT OR housing"),
+    TrendCategory("immigration", "移民类", "immigration OR visa policy OR visa OR migrant OR immigrant OR citizenship OR green card OR border policy OR international students OR work permit OR asylum OR deportation"),
+    TrendCategory("technology", "科技类", "semiconductor OR chip OR chipmaker OR AI OR software OR Apple OR Tesla OR Microsoft OR Google OR Nvidia OR Amazon OR Meta OR OpenAI OR startup OR robotics OR robot OR humanoid OR autonomous OR quantum OR chatbot OR smartphone OR gadget OR satellite OR cybersecurity OR blockchain OR electric vehicle OR data center"),
+    TrendCategory("finance", "金融类", "Federal Reserve OR interest rates OR inflation OR stocks OR stock market OR economy OR recession OR oil OR gold OR dollar OR earnings OR IPO OR crypto OR bitcoin OR bond OR GDP OR bank"),
+    TrendCategory("military", "军事类", "military OR defense OR missile OR drone OR navy OR army OR air force OR warship OR fighter jet OR nuclear OR NATO OR Taiwan Strait OR Ukraine OR ceasefire OR weapons"),
+    TrendCategory("politics", "政治类", "White House OR Congress OR Senate OR election OR president OR government OR foreign policy OR sanctions OR diplomacy OR summit OR legislation"),
+    TrendCategory("real_estate_immigration", "房产移民类", "real estate OR housing market OR home prices OR mortgage rates OR property investment OR rental market OR immigration OR visa OR migrant OR citizenship OR green card OR border policy OR international students OR work permit"),
 ]
 
 FOCUSED_TREND_CATEGORY_IDS = ["ai", "real_estate", "immigration", "technology", "finance", "military", "politics"]
@@ -67,6 +68,7 @@ BING_TREND_QUERIES = {
     "finance": "markets finance economy Federal Reserve latest news",
     "military": "defense military latest news",
     "politics": "White House politics latest news",
+    "real_estate_immigration": "real estate housing immigration visa mortgage latest news",
 }
 
 NEWSDATA_CATEGORY_MAP = {
@@ -77,6 +79,7 @@ NEWSDATA_CATEGORY_MAP = {
     "finance": "business",
     "military": "politics",
     "politics": "politics",
+    "real_estate_immigration": "business",
 }
 
 NEWSDATA_QUERY_MAP = {
@@ -88,6 +91,7 @@ NEWSDATA_QUERY_MAP = {
     "finance": "Federal Reserve markets inflation economy",
     "military": "military defense Ukraine Taiwan Strait",
     "politics": "White House Congress government sanctions",
+    "real_estate_immigration": "real estate",
 }
 
 GDELT_SAFE_TERM_REPLACEMENTS = {

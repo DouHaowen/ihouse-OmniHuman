@@ -36,6 +36,7 @@ VALID_CATEGORIES = {
     "ai",
     "real_estate",
     "immigration",
+    "real_estate_immigration",
     "technology",
     "finance",
     "military",
