@@ -66,7 +66,7 @@ _CATEGORY_RELEVANCE_KEYWORDS = {
         "real estate", "real-estate", "housing", "house price", "home price", "home prices", "mortgage",
         "property", "properties", "apartment", "condo", "rent", "rental", "landlord", "tenant", "reit",
         "homebuilder", "home builder", "housing market", "realty", "home sales", "homebuyer", "residential",
-        "commercial property", "real estate investment",
+        "commercial property", "real estate investment", "home market", "luxury home", "home buyer",
     ],
     "immigration": [
         "immigration", "immigrant", "migrant", "visa", "citizenship", "green card", "permanent resident",
@@ -76,7 +76,7 @@ _CATEGORY_RELEVANCE_KEYWORDS = {
         "real estate", "real-estate", "housing", "house price", "home price", "home prices", "mortgage",
         "property", "properties", "apartment", "condo", "rent", "rental", "landlord", "tenant", "reit",
         "homebuilder", "home builder", "housing market", "realty", "home sales", "homebuyer", "residential",
-        "commercial property", "real estate investment",
+        "commercial property", "real estate investment", "home market", "luxury home", "home buyer",
         "immigration", "immigrant", "migrant", "visa", "citizenship", "green card", "permanent resident",
         "asylum", "work permit", "international student", "deportation", "refugee",
     ],
@@ -105,22 +105,43 @@ _CATEGORY_RELEVANCE_KEYWORDS = {
 }
 
 
+_CATEGORY_RELEVANCE_OVERLAP = {
+    "real_estate_immigration": {"real_estate", "immigration"},
+    "real_estate": {"real_estate_immigration"},
+    "immigration": {"real_estate_immigration"},
+    "technology": {"ai"},
+    "ai": {"technology"},
+}
+
+
+def _score_text_keywords(text: str, keywords: list) -> int:
+    return sum(1 for kw in set(str(k).lower() for k in keywords) if kw in text)
+
+
 def _filter_articles_by_category_relevance(articles: list, category_id: str) -> list:
-    keywords = _CATEGORY_RELEVANCE_KEYWORDS.get(str(category_id or "").strip().lower())
-    if not keywords:
+    category_id = str(category_id or "").strip().lower()
+    own_kws = _CATEGORY_RELEVANCE_KEYWORDS.get(category_id)
+    if not own_kws:
         return articles
+    overlap = _CATEGORY_RELEVANCE_OVERLAP.get(category_id, set())
     kept = []
     for art in articles:
         if not isinstance(art, dict):
             continue
-        text = " ".join(str(art.get(k) or "") for k in ("title", "seendate", "domain", "snippet", "summary")).lower()
-        # 主要看标题;标题为空时保留(不误杀)。
-        title = str(art.get("title") or "").lower()
-        haystack = (title + " " + text).strip()
-        if not title:
-            kept.append(art)
+        haystack = " ".join(str(art.get(k) or "") for k in ("title", "snippet", "summary", "domain")).lower().strip()
+        if not str(art.get("title") or "").strip():
+            kept.append(art)  # 无标题不误杀
             continue
-        if any(kw in haystack for kw in keywords):
+        own = _score_text_keywords(haystack, own_kws)
+        if own <= 0:
+            continue  # 完全不含本类目题材 -> 丢
+        # best-fit:本类目命中数必须 >= 其它任何类目,否则这条更属于别的类目
+        best_other = 0
+        for cat, kws in _CATEGORY_RELEVANCE_KEYWORDS.items():
+            if cat == category_id or cat in overlap:
+                continue
+            best_other = max(best_other, _score_text_keywords(haystack, kws))
+        if own >= best_other:
             kept.append(art)
     return kept
 

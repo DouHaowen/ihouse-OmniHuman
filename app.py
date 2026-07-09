@@ -12547,17 +12547,17 @@ _OPENNEWS_CHANNEL_TOPIC_KEYWORDS = {
         "real estate", "real-estate", "housing", "house price", "home price", "home prices",
         "mortgage", "property", "properties", "apartment", "condo", "rent", "rental", "landlord",
         "tenant", "reit", "homebuilder", "home builder", "housing market", "realty", "home sales",
-        "homebuyer", "home buyer", "commercial property", "residential",
+        "homebuyer", "home buyer", "home market", "luxury home", "commercial property", "residential",
         "immigration", "immigrant", "migrant", "visa", "citizenship", "green card",
         "permanent resident", "asylum", "border policy", "work permit", "international student",
-        "住房", "房产", "房价", "房贷", "楼市", "租金", "租房", "房东", "置业", "购房", "买房",
+        "住房", "住宅", "豪宅", "楼盘", "房产", "房价", "房贷", "楼市", "租金", "租房", "房东", "置业", "购房", "买房",
         "公寓", "地产", "不动产", "物业", "移民", "签证", "入籍", "绿卡", "永居", "居留", "留学生",
     ],
     "real_estate": [
         "real estate", "real-estate", "housing", "house price", "home price", "mortgage", "property",
         "apartment", "condo", "rent", "rental", "landlord", "tenant", "reit", "homebuilder",
-        "housing market", "realty", "home sales", "homebuyer", "residential",
-        "住房", "房产", "房价", "房贷", "楼市", "租金", "租房", "房东", "置业", "购房", "买房", "公寓", "地产", "不动产", "物业",
+        "housing market", "realty", "home sales", "homebuyer", "home market", "luxury home", "residential",
+        "住房", "住宅", "豪宅", "楼盘", "房产", "房价", "房贷", "楼市", "租金", "租房", "房东", "置业", "购房", "买房", "公寓", "地产", "不动产", "物业",
     ],
     "immigration": [
         "immigration", "immigrant", "migrant", "visa", "citizenship", "green card",
@@ -12578,29 +12578,56 @@ _OPENNEWS_CHANNEL_TOPIC_KEYWORDS = {
 }
 
 
-def _opennews_item_matches_channel_topic(item: dict, keywords: list) -> bool:
-    if not isinstance(item, dict):
-        return False
-    text = " ".join(
+# 重叠类目(比较主次时跳过自己的子/父类目,避免自我竞争)
+_OPENNEWS_TOPIC_OVERLAP = {
+    "real_estate_immigration": {"real_estate", "immigration"},
+    "real_estate": {"real_estate_immigration"},
+    "immigration": {"real_estate_immigration"},
+    "technology": {"ai"},
+    "ai": {"technology"},
+}
+
+
+def _opennews_item_topic_text(item: dict) -> str:
+    return " ".join(
         str(item.get(k) or "")
         for k in ("title", "title_zh", "topic", "topic_zh", "headline", "summary", "summary_zh")
     ).lower()
-    if not text.strip():
-        return True  # 没有可判定文本时不误杀
-    return any(str(kw).lower() in text for kw in keywords)
+
+
+def _opennews_item_topic_score(text: str, keywords: list) -> int:
+    return sum(1 for kw in set(str(k).lower() for k in keywords) if kw in text)
 
 
 def _filter_items_for_channel_topic(items: list, channel: dict) -> list:
-    """按频道题材白名单过滤:把明显跑题的条目丢掉,避免'科技内容发到房产频道'这类串台。"""
+    """best-fit 题材过滤:一条新闻归给'题材词命中最多'的那一类。
+    只有当本频道类目是这条的主导题材(命中数≥其它任何类目)时才保留,
+    避免'蹭了一个词就串台'(如房产新闻蹭'科技从业者'被当科技)。"""
     category = str((channel or {}).get("category") or "").strip().lower()
-    keywords = _OPENNEWS_CHANNEL_TOPIC_KEYWORDS.get(category)
-    if not keywords:
+    own_kws = _OPENNEWS_CHANNEL_TOPIC_KEYWORDS.get(category)
+    if not own_kws:
         return items  # 无题材白名单的频道不过滤
-    kept = [it for it in items if _opennews_item_matches_channel_topic(it, keywords)]
+    overlap = _OPENNEWS_TOPIC_OVERLAP.get(category, set())
+    kept = []
+    for it in items:
+        text = _opennews_item_topic_text(it)
+        if not text.strip():
+            kept.append(it)  # 无文本不误杀
+            continue
+        own = _opennews_item_topic_score(text, own_kws)
+        if own <= 0:
+            continue  # 完全不含本频道题材 -> 丢
+        best_other = 0
+        for cat, kws in _OPENNEWS_CHANNEL_TOPIC_KEYWORDS.items():
+            if cat == category or cat in overlap:
+                continue
+            best_other = max(best_other, _opennews_item_topic_score(text, kws))
+        if own >= best_other:
+            kept.append(it)
     dropped = len(items) - len(kept)
     if dropped:
         print(
-            f"[topic filter] 频道题材={category} 丢弃跑题 {dropped} 条，保留 {len(kept)} 条",
+            f"[topic filter] 频道题材={category} 丢弃非主导题材 {dropped} 条，保留 {len(kept)} 条",
             flush=True,
         )
     return kept
