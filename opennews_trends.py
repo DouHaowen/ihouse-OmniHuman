@@ -17,7 +17,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import urlparse
 
 import requests
 from xml.etree import ElementTree as ET

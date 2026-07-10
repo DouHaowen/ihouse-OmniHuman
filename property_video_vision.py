@@ -440,7 +440,6 @@ def analyze_property_video_with_openai(
     min_cps, max_cps = _chars_per_second(target_market)
     target_min_chars = int(max(20, total_duration * min_cps))
     target_max_chars = int(max(target_min_chars + 10, total_duration * max_cps))
-    recommended_segment_count = max(1, int(round(total_duration / TIMELINE_TARGET_SEGMENT_SECONDS)))
     minimum_segment_count = max(1, int(total_duration // TIMELINE_MAX_SEGMENT_SECONDS))
     prompt = f"""
 你是 iHouse 的房源实拍视频销售解说助手。请优先根据销售人员填写的“AI 分析补充信息”生成解说文案，视频关键帧只作为辅助理解画面顺序和校验素材内容。

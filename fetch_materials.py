@@ -2530,7 +2530,6 @@ def _opennews_library_domain_score(
     query_entities = _opennews_query_named_entities(seg, relevance_tokens)
     item_entities = _opennews_named_entities_from_text(searchable)
     entity_overlap = query_entities & item_entities
-    entity_conflicts = item_entities - query_entities
     topic_conflict_reason = _opennews_topic_conflict_reason(searchable, relevance_tokens, visual_domain)
     if topic_conflict_reason and not entity_overlap:
         return False, -780, topic_conflict_reason

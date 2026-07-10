@@ -1131,7 +1131,7 @@ def _mux_voice_and_subtitles(
         ]
         try:
             _run(cmd)
-        except RuntimeError as exc:
+        except RuntimeError:
             # Subtitle burn-in can fail on some ffmpeg/libass/font builds. Keep
             # the deliverable video usable and still export the SRT alongside it.
             fallback_cmd = [
@@ -1207,7 +1207,7 @@ def _mux_voice_and_subtitles(
     ]
     try:
         _run(base_cmd[:6] + ["-vf", subtitle_filter] + base_cmd[6:])
-    except RuntimeError as exc:
+    except RuntimeError:
         # Some local ffmpeg builds omit libass/subtitles. Keep the workflow usable
         # and still export the SRT; production images normally support burn-in.
         _run(base_cmd)
