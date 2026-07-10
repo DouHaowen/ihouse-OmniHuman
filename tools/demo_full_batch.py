@@ -1,6 +1,5 @@
-"""受控演示:清空 seen.json 强制生产 1 条科技新闻(中日英)并发布 X/FB/YouTube。
-安全措施:produce_limit 已临时设 1;fetch 后立即恢复 seen.json;进程保活到生产+发布完成。
-用法(容器内 nohup 后台):cd /app && PYTHONPATH=/app nohup python3 tools/demo_full_batch.py > /app/output/demo_full_batch.log 2>&1 &
+"""受控验证:清 seen -> 强制生产 1 条科技新闻(中日英)-> 发 X/FB/YouTube,并盯 job 到完成。
+用法(容器内 nohup):cd /app && PYTHONPATH=/app nohup python3 tools/demo_full_batch.py > /app/output/demo_full_batch.log 2>&1 &
 """
 import json
 import shutil
@@ -19,61 +18,78 @@ def log(m):
 
 log("=== demo start ===")
 
-# 记录触发前已存在的产出目录,便于识别新产出
-before = set(p.name for p in Path("/app/output").iterdir() if p.is_dir())
+# 触发前记录已存在 job id
+def job_ids():
+    return {j.get("job_id") for j in app.list_opennews_batch_jobs(app.OPENNEWS_BATCH_DIR, limit=10)}
 
-# 1) 清空 seen.json
+before_jobs = job_ids()
+
+# 1) 清 seen
 json.dump({}, open(f"{D}/seen.json", "w"))
 log("seen.json cleared")
 
-# 2) 载入 tech 频道(produce_limit 已=1)
+# 2) 触发
 ch = dict(app._find_opennews_channel("technology", include_secrets=True))
 ch["time_range"] = "24h"
-log("tech produce_limit=%s languages=%s" % (ch.get("produce_limit"), ch.get("languages")))
+res = app._run_opennews_channel_fetch(ch, triggered_by="demo_verify")
+log("fetch: %s" % json.dumps({k: res.get(k) for k in ("ok", "message")}, ensure_ascii=False))
 
-# 3) 触发抓取->生产(生产在守护线程里跑)
-res = app._run_opennews_channel_fetch(ch, triggered_by="manual_seen_clear_demo")
-log("fetch result: %s" % json.dumps({k: res.get(k) for k in ("ok", "running", "message")}, ensure_ascii=False))
-
-# 4) 立即恢复 seen.json,避免 scheduler 再把旧闻当新的
+# 3) 立即恢复 seen
 shutil.copy(BAK, f"{D}/seen.json")
 log("seen.json restored")
 
-# 5) 保活并监控:等待新产出目录出现并完成发布
-deadline = time.time() + 60 * 50  # 最多 50 分钟
-last = ""
-while time.time() < deadline:
-    time.sleep(45)
-    now_dirs = set(p.name for p in Path("/app/output").iterdir() if p.is_dir())
-    new_dirs = [n for n in (now_dirs - before) if "OpenNews" in n or "opennews" in n.lower()]
-    status = "new_dirs=%s" % (new_dirs or "(尚无)")
-    if status != last:
-        log(status)
-        last = status
-    # 若有新产出且其 result.json 带发布记录,汇报并结束
-    done = False
-    for n in new_dirs:
-        rj = Path("/app/output") / n / "result.json"
-        if not rj.exists():
-            continue
-        try:
-            r = json.loads(rj.read_text())
-        except Exception:
-            continue
-        yt = r.get("youtube_publish_records") or []
-        x = r.get("x_publish_records") or []
-        fb = r.get("facebook_publish_records") or []
-        langs = r.get("language_versions") or []
-        if yt or x or fb:
-            log("PRODUCED+PUBLISHED dir=%s langs=%d x=%d fb=%d yt=%d" % (n, len(langs) + 1, len(x), len(fb), len(yt)))
-            for rec in yt[:1]:
-                log("  YouTube: %s" % rec.get("youtube_url"))
-            for rec in x[:1]:
-                log("  X: %s" % (rec.get("x_url") or rec.get("url") or rec.get("post_id")))
-            for rec in fb[:1]:
-                log("  FB: %s" % (rec.get("post_id") or rec.get("video_id")))
-            done = True
-    if done:
+# 4) 找到新建的 job
+new_job = None
+for _ in range(20):
+    diff = job_ids() - before_jobs
+    if diff:
+        new_job = sorted(diff)[-1]
         break
+    time.sleep(3)
+if not new_job:
+    log("未发现新 job(可能没有可生产的新条目),退出")
+    raise SystemExit
+log("tracking job: %s" % new_job)
 
-log("=== demo waiter exit ===")
+# 5) 轮询 job 到完成
+deadline = time.time() + 60 * 40
+last_msg = ""
+while time.time() < deadline:
+    j = app.load_opennews_batch_job(app.OPENNEWS_BATCH_DIR, new_job)
+    st = j.get("status")
+    msg = str(j.get("message") or "")
+    if msg != last_msg:
+        log("job status=%s | %s" % (st, msg[:70]))
+        last_msg = msg
+    if st in ("done", "completed", "partial", "failed", "error"):
+        break
+    time.sleep(20)
+
+# 6) 报告产出 + 发布记录
+j = app.load_opennews_batch_job(app.OPENNEWS_BATCH_DIR, new_job)
+log("=== FINAL job status=%s ===" % j.get("status"))
+for it in (j.get("items") or []):
+    hid = it.get("history_id") or it.get("output_history_id") or it.get("result_history_id")
+    log("item: %s | status=%s | history_id=%s" % (str(it.get("title") or "")[:36], it.get("status"), hid))
+    if not hid:
+        continue
+    rj = Path("/app/output") / hid / "result.json"
+    if not rj.exists():
+        continue
+    r = json.loads(rj.read_text())
+    langs = [v.get("target_market") for v in (r.get("language_versions") or [])]
+    x = r.get("x_publish_records") or []
+    fb = r.get("facebook_publish_records") or []
+    yt = r.get("youtube_publish_records") or []
+    log("  langs(除主cn外)=%s | 主cn发布 X=%d FB=%d YouTube=%d" % (langs, len(x), len(fb), len(yt)))
+    for rec in yt[:1]:
+        log("  YouTube: %s" % rec.get("youtube_url"))
+    for rec in x[:1]:
+        log("  X: %s" % (rec.get("x_url") or rec.get("post_id")))
+    for rec in fb[:1]:
+        log("  FB: %s" % (rec.get("post_id") or rec.get("video_id")))
+    if r.get("youtube_auto_publish_error"):
+        log("  YT_err: %s" % str(r.get("youtube_auto_publish_error"))[:80])
+    if r.get("x_auto_publish_error"):
+        log("  X_err: %s" % str(r.get("x_auto_publish_error"))[:80])
+log("=== demo done ===")

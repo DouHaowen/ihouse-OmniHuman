@@ -136,14 +136,20 @@ def _tail_log(name: str, limit: int = 40) -> str:
 def x_browser_login_status() -> dict[str, Any]:
     X_BROWSER_LOGIN_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     processes = {}
-    running = False
+    alive_names: set[str] = set()
     for name in ("xvfb", "openbox", "x11vnc", "websockify", "chromium"):
         pid = _load_pid(name)
         alive = _process_alive(pid)
         processes[name] = {"pid": pid, "alive": alive, "log": str(_log_file(name))}
-        running = running or alive
+        if alive:
+            alive_names.add(name)
+    required = {"xvfb", "x11vnc", "websockify", "chromium"}
+    running = required.issubset(alive_names)
+    degraded = bool(alive_names) and not running
     return {
         "running": running,
+        "degraded": degraded,
+        "profile_in_use": "chromium" in alive_names,
         "display": X_BROWSER_LOGIN_DISPLAY,
         "screen": X_BROWSER_LOGIN_SCREEN,
         "novnc_port": X_BROWSER_LOGIN_NOVNC_PORT,
