@@ -3,6 +3,9 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
+.env
+.env.*
+!.env.example
 .pytest_cache/
 .mypy_cache/
 .DS_Store
@@ -10,3 +13,10 @@ __pycache__/
 .gitignore
 output/
 .claude/
+.codex/
+.codex_remote_patches/
+docs/
+tests/
+tools/_*.py
+_downloads/
+material_harvest/

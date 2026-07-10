@@ -2894,7 +2894,6 @@ NEWS_LINK_NEGATIVE_TOKENS = (
 
 def _looks_like_news_candidate_link(url: str, label: str, source: OpenNewsSource) -> bool:
     lowered_url = (url or "").lower()
-    lowered_label = (label or "").lower()
     if not lowered_url.startswith("http"):
         return False
     if any(token in lowered_url for token in NEWS_LINK_NEGATIVE_TOKENS):

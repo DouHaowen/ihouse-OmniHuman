@@ -22,11 +22,9 @@ import shutil
 import time
 import uuid
 import zipfile
-from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
-from xml.etree import ElementTree as ET
 
 from dotenv import dotenv_values, load_dotenv
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -58,7 +56,6 @@ for _key, _value in dotenv_values().items():
     } and _value is not None:
         os.environ[_key] = _value
 
-from avatar_generator import AvatarGenerationError, generate_avatar_candidates
 from material_library import (
     MATERIAL_LIBRARY_DIR,
     AUDIO_SUFFIXES,
@@ -83,7 +80,6 @@ from opennews_admin import (
     generate_opennews_draft,
     _local_opennews_language_fallback,
     save_opennews_payload,
-    search_opennews_candidates,
     search_opennews_candidates_with_stats,
     source_payloads as opennews_source_payloads,
 )
@@ -97,7 +93,6 @@ from opennews_scheduler import (
     load_auto_config as load_opennews_auto_config,
     run_auto_fetch_once,
     save_auto_config as save_opennews_auto_config,
-    start_opennews_auto_scheduler,
     update_auto_candidate_status,
 )
 from opennews_batch import (
@@ -116,7 +111,6 @@ from opennews_batch import (
     run_batch_fetch_once as run_opennews_batch_fetch_once,
     save_batch_config as save_opennews_batch_config,
     set_after_fetch_callback as set_opennews_batch_after_fetch_callback,
-    start_batch_scheduler as start_opennews_batch_scheduler,
     update_batch_job as update_opennews_batch_job,
 )
 from opennews_collections import (
@@ -125,7 +119,7 @@ from opennews_collections import (
     load_collection_job,
     update_collection_job,
 )
-from source_ingest import analyze_topic_fields, analyze_topic_input
+from source_ingest import analyze_topic_fields
 from facebook_publisher import (
     FACEBOOK_SCOPE,
     FacebookPublishError,
@@ -133,6 +127,7 @@ from facebook_publisher import (
     exchange_facebook_code_for_tokens,
     exchange_facebook_long_lived_user_token,
     facebook_env_config,
+    get_facebook_pages,
     get_facebook_video_metrics,
     get_facebook_page,
     load_facebook_token_store,
@@ -174,7 +169,6 @@ from x_browser_publisher import (
     x_browser_env_config,
 )
 from x_browser_login_manager import (
-    XBrowserLoginError,
     start_x_browser_login,
     stop_x_browser_login,
     x_browser_login_env_config,
@@ -230,8 +224,6 @@ ASSETS_DIR.mkdir(exist_ok=True)
 AVATAR_LIBRARY_MANIFEST_PATH = ASSETS_DIR / "avatar_library_manifest.json"
 AVATAR_LIBRARY_LOCK = threading.Lock()
 MATERIAL_LIBRARY_PUBLIC_DIR = MATERIAL_LIBRARY_DIR
-ADMIN_AVATAR_JOBS: dict[str, dict] = {}
-ADMIN_AVATAR_JOBS_LOCK = threading.Lock()
 
 AVATAR_DISPLAY_NAME_MAP = {
     "avatar_test_0cd3d70a.png": "女主播A",
@@ -3180,10 +3172,8 @@ def run_pipeline_with_progress(
         _raise_if_task_cancel_requested(task_id)
         from fetch_materials import fetch_all_materials
         from generate_audio import generate_audio
-        from generate_digital_human import generate_digital_human_video
         from generate_script import generate_script
         from tos_uploader import upload_file_and_get_url
-        from video_composer import compose_history_video
 
         task = tasks[task_id]
         workflow_config = task.get("workflow_config", {}) or {}
@@ -3689,7 +3679,6 @@ def run_resume_pipeline_with_progress(task_id: str):
     try:
         _raise_if_task_cancel_requested(task_id)
         from generate_audio import generate_audio
-        from generate_digital_human import generate_digital_human_video
         from tos_uploader import upload_file_and_get_url
 
         task = tasks[task_id]
@@ -4737,7 +4726,6 @@ def _recover_pending_auto_digital_batches(max_recovered: int = 3) -> None:
         batch_id = str(job.get("batch_id") or path.stem).strip()
         if not batch_id or str(job.get("status") or "") not in {"queued", "running"}:
             continue
-        touched = False
         for item in job.get("items") or []:
             if not isinstance(item, dict):
                 continue
@@ -4748,7 +4736,6 @@ def _recover_pending_auto_digital_batches(max_recovered: int = 3) -> None:
                 item["status"] = "queued"
                 item["error"] = "服务重启后已恢复排队"
                 item["updated_at"] = time.time()
-                touched = True
         job["status"] = "queued"
         job["message"] = "服务启动后已恢复批量数字人任务，继续从未完成条目生产"
         job["updated_at"] = time.time()
@@ -5039,7 +5026,7 @@ def _start_topic_auto_scheduler(poll_seconds: int = 60) -> None:
                     now = time.time()
                     next_run_at = float(config.get("next_run_at") or 0)
                     if now >= next_run_at:
-                        result = _run_topic_auto_produce_once(triggered_by="scheduler")
+                        _run_topic_auto_produce_once(triggered_by="scheduler")
                         config = _load_topic_auto_config()
                         config["next_run_at"] = now + max(10, int(config.get("interval_minutes") or 120)) * 60
                         _save_topic_auto_config(config)
@@ -6891,7 +6878,6 @@ def _clear_opennews_external_produce_active(output_dir: Optional[Path]) -> None:
         print(f"[OpenNews produce owner] marker cleanup failed dir={Path(output_dir).name} err={exc!r}", flush=True)
 
 
-
 def _acquire_publish_lock(output_dir: Path, ttl_seconds: int = 1800) -> bool:
     """为某条成片获取“正在发布”互斥锁（原子创建锁文件）。已被占用则返回 False。
     防止生产流程自身的发布与后台恢复工人并发发布同一条视频，导致重复上传。"""
@@ -6974,6 +6960,149 @@ def _persist_task_result(task: dict):
     if not output_dir or not result:
         return
     task["result"] = _persist_result_file(Path(output_dir), result)
+
+
+def _bundle_root_name(history_id: str, result: dict) -> str:
+    label = _make_safe_name(result.get("topic") or result.get("title") or history_id, fallback="content_bundle")
+    return f"{history_id}_{label}"
+
+
+def _build_timeline_rows(result: dict) -> list[dict]:
+    rows = []
+    for index, segment in enumerate(result.get("segments") or [], start=1):
+        material_files = []
+        for material_index, material_path in enumerate(segment.get("material_paths") or [], start=1):
+            suffix = Path(str(material_path)).suffix or ".jpg"
+            material_files.append(f"{index:02d}_material_{material_index:02d}{suffix}")
+        rows.append({
+            "index": index,
+            "type": segment.get("type", ""),
+            "start": segment.get("start", 0),
+            "end": segment.get("end", 0),
+            "duration": segment.get("duration", 0),
+            "script": segment.get("script", ""),
+            "action": segment.get("action", ""),
+            "material_keyword": segment.get("material_keyword", ""),
+            "material_desc": segment.get("material_desc", ""),
+            "audio_file": f"{index:02d}_{segment.get('type', 'segment')}.mp3" if segment.get("audio_path") else "",
+            "video_file": f"{index:02d}_digital_human.mp4" if segment.get("video_path") else "",
+            "material_files": "|".join(material_files),
+        })
+    return rows
+
+
+def _build_bundle_readme(result: dict, history_id: str) -> str:
+    lines = [
+        "iHouse 剪辑交付包",
+        "=" * 40,
+        f"任务ID：{history_id}",
+        f"选题：{result.get('topic', '')}",
+        f"标题：{result.get('title', '')}",
+        f"封面标题：{result.get('cover_title', '')}",
+        f"总时长：{result.get('total_duration', 0)}秒",
+        f"段落数量：{len(result.get('segments') or [])}",
+        "",
+        "文件夹说明",
+        "- 01_脚本：脚本与时间轴说明",
+        "- 02_配音：按段落顺序命名的配音文件",
+        "- 03_数字人视频：按段落顺序命名的数字人视频",
+        "- 04_素材：按段落顺序命名的素材图片",
+        "- 05_SNS：SNS 文案",
+        "- 06_剪辑时间轴数据：timeline.csv，可直接对应剪辑软件时间轴",
+        "- 07_成片：完整视频、封面和字幕",
+        "",
+        "段落顺序说明",
+    ]
+    for row in _build_timeline_rows(result):
+        lines.append(f"第{row['index']}段 | {row['type']} | {row['start']}s-{row['end']}s | {row['duration']}s")
+        if row["audio_file"]:
+            lines.append(f"  配音：{row['audio_file']}")
+        if row["video_file"]:
+            lines.append(f"  数字人视频：{row['video_file']}")
+        if row["material_files"]:
+            lines.append(f"  素材：{row['material_files']}")
+        if row["action"]:
+            lines.append(f"  动作提示：{row['action']}")
+        if row["material_keyword"] or row["material_desc"]:
+            lines.append(f"  素材说明：{row['material_keyword']} {row['material_desc']}")
+        lines.append(f"  文案：{row['script']}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_timeline_csv_bytes(result: dict) -> bytes:
+    buffer = io.StringIO()
+    fieldnames = [
+        "index", "type", "start", "end", "duration", "script", "action",
+        "material_keyword", "material_desc", "audio_file", "video_file", "material_files",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(_build_timeline_rows(result))
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def _resolve_bundle_file(output_dir: Path, value: Any) -> Optional[Path]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    candidates = [path] if path.is_absolute() else [output_dir / path, BASE_DIR / path]
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def _build_history_bundle_zip(output_dir: Path, result: dict) -> Path:
+    output_dir = Path(output_dir).resolve()
+    history_id = output_dir.name
+    bundle_path = Path("/tmp") / f"{history_id}_bundle.zip"
+    temporary_path = Path("/tmp") / f".{history_id}_bundle_{uuid.uuid4().hex}.tmp"
+    root = _bundle_root_name(history_id, result)
+
+    with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{root}/00_项目说明/README.txt", _build_bundle_readme(result, history_id))
+        archive.writestr(f"{root}/06_剪辑时间轴数据/timeline.csv", _build_timeline_csv_bytes(result))
+
+        for source_name, archive_name in (
+            ("script.json", "01_脚本/script.json"),
+            ("script_readable.txt", "01_脚本/script_readable.txt"),
+            ("social_posts.txt", "05_SNS/social_posts.txt"),
+        ):
+            source = output_dir / source_name
+            if source.is_file():
+                archive.write(source, f"{root}/{archive_name}")
+
+        for result_key, archive_stem, fallback_suffix in (
+            ("final_video_path", "07_成片/final_video", ".mp4"),
+            ("cover_image_path", "07_成片/cover", ".jpg"),
+            ("subtitle_path", "07_成片/timeline_subtitles", ".srt"),
+        ):
+            source = _resolve_bundle_file(output_dir, result.get(result_key))
+            if source:
+                archive.write(source, f"{root}/{archive_stem}{source.suffix or fallback_suffix}")
+
+        for index, segment in enumerate(result.get("segments") or [], start=1):
+            audio_path = _resolve_bundle_file(output_dir, segment.get("audio_path"))
+            if audio_path:
+                archive.write(audio_path, f"{root}/02_配音/{index:02d}_{segment.get('type', 'segment')}{audio_path.suffix or '.mp3'}")
+
+            video_path = _resolve_bundle_file(output_dir, segment.get("video_path"))
+            if video_path:
+                archive.write(video_path, f"{root}/03_数字人视频/{index:02d}_digital_human{video_path.suffix or '.mp4'}")
+
+            for material_index, material_value in enumerate(segment.get("material_paths") or [], start=1):
+                material_path = _resolve_bundle_file(output_dir, material_value)
+                if material_path:
+                    archive.write(
+                        material_path,
+                        f"{root}/04_素材/{index:02d}_material_{material_index:02d}{material_path.suffix or '.jpg'}",
+                    )
+
+    temporary_path.replace(bundle_path)
+    return bundle_path
 
 
 def _build_file_entries(output_dir: str) -> list[dict]:
@@ -11049,95 +11178,6 @@ async def opennews_batches_prepare_review(request: Request):
         {"error": "OpenNews 人工素材审核批次已停用；请使用 2 小时自动化或“直接制作并发布”。"},
         status_code=410,
     )
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    item_ids = payload.get("item_ids") or []
-    selected_materials_by_item = payload.get("selected_materials_by_item") if isinstance(payload.get("selected_materials_by_item"), dict) else {}
-    if isinstance(item_ids, str):
-        item_ids = [part.strip() for part in item_ids.split(",") if part.strip()]
-    if not isinstance(item_ids, list) or not item_ids:
-        return JSONResponse({"error": "请先勾选要准备人工审核的新闻。"}, status_code=400)
-    item_ids = [str(item or "").strip() for item in item_ids if str(item or "").strip()]
-    if len(item_ids) > 8:
-        return JSONResponse({"error": "一次最多准备 8 条新闻进入人工审核。"}, status_code=400)
-    items = find_opennews_batch_items(OPENNEWS_BATCH_DIR, item_ids)
-    if not items:
-        return JSONResponse({"error": "未找到要审核的批次新闻。"}, status_code=404)
-    selected_ids = [
-        str(item.get("batch_item_id") or item.get("id") or "").strip()
-        for item in items
-        if str(item.get("batch_item_id") or item.get("id") or "").strip()
-    ]
-    selected_for_rank: list[dict] = []
-    for item in items:
-        article = dict(item)
-        article["batch_item_id"] = str(item.get("batch_item_id") or item.get("id") or "")
-        selected_for_rank.append(article)
-    top_item = _select_opennews_batch_top_item(selected_for_rank)
-    top_item_id = str((top_item or {}).get("batch_item_id") or "")
-    target_market = str(payload.get("target_market") or user.get("target_market") or "cn")
-    voice_preset_id = str(payload.get("voice_preset_id") or "")
-    aspect_ratio = "vertical"
-    opennews_channel_id = _safe_opennews_channel_id(payload.get("opennews_channel_id") or payload.get("channel_id") or "")
-    opennews_channel = _find_opennews_channel(opennews_channel_id, include_secrets=True) if opennews_channel_id else {}
-    opennews_language_markets = opennews_channel.get("languages") if isinstance(opennews_channel.get("languages"), list) else None
-    presenter_config = _next_opennews_batch_presenter_config()
-    job = create_opennews_batch_job(
-        OPENNEWS_BATCH_DIR,
-        username=user.get("username") or "",
-        items=items,
-        options={
-            "target_market": target_market,
-            "department_id": user.get("department_id") or "real_estate",
-            "voice_preset_id": voice_preset_id or presenter_config.get("voice_preset_id") or "",
-            "aspect_ratio": aspect_ratio,
-            "notes": str(payload.get("notes") or ""),
-            "youtube_auto_publish": False,
-            "youtube_privacy_status": "public",
-            "youtube_aspects": ["vertical"],
-            "x_auto_publish": _opennews_x_auto_publish_default(),
-            "x_publish_single_shorts": _opennews_x_auto_publish_default(),
-            "x_collection_auto_publish": False,
-            "x_aspects": ["vertical"],
-            "opennews_presenter": presenter_config,
-            "auto_collection_direct": False,
-            "auto_collection_item_ids": selected_ids,
-            "auto_single_shorts_item_ids": [top_item_id] if top_item_id else [],
-            "auto_collection_mix_counts": _opennews_auto_collection_mix_counts(),
-            "manual_review_flow": True,
-            "review_stage": "prepare",
-            "material_strategy": "free_library_script_match",
-        },
-    )
-    mark_opennews_batch_items(
-        OPENNEWS_BATCH_DIR,
-        selected_ids,
-        {
-            "status": "manual_review_preparing",
-            "auto_produce_job_id": job.get("job_id") or "",
-            "auto_produce_selected_at": time.time(),
-            "auto_produce_reason": "manual_review_prepare",
-            "message": "正在预抓素材，完成后可人工审核。",
-        },
-    )
-    thread = threading.Thread(
-        target=_run_opennews_manual_review_prepare_job,
-        kwargs={
-            "job_id": job.get("job_id"),
-            "user": dict(user),
-            "public_base_url": _get_public_base_url(request),
-        },
-        daemon=True,
-    )
-    thread.start()
-    return {
-        "ok": True,
-        "job_id": job.get("job_id"),
-        "job": _opennews_batch_job_payload_for_ui(job),
-        "message": "已开始生成文案、配音和素材，完成后会停在人工审核阶段。",
-    }
 
 
 @app.post("/api/opennews/batches/run-manual-production")
@@ -11286,7 +11326,6 @@ async def opennews_batches_produce(request: Request):
     except Exception:
         payload = {}
     item_ids = payload.get("item_ids") or []
-    selected_materials_by_item = payload.get("selected_materials_by_item") if isinstance(payload.get("selected_materials_by_item"), dict) else {}
     if isinstance(item_ids, str):
         item_ids = [part.strip() for part in item_ids.split(",") if part.strip()]
     if not isinstance(item_ids, list) or not item_ids:
@@ -11379,95 +11418,6 @@ async def opennews_batches_continue_after_review(job_id: str, request: Request):
         {"error": "OpenNews 人工素材审核批次已停用；请使用 2 小时自动化或“直接制作并发布”。"},
         status_code=410,
     )
-    job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id)
-    if not job:
-        return JSONResponse({"error": "人工审核批次不存在"}, status_code=404)
-    if job.get("username") != user.get("username") and not _is_admin(user):
-        return _forbidden_error()
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    item_ids = payload.get("item_ids") or []
-    if isinstance(item_ids, str):
-        item_ids = [part.strip() for part in item_ids.split(",") if part.strip()]
-    reviewable_ids = [
-        str(item.get("batch_item_id") or "")
-        for item in (job.get("items") or [])
-        if str(item.get("status") or "") in {"review_pending", "completed", "review_rejected", "review_skipped"}
-    ]
-    selected_ids = [str(item or "").strip() for item in item_ids if str(item or "").strip()] or reviewable_ids
-    selected_ids = [item_id for item_id in selected_ids if item_id in reviewable_ids]
-    if not selected_ids:
-        return JSONResponse({"error": "当前没有可继续生产的人工审核项。"}, status_code=400)
-    ranking_items: list[dict] = []
-    for item in job.get("items") or []:
-        item_id = str(item.get("batch_item_id") or "")
-        if item_id not in selected_ids:
-            continue
-        article = dict(item.get("article") or {})
-        article["batch_item_id"] = item_id
-        ranking_items.append(article)
-    top_item = _select_opennews_batch_top_item(ranking_items)
-    top_item_id = str((top_item or {}).get("batch_item_id") or "")
-
-    def updater(payload: dict) -> None:
-        options = dict(payload.get("options") or {})
-        options["review_stage"] = "resume"
-        options["auto_collection_direct"] = False
-        options["auto_collection_item_ids"] = list(selected_ids)
-        options["auto_single_shorts_item_ids"] = [top_item_id] if top_item_id else []
-        payload["options"] = options
-        payload["status"] = "queued"
-        payload["message"] = "人工审核已确认，准备继续生产..."
-        for existing in payload.get("items", []) or []:
-            item_id = str(existing.get("batch_item_id") or "")
-            if item_id in selected_ids:
-                existing["review_decision"] = "approved"
-                selected_materials = selected_materials_by_item.get(item_id)
-                existing["selected_materials_by_segment"] = selected_materials if isinstance(selected_materials, dict) else {}
-                if str(existing.get("status") or "") != "completed":
-                    existing["status"] = "review_approved"
-                    existing["message"] = "人工审核已通过，准备继续生产。"
-                existing["review_updated_at"] = time.time()
-            elif str(existing.get("status") or "") in {"review_pending", "review_approved", "review_rejected", "review_skipped"}:
-                existing["review_decision"] = "skipped"
-                existing["selected_materials_by_segment"] = {}
-                existing["status"] = "review_skipped"
-                existing["message"] = "人工审核阶段未勾选继续生产，已跳过。"
-                existing["review_updated_at"] = time.time()
-
-    job = update_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id, updater)
-    selected_batch_updates = {
-        "status": "manual_review_approved",
-        "auto_produce_job_id": job_id,
-        "message": "人工审核已通过，正在继续生产。",
-    }
-    skipped_batch_updates = {
-        "status": "manual_review_skipped",
-        "auto_produce_job_id": job_id,
-        "message": "人工审核阶段未勾选继续生产，已跳过。",
-    }
-    mark_opennews_batch_items(OPENNEWS_BATCH_DIR, selected_ids, selected_batch_updates)
-    skipped_ids = [item_id for item_id in reviewable_ids if item_id not in selected_ids]
-    if skipped_ids:
-        mark_opennews_batch_items(OPENNEWS_BATCH_DIR, skipped_ids, skipped_batch_updates)
-    thread = threading.Thread(
-        target=_run_opennews_manual_review_resume_job,
-        kwargs={
-            "job_id": job_id,
-            "user": dict(user),
-            "public_base_url": _get_public_base_url(request),
-        },
-        daemon=True,
-    )
-    thread.start()
-    return {
-        "ok": True,
-        "job_id": job_id,
-        "job": _opennews_batch_job_payload_for_ui(job),
-        "message": "已根据人工审核结果继续生成成片、合集和发布。",
-    }
 
 
 @app.get("/api/opennews/batches/jobs/{job_id}")
@@ -11661,93 +11611,6 @@ async def lab_opennews_batches_prepare_review(request: Request):
         {"error": "OpenNews 人工素材审核批次已停用；请使用 2 小时自动化或直接批量制作。"},
         status_code=410,
     )
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    item_ids = payload.get("item_ids") or payload.get("ids") or []
-    if isinstance(item_ids, str):
-        item_ids = [part.strip() for part in item_ids.split(",") if part.strip()]
-    if not isinstance(item_ids, list) or not item_ids:
-        return JSONResponse({"error": "请先勾选要进入人工审核批次的新闻。"}, status_code=400)
-    item_ids = [str(item or "").strip() for item in item_ids if str(item or "").strip()]
-    if len(item_ids) > 8:
-        return JSONResponse({"error": "一次最多准备 8 条新闻进入人工审核。"}, status_code=400)
-    items = find_opennews_batch_items(OPENNEWS_BATCH_DIR, item_ids)
-    if not items:
-        return JSONResponse({"error": "未找到要审核的批次新闻。"}, status_code=404)
-    selected_ids = [
-        str(item.get("batch_item_id") or item.get("id") or "").strip()
-        for item in items
-        if str(item.get("batch_item_id") or item.get("id") or "").strip()
-    ]
-    selected_for_rank: list[dict] = []
-    for item in items:
-        article = dict(item)
-        article["batch_item_id"] = str(item.get("batch_item_id") or item.get("id") or "")
-        selected_for_rank.append(article)
-    top_item = _select_opennews_batch_top_item(selected_for_rank)
-    top_item_id = str((top_item or {}).get("batch_item_id") or "")
-    target_market = str(payload.get("target_market") or user.get("target_market") or "cn")
-    voice_preset_id = str(payload.get("voice_preset_id") or "")
-    aspect_ratio = str(payload.get("aspect_ratio") or "horizontal")
-    presenter_config = _next_opennews_batch_presenter_config()
-    job = create_opennews_batch_job(
-        OPENNEWS_BATCH_DIR,
-        username=user.get("username") or "",
-        items=items,
-        options={
-            "target_market": target_market,
-            "department_id": user.get("department_id") or "real_estate",
-            "voice_preset_id": voice_preset_id or presenter_config.get("voice_preset_id") or "",
-            "aspect_ratio": aspect_ratio,
-            "notes": str(payload.get("notes") or ""),
-            "youtube_auto_publish": False,
-            "youtube_privacy_status": "public",
-            "youtube_aspects": ["vertical"],
-            "x_auto_publish": _opennews_x_auto_publish_default(),
-            "x_publish_single_shorts": _opennews_x_auto_publish_default(),
-            "x_collection_auto_publish": False,
-            "x_aspects": ["vertical"],
-            "opennews_presenter": presenter_config,
-            "auto_collection_direct": False,
-            "auto_collection_item_ids": selected_ids,
-            "auto_single_shorts_item_ids": [top_item_id] if top_item_id else [],
-            "auto_collection_mix_counts": _opennews_auto_collection_mix_counts(),
-            "manual_review_flow": True,
-            "review_stage": "prepare",
-            "material_strategy": "free_library_script_match",
-            "lab_trigger": True,
-            "lab_sub": user.get("lab_sub") or "",
-        },
-    )
-    mark_opennews_batch_items(
-        OPENNEWS_BATCH_DIR,
-        selected_ids,
-        {
-            "status": "manual_review_preparing",
-            "auto_produce_job_id": job.get("job_id") or "",
-            "auto_produce_selected_at": time.time(),
-            "auto_produce_reason": "lab_manual_review_prepare",
-            "message": "正在预抓素材，完成后可人工审核。",
-        },
-    )
-    thread = threading.Thread(
-        target=_run_opennews_manual_review_prepare_job,
-        kwargs={
-            "job_id": job.get("job_id"),
-            "user": dict(user),
-            "public_base_url": _get_public_base_url(request),
-        },
-        daemon=True,
-    )
-    thread.start()
-    return {
-        "ok": True,
-        "job_id": job.get("job_id"),
-        "job": _opennews_batch_job_payload_for_ui(job),
-        "message": "已开始生成文案、配音和素材，完成后会停在人工审核阶段。",
-    }
 
 
 @app.post("/api/lab/opennews/batches/jobs/{job_id}/continue")
@@ -11761,96 +11624,6 @@ async def lab_opennews_batches_continue_after_review(job_id: str, request: Reque
         {"error": "OpenNews 人工素材审核批次已停用；请使用 2 小时自动化或直接批量制作。"},
         status_code=410,
     )
-    job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id)
-    if not job:
-        return JSONResponse({"error": "人工审核批次不存在"}, status_code=404)
-    if job.get("username") != user.get("username") and not _is_admin(user):
-        return _forbidden_error()
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {}
-    item_ids = payload.get("item_ids") or []
-    selected_materials_by_item = payload.get("selected_materials_by_item") if isinstance(payload.get("selected_materials_by_item"), dict) else {}
-    if isinstance(item_ids, str):
-        item_ids = [part.strip() for part in item_ids.split(",") if part.strip()]
-    reviewable_ids = [
-        str(item.get("batch_item_id") or "")
-        for item in (job.get("items") or [])
-        if str(item.get("status") or "") in {"review_pending", "completed", "review_rejected", "review_skipped"}
-    ]
-    selected_ids = [str(item or "").strip() for item in item_ids if str(item or "").strip()] or reviewable_ids
-    selected_ids = [item_id for item_id in selected_ids if item_id in reviewable_ids]
-    if not selected_ids:
-        return JSONResponse({"error": "当前没有可继续生产的人工审核项。"}, status_code=400)
-    ranking_items: list[dict] = []
-    for item in job.get("items") or []:
-        item_id = str(item.get("batch_item_id") or "")
-        if item_id not in selected_ids:
-            continue
-        article = dict(item.get("article") or {})
-        article["batch_item_id"] = item_id
-        ranking_items.append(article)
-    top_item = _select_opennews_batch_top_item(ranking_items)
-    top_item_id = str((top_item or {}).get("batch_item_id") or "")
-
-    def updater(payload: dict) -> None:
-        options = dict(payload.get("options") or {})
-        options["review_stage"] = "resume"
-        options["auto_collection_direct"] = False
-        options["auto_collection_item_ids"] = list(selected_ids)
-        options["auto_single_shorts_item_ids"] = [top_item_id] if top_item_id else []
-        payload["options"] = options
-        payload["status"] = "queued"
-        payload["message"] = "人工审核已确认，准备继续生产..."
-        for existing in payload.get("items", []) or []:
-            item_id = str(existing.get("batch_item_id") or "")
-            if item_id in selected_ids:
-                existing["review_decision"] = "approved"
-                selected_materials = selected_materials_by_item.get(item_id)
-                existing["selected_materials_by_segment"] = selected_materials if isinstance(selected_materials, dict) else {}
-                if str(existing.get("status") or "") != "completed":
-                    existing["status"] = "review_approved"
-                    existing["message"] = "人工审核已通过，准备继续生产。"
-                existing["review_updated_at"] = time.time()
-            elif str(existing.get("status") or "") in {"review_pending", "review_approved", "review_rejected", "review_skipped"}:
-                existing["review_decision"] = "skipped"
-                existing["selected_materials_by_segment"] = {}
-                existing["status"] = "review_skipped"
-                existing["message"] = "人工审核阶段未勾选继续生产，已跳过。"
-                existing["review_updated_at"] = time.time()
-
-    job = update_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id, updater)
-    selected_batch_updates = {
-        "status": "manual_review_approved",
-        "auto_produce_job_id": job_id,
-        "message": "人工审核已通过，正在继续生产。",
-    }
-    skipped_batch_updates = {
-        "status": "manual_review_skipped",
-        "auto_produce_job_id": job_id,
-        "message": "人工审核阶段未勾选继续生产，已跳过。",
-    }
-    mark_opennews_batch_items(OPENNEWS_BATCH_DIR, selected_ids, selected_batch_updates)
-    skipped_ids = [item_id for item_id in reviewable_ids if item_id not in selected_ids]
-    if skipped_ids:
-        mark_opennews_batch_items(OPENNEWS_BATCH_DIR, skipped_ids, skipped_batch_updates)
-    thread = threading.Thread(
-        target=_run_opennews_manual_review_resume_job,
-        kwargs={
-            "job_id": job_id,
-            "user": dict(user),
-            "public_base_url": _get_public_base_url(request),
-        },
-        daemon=True,
-    )
-    thread.start()
-    return {
-        "ok": True,
-        "job_id": job_id,
-        "job": _opennews_batch_job_payload_for_ui(job),
-        "message": "已根据人工审核结果继续生成成片、合集和发布。",
-    }
 
 
 @app.get("/api/lab/opennews/jobs")
@@ -13751,11 +13524,6 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
         facebook_auto_publish = _parse_bool_form(options.get("facebook_auto_publish"))
     if _opennews_facebook_auto_publish_disabled():
         facebook_auto_publish = False
-    x_single_shorts_publish = _opennews_x_auto_publish_default() and _opennews_x_single_shorts_enabled()
-    if "x_publish_single_shorts" in options:
-        x_single_shorts_publish = _parse_bool_form(options.get("x_publish_single_shorts"))
-    if _opennews_x_auto_publish_disabled():
-        x_single_shorts_publish = False
     x_aspects_raw = options.get("x_aspects") or external_request.get("x_aspects") or ["vertical"]
     if isinstance(x_aspects_raw, str):
         x_aspects = ["horizontal", "vertical"] if x_aspects_raw == "both" else [part.strip() for part in x_aspects_raw.split(",") if part.strip()]
@@ -13763,17 +13531,6 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
         x_aspects = [str(part).strip() for part in x_aspects_raw if str(part).strip()]
     else:
         x_aspects = ["vertical"]
-    auto_single_shorts_ids = {
-        str(item_id or "").strip()
-        for item_id in (options.get("auto_single_shorts_item_ids") or [])
-        if str(item_id or "").strip()
-    }
-    auto_single_shorts_ids = set()
-    auto_collection_item_ids = {
-        str(item_id or "").strip()
-        for item_id in (options.get("auto_collection_item_ids") or [])
-        if str(item_id or "").strip()
-    }
     set_job_status("running", "外部审核已确认，正在一站式生成新闻视频成片...")
 
     total_items = len(job.get("items") or [])
@@ -13865,7 +13622,6 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             x_error = ""
             facebook_records: list[dict] = []
             facebook_error = ""
-            publish_this_item = False
             youtube_publish_this_item = youtube_auto_publish
             x_publish_this_item = x_auto_publish
             facebook_publish_this_item = facebook_auto_publish
@@ -15345,216 +15101,6 @@ def _compose_opennews_language_versions(
         item["final_video_variants"] = variant_results
 
 
-def _find_job_item_payload(job: dict, item_id: str) -> dict | None:
-    wanted = str(item_id or "").strip()
-    if not wanted:
-        return None
-    for item in job.get("items", []) or []:
-        if str(item.get("batch_item_id") or "") == wanted:
-            return item
-    return None
-
-
-def _selected_review_material_items(
-    result: dict,
-    *,
-    selected_materials_by_segment: dict[str, list[str]] | None = None,
-) -> dict:
-    payload = copy.deepcopy(result or {})
-    selected_map = selected_materials_by_segment or {}
-    normalized_segments: list[dict] = []
-    for index, segment in enumerate(payload.get("segments") or [], start=1):
-        segment_copy = copy.deepcopy(segment if isinstance(segment, dict) else {})
-        if str(segment_copy.get("type") or "") != "material":
-            normalized_segments.append(segment_copy)
-            continue
-        segment_items = _segment_material_items(segment_copy)
-        segment_key = str(index)
-        fallback_key = str(segment_copy.get("index") or "")
-        has_segment_selection = segment_key in selected_map or (fallback_key and fallback_key in selected_map)
-        requested_urls = {
-            str(value or "").strip()
-            for value in (
-                selected_map.get(segment_key)
-                or selected_map.get(fallback_key)
-                or []
-            )
-            if str(value or "").strip()
-        }
-        if has_segment_selection:
-            filtered_items = []
-            for item in segment_items:
-                item_path = str(item.get("path") or "").strip()
-                item_name = Path(item_path).name if item_path else ""
-                if requested_urls and (item_path in requested_urls or item_name in requested_urls):
-                    filtered_items.append(dict(item))
-            segment_items = filtered_items
-        segment_copy["material_items"] = segment_items
-        segment_copy["material_paths"] = [str(item.get("path") or "") for item in segment_items if str(item.get("path") or "").strip()]
-        normalized_segments.append(segment_copy)
-    payload["segments"] = normalized_segments
-    payload["segment_count"] = len(normalized_segments)
-    return payload
-
-
-def _create_opennews_manual_review_item(
-    *,
-    job_id: str,
-    item: dict,
-    user: dict,
-    public_base_url: str,
-    target_market: str,
-    department_id: str,
-    voice_preset_id: str,
-    preferred_aspect_ratio: str,
-    notes: str,
-    presenter_config: dict,
-    material_strategy: str,
-) -> dict:
-    item_id = str(item.get("batch_item_id") or "")
-    article = dict(item.get("article") or {})
-    draft = generate_opennews_draft(article=article, target_market=target_market, notes=notes)
-    task_result = _create_opennews_material_task(
-        user=user,
-        public_base_url=public_base_url,
-        article=article,
-        draft=draft,
-        target_market=target_market,
-        department_id=department_id,
-        voice_preset_id=voice_preset_id,
-        aspect_ratio=preferred_aspect_ratio,
-        presenter_config=presenter_config,
-        material_strategy=material_strategy,
-        batch_job_id=job_id,
-    )
-    task_id = str(task_result.get("task_id") or "")
-    task = _wait_for_opennews_task_done(
-        task_id,
-        expected_title=str(draft.get("video_title") or article.get("title") or ""),
-    )
-    output_dir = Path(task.get("output_dir") or "")
-    if not output_dir.exists():
-        raise RuntimeError("素材预审结果目录不存在。")
-    result = _load_result_from_output_dir(output_dir)
-    if not result:
-        raise RuntimeError("素材预审中间结果不存在。")
-    review_result = _serialize_result_for_ui(str(output_dir), result, result.get("topic", ""))
-    material_review = _opennews_material_review_status(result, output_dir)
-    return {
-        "batch_item_id": item_id,
-        "draft": draft,
-        "task_id": task_id,
-        "history_id": output_dir.name,
-        "review_result": review_result,
-        "material_review": material_review,
-        "review_output_dir": str(output_dir),
-        "review_created_at": time.time(),
-    }
-
-
-def _run_opennews_manual_review_prepare_job(job_id: str, *, user: dict, public_base_url: str) -> None:
-    def set_job_status(status: str, message: str) -> None:
-        update_opennews_batch_job(
-            OPENNEWS_BATCH_DIR,
-            job_id,
-            lambda job: job.update({"status": status, "message": message}),
-        )
-
-    def mark_item(item_id: str, **updates: Any) -> None:
-        def updater(payload: dict) -> None:
-            for existing in payload.get("items", []) or []:
-                if str(existing.get("batch_item_id") or "") == str(item_id or ""):
-                    existing.update(updates)
-                    break
-        update_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id, updater)
-
-    job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id)
-    if not job:
-        return
-    options = dict(job.get("options") or {})
-    target_market = str(options.get("target_market") or user.get("target_market") or "cn")
-    department_id = str(options.get("department_id") or user.get("department_id") or "real_estate")
-    voice_preset_id = str(options.get("voice_preset_id") or "")
-    preferred_aspect_ratio = str(options.get("aspect_ratio") or "horizontal")
-    notes = str(options.get("notes") or "")
-    presenter_config = _normalize_opennews_presenter_config(options.get("opennews_presenter"))
-    material_strategy = str(options.get("material_strategy") or "").strip().lower()
-    set_job_status("review_preparing", "正在生成文案、配音并预抓素材，准备人工审核...")
-    total_items = len(job.get("items") or [])
-    prepared_count = 0
-    failed_count = 0
-    for index, item in enumerate(job.get("items") or []):
-        item_id = str(item.get("batch_item_id") or "")
-        try:
-            mark_item(item_id, status="review_preparing", message="正在生成文案并预抓素材...")
-            review_payload = _create_opennews_manual_review_item(
-                job_id=job_id,
-                item=item,
-                user=user,
-                public_base_url=public_base_url,
-                target_market=target_market,
-                department_id=department_id,
-                voice_preset_id=voice_preset_id,
-                preferred_aspect_ratio=preferred_aspect_ratio,
-                notes=notes,
-                presenter_config=presenter_config,
-                material_strategy=material_strategy,
-            )
-            prepared_count += 1
-            mark_item(
-                item_id,
-                status="review_pending",
-                message="素材预抓完成，等待人工审核。",
-                draft=review_payload.get("draft") or {},
-                review_task_id=review_payload.get("task_id") or "",
-                review_history_id=review_payload.get("history_id") or "",
-                review_result=review_payload.get("review_result") or {},
-                material_review=review_payload.get("material_review") or {},
-                review_output_dir=review_payload.get("review_output_dir") or "",
-                review_updated_at=time.time(),
-                error="",
-            )
-            mark_opennews_batch_items(
-                OPENNEWS_BATCH_DIR,
-                [item_id],
-                {
-                    "status": "manual_review_ready",
-                    "auto_produce_job_id": job_id,
-                    "message": "素材已准备好，等待人工审核。",
-                },
-            )
-        except Exception as exc:
-            failed_count += 1
-            mark_item(
-                item_id,
-                status="review_failed",
-                message=f"预抓素材失败：{exc}",
-                error=str(exc),
-                review_updated_at=time.time(),
-            )
-            mark_opennews_batch_items(
-                OPENNEWS_BATCH_DIR,
-                [item_id],
-                {
-                    "status": "manual_review_failed",
-                    "auto_produce_job_id": job_id,
-                    "message": f"素材预审失败：{exc}",
-                    "error": str(exc),
-                },
-            )
-        update_opennews_batch_job(
-            OPENNEWS_BATCH_DIR,
-            job_id,
-            lambda payload, idx=index, total=total_items: payload.update({
-                "message": f"素材预审准备进度：{idx + 1}/{total}",
-            }),
-        )
-    if prepared_count:
-        set_job_status("review_pending", f"素材预审已完成：{prepared_count} 条待审核，{failed_count} 条失败。")
-    else:
-        set_job_status("failed", f"素材预审失败：{failed_count} 条失败。")
-
-
 def _build_opennews_manual_review_result_payload(job: dict, item: dict) -> dict:
     review_result = item.get("review_result") or {}
     payload = dict(review_result) if isinstance(review_result, dict) else {}
@@ -15567,286 +15113,6 @@ def _build_opennews_manual_review_result_payload(job: dict, item: dict) -> dict:
     if payload and not payload.get("history_id"):
         payload["history_id"] = str(item.get("review_history_id") or payload.get("history_id") or "")
     return payload
-
-
-def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_base_url: str) -> None:
-    def set_job_status(status: str, message: str) -> None:
-        update_opennews_batch_job(
-            OPENNEWS_BATCH_DIR,
-            job_id,
-            lambda job: job.update({"status": status, "message": message}),
-        )
-
-    def mark_item(item_id: str, **updates: Any) -> None:
-        def updater(payload: dict) -> None:
-            for existing in payload.get("items", []) or []:
-                if str(existing.get("batch_item_id") or "") == str(item_id or ""):
-                    existing.update(updates)
-                    break
-        update_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id, updater)
-
-    job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id)
-    if not job:
-        return
-    options = dict(job.get("options") or {})
-    preferred_aspect_ratio = str(options.get("aspect_ratio") or "vertical")
-    youtube_auto_publish = False
-    youtube_publish_disabled = True
-    youtube_privacy_status = str(options.get("youtube_privacy_status") or "public")
-    youtube_aspects_raw = options.get("youtube_aspects") or ["horizontal", "vertical"]
-    if isinstance(youtube_aspects_raw, str):
-        youtube_aspects = ["horizontal", "vertical"] if youtube_aspects_raw == "both" else [part.strip() for part in youtube_aspects_raw.split(",") if part.strip()]
-    else:
-        youtube_aspects = [str(part).strip() for part in (youtube_aspects_raw or []) if str(part).strip()] or ["horizontal", "vertical"]
-    x_auto_publish = _parse_bool_form(options.get("x_auto_publish")) if "x_auto_publish" in options else _opennews_x_auto_publish_default()
-    if _opennews_x_auto_publish_disabled():
-        x_auto_publish = False
-    x_aspects_raw = options.get("x_aspects") or ["vertical"]
-    if isinstance(x_aspects_raw, str):
-        x_aspects = ["horizontal", "vertical"] if x_aspects_raw == "both" else [part.strip() for part in x_aspects_raw.split(",") if part.strip()]
-    else:
-        x_aspects = [str(part).strip() for part in (x_aspects_raw or []) if str(part).strip()] or ["vertical"]
-    auto_single_shorts_ids = {
-        str(item_id or "").strip()
-        for item_id in (options.get("auto_single_shorts_item_ids") or [])
-        if str(item_id or "").strip()
-    }
-    auto_single_shorts_ids = set()
-    set_job_status("running", "人工审核已确认，正在继续合成成片并发布...")
-
-    total_items = len(job.get("items") or [])
-    completed = 0
-    failed = 0
-    completed_event_identities: list[dict] = _opennews_recent_completed_event_identities(exclude_job_id=job_id)
-    for index, item in enumerate(job.get("items") or []):
-        item_id = str(item.get("batch_item_id") or "")
-        if str(item.get("review_decision") or "") == "rejected":
-            mark_item(item_id, status="review_rejected", message=item.get("review_note") or "人工审核已跳过该条新闻。")
-            continue
-        review_history_id = str(item.get("review_history_id") or "").strip()
-        output_dir = _resolve_history_output_dir(review_history_id)
-        result = _load_result_from_output_dir(output_dir) if output_dir else None
-        source_article = dict(item.get("article") or {})
-        if _opennews_is_duplicate_auto_event(source_article, completed_event_identities):
-            duplicate_message = "同一新闻事件已在历史成片或本批次中制作过，已跳过重复项。"
-            mark_item(item_id, status="skipped_duplicate", message=duplicate_message, completed_at=time.time())
-            continue
-        if not output_dir or not result:
-            failed += 1
-            mark_item(item_id, status="failed", message="缺少人工审核素材结果，无法继续生产。", error="missing_review_result", completed_at=time.time())
-            continue
-        try:
-            selected_map = item.get("selected_materials_by_segment") if isinstance(item.get("selected_materials_by_segment"), dict) else {}
-            working_result = _selected_review_material_items(result, selected_materials_by_segment=selected_map)
-            material_review = _opennews_material_review_status(working_result, output_dir)
-            if material_review.get("uses_strict_source_fallback"):
-                working_result["material_review"] = material_review
-            _save_result_to_output_dir(output_dir, working_result)
-            mark_item(item_id, status="composing", message="人工审核素材已确认，正在合成横竖屏成片...", material_review=material_review)
-            composed_result = _compose_opennews_result(
-                output_dir,
-                working_result,
-                preferred_aspect_ratio=preferred_aspect_ratio,
-                user=user,
-                cost_scope="manual_review_resume",
-            )
-            _save_result_to_output_dir(output_dir, composed_result)
-            _sync_live_task_result(str(output_dir), composed_result)
-            video_payload = _external_video_urls_for_result(public_base_url, output_dir, composed_result)
-            youtube_records: list[dict] = []
-            youtube_error = ""
-            x_records: list[dict] = []
-            x_error = ""
-            facebook_records: list[dict] = []
-            facebook_error = ""
-            publish_this_item = False
-            x_publish_this_item = x_auto_publish
-            facebook_publish_this_item = _opennews_facebook_auto_publish_default()
-            if _opennews_facebook_auto_publish_disabled():
-                facebook_publish_this_item = False
-            if x_publish_this_item:
-                try:
-                    mark_item(item_id, status="publishing_x", message="成片完成，正在自动发布到 X...", material_review=material_review)
-                    x_records = _publish_opennews_result_to_x(
-                        output_dir,
-                        composed_result,
-                        aspects=x_aspects,
-                        include_language_versions=_opennews_x_publish_language_versions_enabled(),
-                    )
-                except Exception as x_exc:
-                    x_error = str(x_exc)
-            if facebook_publish_this_item:
-                try:
-                    mark_item(item_id, status="publishing_facebook", message="成片完成，正在自动发布到 Facebook...", material_review=material_review)
-                    facebook_records = _publish_opennews_result_to_facebook(
-                        output_dir,
-                        composed_result,
-                        aspects=["vertical"],
-                        include_language_versions=_opennews_facebook_publish_language_versions_enabled(),
-                    )
-                except Exception as facebook_exc:
-                    facebook_error = str(facebook_exc)
-            published_platforms = []
-            failed_parts = []
-            skipped_parts = []
-            if x_publish_this_item:
-                if x_error:
-                    failed_parts.append(f"X 发布失败：{x_error}")
-                else:
-                    published_platforms.append("X")
-            elif x_error:
-                skipped_parts.append(f"X 自动发布已跳过：{x_error}")
-            if facebook_publish_this_item:
-                if facebook_error:
-                    failed_parts.append(f"Facebook 发布失败：{facebook_error}")
-                else:
-                    published_platforms.append("Facebook")
-            elif facebook_error:
-                skipped_parts.append(f"Facebook 自动发布已跳过：{facebook_error}")
-            if published_platforms:
-                final_message = f"人工审核后成片已完成，{' / '.join(published_platforms)} 已发布。"
-                if failed_parts:
-                    final_message += " 但" + "；".join(failed_parts)
-            elif failed_parts:
-                final_message = "人工审核后成片已完成，但" + "；".join(failed_parts)
-            elif skipped_parts:
-                final_message = "人工审核后成片已完成，但" + "；".join(skipped_parts)
-            else:
-                final_message = "人工审核后成片已完成，可直接下载。"
-            mark_item(
-                item_id,
-                status="completed",
-                message=final_message,
-                history_id=output_dir.name,
-                review_result=_serialize_result_for_ui(str(output_dir), composed_result, composed_result.get("topic", "")),
-                review_updated_at=time.time(),
-                video=video_payload,
-                vertical_url=video_payload.get("vertical_url", ""),
-                horizontal_url=video_payload.get("horizontal_url", ""),
-                youtube_records=youtube_records,
-                youtube_error=youtube_error,
-                x_records=x_records,
-                x_error=x_error,
-                facebook_records=facebook_records,
-                facebook_error=facebook_error,
-                material_review=material_review,
-                error="",
-                completed_at=time.time(),
-            )
-            sync_payload = {
-                "status": "completed",
-                "message": final_message,
-                "history_id": output_dir.name,
-                "video": video_payload,
-                "vertical_url": video_payload.get("vertical_url", ""),
-                "horizontal_url": video_payload.get("horizontal_url", ""),
-                "youtube_records": youtube_records,
-                "youtube_error": youtube_error,
-                "x_records": x_records,
-                "x_error": x_error,
-                "facebook_records": facebook_records,
-                "facebook_error": facebook_error,
-                "material_review": material_review,
-                "error": "",
-                "completed_at": time.time(),
-            }
-            mark_opennews_batch_items(OPENNEWS_BATCH_DIR, [item_id], sync_payload)
-            completed += 1
-            completed_event_identities.append(_opennews_item_event_identity(source_article))
-        except Exception as exc:
-            failed += 1
-            mark_item(item_id, status="failed", message=f"人工审核后继续生产失败：{exc}", error=str(exc), completed_at=time.time())
-            mark_opennews_batch_items(
-                OPENNEWS_BATCH_DIR,
-                [item_id],
-                {"status": "failed", "message": f"人工审核后继续生产失败：{exc}", "error": str(exc), "completed_at": time.time()},
-            )
-        update_opennews_batch_job(
-            OPENNEWS_BATCH_DIR,
-            job_id,
-            lambda payload, idx=index, total=total_items: payload.update({
-                "message": f"人工审核后生产进度：{idx + 1}/{total}",
-            }),
-        )
-    final_job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id) or {}
-    set_job_status("done" if failed == 0 else "partial", f"人工审核批次已完成：{completed} 条成功，{failed} 条失败。")
-    if completed:
-        print(
-            f"[OpenNews] collection build skipped for manual-review batch_job={job_id}; "
-            "single-video X/Facebook publishing is the only active distribution path.",
-            flush=True,
-        )
-
-
-def _run_opennews_batch_produce_job(job_id: str, *, user: dict, public_base_url: str) -> None:
-    def set_job_status(status: str, message: str) -> None:
-        update_opennews_batch_job(
-            OPENNEWS_BATCH_DIR,
-            job_id,
-            lambda job: job.update({"status": status, "message": message}),
-        )
-
-    job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id)
-    if not job:
-        return
-    options = dict(job.get("options") or {})
-    target_market = str(options.get("target_market") or user.get("target_market") or "cn")
-    department_id = str(options.get("department_id") or user.get("department_id") or "real_estate")
-    voice_preset_id = str(options.get("voice_preset_id") or "")
-    aspect_ratio = str(options.get("aspect_ratio") or "horizontal")
-    notes = str(options.get("notes") or "")
-    opennews_channel_id = _safe_opennews_channel_id(options.get("opennews_channel_id") or "")
-    opennews_channel_name = str(options.get("opennews_channel_name") or "").strip()
-    opennews_language_markets = options.get("opennews_language_markets") if isinstance(options.get("opennews_language_markets"), list) else None
-    presenter_config = _normalize_opennews_presenter_config(options.get("opennews_presenter"))
-    set_job_status("running", "正在批量生成新闻稿并提交成片任务...")
-    for index, item in enumerate(job.get("items") or []):
-        item_id = str(item.get("batch_item_id") or "")
-
-        def mark_item(**updates: Any) -> None:
-            def updater(payload: dict) -> None:
-                for existing in payload.get("items", []) or []:
-                    if str(existing.get("batch_item_id") or "") == item_id:
-                        existing.update(updates)
-                        break
-            update_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id, updater)
-
-        try:
-            article = dict(item.get("article") or {})
-            mark_item(status="drafting", message="正在生成新闻稿...")
-            draft = generate_opennews_draft(article=article, target_market=target_market, notes=notes)
-            mark_item(status="submitting", message="正在提交视频生产任务...", draft=draft)
-            result = _create_opennews_material_task(
-                user=user,
-                public_base_url=public_base_url,
-                article=article,
-                draft=draft,
-                target_market=target_market,
-                department_id=department_id,
-                voice_preset_id=voice_preset_id,
-                aspect_ratio=aspect_ratio,
-                presenter_config=presenter_config,
-                opennews_channel_id=opennews_channel_id,
-                opennews_channel_name=opennews_channel_name,
-                opennews_language_markets=opennews_language_markets,
-            )
-            mark_item(
-                status="submitted",
-                message="已提交到当前任务",
-                task_id=result.get("task_id", ""),
-                reused_existing=bool(result.get("reused_existing")),
-            )
-        except Exception as exc:
-            mark_item(status="failed", message=str(exc), error=str(exc))
-        update_opennews_batch_job(
-            OPENNEWS_BATCH_DIR,
-            job_id,
-            lambda payload, idx=index: payload.update({"message": f"批量生产进度：{idx + 1}/{len(payload.get('items') or [])}"}),
-        )
-    final_job = load_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id) or {}
-    failed = sum(1 for item in final_job.get("items", []) or [] if item.get("status") == "failed")
-    submitted = sum(1 for item in final_job.get("items", []) or [] if item.get("task_id"))
-    set_job_status("done" if failed == 0 else "partial", f"批量生产已提交：{submitted} 条成功，{failed} 条失败。")
 
 
 def _normal_title_key(title: Any) -> str:
@@ -16601,211 +15867,6 @@ async def admin_floorplan_nav_video(job_id: str, request: Request):
     return FileResponse(str(path), media_type="video/mp4")
 
 
-def _admin_avatar_job_snapshot(job: dict) -> dict:
-    return {
-        "job_id": job.get("job_id", ""),
-        "status": job.get("status", "pending"),
-        "message": job.get("message", ""),
-        "error": job.get("error", ""),
-        "avatar_name": job.get("avatar_name", ""),
-        "gender": job.get("gender", ""),
-        "allowed_target_markets": job.get("allowed_target_markets", []),
-        "style_note": job.get("style_note", ""),
-        "reference_url": job.get("reference_url", ""),
-        "candidates": job.get("candidates", []),
-        "created_at": job.get("created_at", 0),
-        "updated_at": job.get("updated_at", 0),
-    }
-
-
-def _admin_avatar_job_manifest_path(job_id: str) -> Path:
-    return OUTPUT_DIR / "admin_avatar_jobs" / job_id / "job.json"
-
-
-def _admin_avatar_persist_job(job: dict) -> None:
-    job_id = str(job.get("job_id", "")).strip()
-    if not job_id:
-        return
-    manifest_path = _admin_avatar_job_manifest_path(job_id)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = dict(job)
-    payload["output_dir"] = str(payload.get("output_dir", ""))
-    payload["reference_path"] = str(payload.get("reference_path", ""))
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
-
-
-def _admin_avatar_latest_job() -> Optional[dict]:
-    with ADMIN_AVATAR_JOBS_LOCK:
-        if not ADMIN_AVATAR_JOBS:
-            pass
-        else:
-            job = max(ADMIN_AVATAR_JOBS.values(), key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0))
-            return dict(job)
-
-    jobs_root = OUTPUT_DIR / "admin_avatar_jobs"
-    if not jobs_root.exists():
-        return None
-    candidates: list[tuple[float, dict]] = []
-    for job_dir in jobs_root.iterdir():
-        if not job_dir.is_dir():
-            continue
-        job_manifest = job_dir / "job.json"
-        if job_manifest.exists():
-            try:
-                payload = json.loads(job_manifest.read_text(encoding="utf-8"))
-                if isinstance(payload, dict) and payload.get("job_id"):
-                    job = dict(payload)
-                    job["output_dir"] = str(job.get("output_dir") or job_dir)
-                    job["candidates"] = [
-                        {
-                            "filename": item.get("filename", ""),
-                            "url": item.get("url") or f"/api/admin/avatar-lab/jobs/{job_dir.name}/download/{Path(item.get('filename', '')).name}",
-                            "prompt": item.get("prompt", ""),
-                        }
-                        for item in (payload.get("candidates") or [])
-                        if Path(item.get("filename", "")).name
-                    ]
-                    candidates.append((float(job.get("updated_at") or job_dir.stat().st_mtime), job))
-                    continue
-            except Exception:
-                pass
-        candidates_dir = job_dir / "candidates"
-        if not candidates_dir.exists():
-            continue
-        files = sorted(
-            [path for path in candidates_dir.iterdir() if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}],
-            key=lambda item: item.name,
-        )
-        if not files:
-            continue
-        updated_at = max([job_dir.stat().st_mtime] + [path.stat().st_mtime for path in files])
-        job_id = job_dir.name
-        job = {
-            "job_id": job_id,
-            "status": "done",
-            "message": "主播候选图已生成",
-            "error": "",
-            "avatar_name": "",
-            "gender": "",
-            "allowed_target_markets": [],
-            "style_note": "",
-            "reference_url": "",
-            "candidates": [
-                {
-                    "filename": path.name,
-                    "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{path.name}",
-                    "prompt": "",
-                }
-                for path in files
-            ],
-            "created_at": job_dir.stat().st_mtime,
-            "updated_at": updated_at,
-        }
-        candidates.append((updated_at, job))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1]
-
-
-def _admin_avatar_job_from_disk(job_id: str) -> Optional[dict]:
-    job_dir = OUTPUT_DIR / "admin_avatar_jobs" / job_id
-    job_manifest = job_dir / "job.json"
-    if job_manifest.exists():
-        try:
-            payload = json.loads(job_manifest.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and payload.get("job_id"):
-                job = dict(payload)
-                job["output_dir"] = str(job.get("output_dir") or job_dir)
-                candidates_dir = job_dir / "candidates"
-                job["candidates"] = [
-                    {
-                        "filename": item.get("filename", ""),
-                        "url": item.get("url") or f"/api/admin/avatar-lab/jobs/{job_id}/download/{Path(item.get('filename', '')).name}",
-                        "prompt": item.get("prompt", ""),
-                    }
-                    for item in (job.get("candidates") or [])
-                    if Path(item.get("filename", "")).name and (candidates_dir / Path(item.get("filename", "")).name).exists()
-                ]
-                if not job["candidates"] and job.get("status") == "done":
-                    return None
-                return job
-        except Exception:
-            pass
-    candidates_dir = job_dir / "candidates"
-    if not candidates_dir.exists():
-        return None
-    files = sorted(
-        [path for path in candidates_dir.iterdir() if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}],
-        key=lambda item: item.name,
-    )
-    if not files:
-        return None
-    updated_at = max([job_dir.stat().st_mtime] + [path.stat().st_mtime for path in files])
-    return {
-        "job_id": job_id,
-        "status": "done",
-        "message": "主播候选图已生成",
-        "error": "",
-        "avatar_name": "",
-        "gender": "",
-        "allowed_target_markets": [],
-        "style_note": "",
-        "reference_url": "",
-        "candidates": [
-            {
-                "filename": path.name,
-                "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{path.name}",
-                "prompt": "",
-            }
-            for path in files
-        ],
-        "created_at": job_dir.stat().st_mtime,
-        "updated_at": updated_at,
-        "output_dir": str(job_dir),
-    }
-
-
-def _admin_avatar_job_set(job: dict, **updates) -> dict:
-    job.update(updates)
-    job["updated_at"] = time.time()
-    with ADMIN_AVATAR_JOBS_LOCK:
-        ADMIN_AVATAR_JOBS[job["job_id"]] = job
-    _admin_avatar_persist_job(job)
-    return job
-
-
-def _admin_avatar_generation_worker(job_id: str) -> None:
-    with ADMIN_AVATAR_JOBS_LOCK:
-        job = ADMIN_AVATAR_JOBS.get(job_id)
-    if not job:
-        return
-    try:
-        _admin_avatar_job_set(job, status="running", message="正在调用 Seedream 生成主播候选图...")
-        candidates_dir = Path(job["output_dir"]) / "candidates"
-        candidates = generate_avatar_candidates(
-            reference_path=job["reference_path"],
-            output_dir=str(candidates_dir),
-            avatar_name=job["avatar_name"],
-            gender=job["gender"],
-            style_note=job.get("style_note", ""),
-            target_markets=job.get("allowed_target_markets", []),
-            count=int(job.get("candidate_count", 3)),
-            size="1440x2560",
-        )
-        normalized = []
-        for item in candidates:
-            normalized.append({
-                "filename": item["filename"],
-                "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{Path(item['path']).name}",
-                "prompt": item.get("prompt", ""),
-            })
-        _admin_avatar_job_set(job, status="done", message="主播候选图已生成", candidates=normalized, error="")
-    except Exception as exc:
-        _admin_avatar_job_set(job, status="error", message="主播图生成失败", error=str(exc))
-
-
 @app.post("/api/admin/avatar-lab/generate")
 async def admin_generate_avatar(request: Request, reference_image: UploadFile = File(...), avatar_name: str = Form("新主播"), gender: str = Form("female"), target_markets: str = Form("cn,tw,jp"), style_note: str = Form(""), candidate_count: int = Form(3)):
     user, error = _require_user(request)
@@ -16814,51 +15875,6 @@ async def admin_generate_avatar(request: Request, reference_image: UploadFile = 
     if not _is_admin(user):
         return _forbidden_error()
     return JSONResponse({"error": "主播图实验室已停用"}, status_code=410)
-    if not reference_image or not reference_image.filename:
-        return JSONResponse({"error": "请上传一张参考人脸图片"}, status_code=400)
-
-    gender = (gender or "female").strip().lower()
-    if gender not in {"female", "male"}:
-        gender = "female"
-    allowed_target_markets = [item.strip() for item in (target_markets or "").split(",") if item.strip()]
-    if gender == "male":
-        allowed_target_markets = [market for market in allowed_target_markets if market == "cn"] or ["cn"]
-    else:
-        allowed_target_markets = [market for market in allowed_target_markets if market in {"cn", "tw", "jp"}] or ["cn", "tw", "jp"]
-
-    job_id = str(uuid.uuid4())[:8]
-    output_dir = OUTPUT_DIR / "admin_avatar_jobs" / job_id
-    upload_dir = output_dir / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    ext = Path(reference_image.filename).suffix or ".jpg"
-    reference_path = upload_dir / f"reference{ext}"
-    with open(reference_path, "wb") as f:
-        f.write(await reference_image.read())
-
-    job = {
-        "job_id": job_id,
-        "status": "pending",
-        "message": "等待开始",
-        "error": "",
-        "avatar_name": avatar_name.strip() or "新主播",
-        "gender": gender,
-        "allowed_target_markets": allowed_target_markets,
-        "style_note": style_note.strip(),
-        "reference_path": str(reference_path),
-        "reference_url": f"/public/tasks/{job_id}/{reference_path.name}",
-        "output_dir": str(output_dir),
-        "candidate_count": max(1, min(int(candidate_count or 3), 6)),
-        "candidates": [],
-        "created_at": time.time(),
-        "updated_at": time.time(),
-        "created_by": user.get("username"),
-    }
-    with ADMIN_AVATAR_JOBS_LOCK:
-        ADMIN_AVATAR_JOBS[job_id] = job
-    _admin_avatar_persist_job(job)
-    thread = threading.Thread(target=_admin_avatar_generation_worker, args=(job_id,), daemon=True)
-    thread.start()
-    return _admin_avatar_job_snapshot(job)
 
 
 @app.get("/api/admin/avatar-lab/jobs/latest")
@@ -16869,10 +15885,6 @@ async def admin_avatar_latest_job_status(request: Request):
     if not _is_admin(user):
         return _forbidden_error()
     return JSONResponse({"error": "主播图实验室已停用"}, status_code=410)
-    job = _admin_avatar_latest_job()
-    if not job:
-        return JSONResponse({"error": "暂无主播图任务"}, status_code=404)
-    return _admin_avatar_job_snapshot(job)
 
 
 @app.get("/api/admin/avatar-lab/jobs/{job_id}")
@@ -16883,11 +15895,6 @@ async def admin_avatar_job_status(job_id: str, request: Request):
     if not _is_admin(user):
         return _forbidden_error()
     return JSONResponse({"error": "主播图实验室已停用"}, status_code=410)
-    with ADMIN_AVATAR_JOBS_LOCK:
-        job = ADMIN_AVATAR_JOBS.get(job_id)
-    if not job:
-        return JSONResponse({"error": "任务不存在"}, status_code=404)
-    return _admin_avatar_job_snapshot(job)
 
 
 @app.get("/api/admin/avatar-lab/jobs/{job_id}/download/{file_path:path}")
@@ -16898,17 +15905,6 @@ async def admin_avatar_job_download(job_id: str, file_path: str, request: Reques
     if not _is_admin(user):
         return _forbidden_error()
     return JSONResponse({"error": "主播图实验室已停用"}, status_code=410)
-    with ADMIN_AVATAR_JOBS_LOCK:
-        job = ADMIN_AVATAR_JOBS.get(job_id)
-    if not job:
-        job = _admin_avatar_job_from_disk(job_id)
-    if not job:
-        return JSONResponse({"error": "任务不存在"}, status_code=404)
-    output_dir = Path(job.get("output_dir", ""))
-    full_path = (output_dir / "candidates" / file_path).resolve()
-    if not output_dir or not str(full_path).startswith(str(output_dir.resolve())) or not full_path.exists():
-        return JSONResponse({"error": "文件不存在"}, status_code=404)
-    return FileResponse(str(full_path))
 
 
 @app.post("/api/admin/avatar-lab/jobs/{job_id}/import")
@@ -16919,84 +15915,6 @@ async def admin_avatar_job_import(job_id: str, request: Request, filename: str =
     if not _is_admin(user):
         return _forbidden_error()
     return JSONResponse({"error": "主播图实验室已停用"}, status_code=410)
-    with ADMIN_AVATAR_JOBS_LOCK:
-        job = ADMIN_AVATAR_JOBS.get(job_id)
-    if not job:
-        job = _admin_avatar_job_from_disk(job_id)
-    if not job:
-        return JSONResponse({"error": "任务不存在"}, status_code=404)
-    if job.get("status") != "done":
-        return JSONResponse({"error": "主播图还未生成完成"}, status_code=400)
-
-    candidate = next((item for item in job.get("candidates", []) if item.get("filename") == filename), None)
-    if not candidate:
-        return JSONResponse({"error": "候选图片不存在"}, status_code=404)
-
-    source_path = Path(job["output_dir"]) / "candidates" / filename
-    if not source_path.exists():
-        return JSONResponse({"error": "候选图片文件不存在"}, status_code=404)
-
-    final_name = _build_generated_avatar_filename(display_name or job.get("avatar_name", "新主播"), gender or job.get("gender", "female"), index=1)
-    final_name = f"{Path(final_name).stem}_{job_id[:4]}{Path(final_name).suffix}"
-    final_path = ASSETS_DIR / final_name
-    shutil.copy2(source_path, final_path)
-
-    gender = (gender or job.get("gender") or "female").strip().lower()
-    if gender not in {"female", "male"}:
-        gender = "female"
-    selected_markets = ["cn", "tw", "jp"]
-
-    metadata = _register_avatar_library_file(
-        final_name,
-        {
-            "name": display_name.strip() or job.get("avatar_name") or Path(final_name).stem,
-            "gender": gender,
-            "allowed_target_markets": selected_markets,
-            "preferred_voice_by_market": _default_preferred_voices_for_gender(gender, selected_markets),
-            "style_prompt": style_note.strip() or AVATAR_STYLE_PROMPTS[0],
-            "source": "admin_generated",
-        },
-    )
-
-    try:
-        source_path.unlink()
-    except Exception:
-        pass
-
-    remaining_candidates = []
-    for item in job.get("candidates", []):
-        if item.get("filename") == filename:
-            continue
-        item_name = Path(item.get("filename", "")).name
-        if item_name and (Path(job["output_dir"]) / "candidates" / item_name).exists():
-            remaining_candidates.append(
-                {
-                    "filename": item_name,
-                    "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{item_name}",
-                    "prompt": item.get("prompt", ""),
-                }
-            )
-    with ADMIN_AVATAR_JOBS_LOCK:
-        if job_id in ADMIN_AVATAR_JOBS:
-            ADMIN_AVATAR_JOBS[job_id]["candidates"] = remaining_candidates
-            ADMIN_AVATAR_JOBS[job_id]["message"] = "主播候选图已保存到主播库"
-            ADMIN_AVATAR_JOBS[job_id]["updated_at"] = time.time()
-
-    return {
-        "ok": True,
-        "avatar": {
-            "id": final_name,
-            "name": metadata.get("name"),
-            "filename": final_name,
-            "image_url": f"/public/assets/{final_name}",
-            "gender": metadata.get("gender"),
-            "allowed_target_markets": metadata.get("allowed_target_markets"),
-            "preferred_voice_by_market": metadata.get("preferred_voice_by_market"),
-            "style_prompt": metadata.get("style_prompt"),
-            "source": metadata.get("source"),
-        },
-        "candidates": remaining_candidates,
-    }
 
 
 @app.delete("/api/admin/avatar-lab/jobs/{job_id}/candidates/{filename}")
@@ -17007,58 +15925,6 @@ async def admin_avatar_job_delete_candidate(job_id: str, filename: str, request:
     if not _is_admin(user):
         return _forbidden_error()
     return JSONResponse({"error": "主播图实验室已停用"}, status_code=410)
-
-    safe_filename = Path(filename).name
-    with ADMIN_AVATAR_JOBS_LOCK:
-        job = ADMIN_AVATAR_JOBS.get(job_id)
-    if not job:
-        job = _admin_avatar_job_from_disk(job_id)
-    if not job:
-        return JSONResponse({"error": "任务不存在"}, status_code=404)
-
-    output_dir = Path(job.get("output_dir", ""))
-    candidates_dir = output_dir / "candidates"
-    candidate_path = (candidates_dir / safe_filename).resolve()
-    if not output_dir or not str(candidate_path).startswith(str(candidates_dir.resolve())) or not candidate_path.exists():
-        return JSONResponse({"error": "候选图片不存在"}, status_code=404)
-
-    try:
-        candidate_path.unlink()
-    except Exception as exc:
-        return JSONResponse({"error": f"删除候选图片失败：{exc}"}, status_code=500)
-
-    remaining_candidates = []
-    for item in job.get("candidates", []):
-        if item.get("filename") == safe_filename:
-            continue
-        item_name = Path(item.get("filename", "")).name
-        if item_name and (candidates_dir / item_name).exists():
-            remaining_candidates.append(
-                {
-                    "filename": item_name,
-                    "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{item_name}",
-                    "prompt": item.get("prompt", ""),
-                }
-            )
-
-    if not remaining_candidates:
-        remaining_candidates = [
-            {
-                "filename": path.name,
-                "url": f"/api/admin/avatar-lab/jobs/{job_id}/download/{path.name}",
-                "prompt": "",
-            }
-            for path in sorted(candidates_dir.iterdir(), key=lambda item: item.name)
-            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-        ]
-
-    with ADMIN_AVATAR_JOBS_LOCK:
-        if job_id in ADMIN_AVATAR_JOBS:
-            ADMIN_AVATAR_JOBS[job_id]["candidates"] = remaining_candidates
-            ADMIN_AVATAR_JOBS[job_id]["message"] = "主播候选图已更新"
-            ADMIN_AVATAR_JOBS[job_id]["updated_at"] = time.time()
-
-    return {"ok": True, "candidates": remaining_candidates}
 
 
 @app.api_route("/public/assets/{file_path:path}", methods=["GET", "HEAD"])
@@ -18594,7 +17460,6 @@ async def task_result(task_id: str, request: Request):
     return _serialize_result_for_ui(task.get("output_dir"), task["result"], task.get("topic", ""))
 
 
-
 @app.post("/api/tasks/{task_id}/segments/{segment_index}/regenerate-digital-human")
 async def regenerate_digital_human_segment(task_id: str, segment_index: int, request: Request):
     user, error = _require_user(request)
@@ -19126,7 +17991,6 @@ async def compose_history_video_endpoint(history_id: str, request: Request):
     if access_error:
         return access_error
 
-    workflow_config = result.get("workflow_config") or {}
     try:
         payload = await request.json()
     except Exception:

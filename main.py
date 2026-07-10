@@ -11,7 +11,6 @@ import os
 import sys
 import json
 import time
-from pathlib import Path
 from dotenv import load_dotenv
 
 from generate_script import generate_script
@@ -181,15 +180,15 @@ def _print_summary(script_data: dict, final_segments: list, output_dir: str):
     print(f"  总时长：{script_data.get('total_duration', 0)}秒")
     print(f"  数字人段落：{dh_done}/{dh_count} 个")
     print(f"  素材段落：{mat_done}/{mat_count} 个已下载素材")
-    print(f"\n  输出目录结构：")
+    print("\n  输出目录结构：")
     print(f"  {output_dir}/")
-    print(f"  ├── script_readable.txt   ← 完整文案+时间轴")
-    print(f"  ├── social_posts.txt      ← 小红书+FB文案")
-    print(f"  ├── script.json           ← 原始数据")
-    print(f"  ├── audio/                ← 所有配音音频")
-    print(f"  ├── digital_human/        ← 数字人视频片段")
-    print(f"  └── materials/            ← 素材图片")
-    print(f"\n  👉 将 digital_human/ 和 materials/ 导入剪映剪辑即可")
+    print("  ├── script_readable.txt   ← 完整文案+时间轴")
+    print("  ├── social_posts.txt      ← 小红书+FB文案")
+    print("  ├── script.json           ← 原始数据")
+    print("  ├── audio/                ← 所有配音音频")
+    print("  ├── digital_human/        ← 数字人视频片段")
+    print("  └── materials/            ← 素材图片")
+    print("\n  👉 将 digital_human/ 和 materials/ 导入剪映剪辑即可")
 
 
 if __name__ == "__main__":

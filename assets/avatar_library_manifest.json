@@ -1,38 +1,4 @@
 {
-  "avatar_custom_silver_female_restored.png": {
-    "name": "银发女主播",
-    "gender": "female",
-    "allowed_target_markets": [
-      "cn",
-      "tw",
-      "jp"
-    ],
-    "preferred_voice_by_market": {
-      "cn": "mandarin_female",
-      "tw": "taiwan_clone",
-      "jp": "japanese_female"
-    },
-    "style_prompt": "professional vertical talking-head presenter, natural facial expression, subtle head movement, clear lip-sync, studio lighting",
-    "created_at": 1783065600,
-    "source": "restored_from_admin_avatar_reference"
-  },
-  "avatar_custom_android_female_restored.png": {
-    "name": "机械女主播",
-    "gender": "female",
-    "allowed_target_markets": [
-      "cn",
-      "tw",
-      "jp"
-    ],
-    "preferred_voice_by_market": {
-      "cn": "mandarin_female",
-      "tw": "taiwan_clone",
-      "jp": "japanese_female"
-    },
-    "style_prompt": "professional vertical talking-head presenter, natural facial expression, subtle head movement, clear lip-sync, studio lighting",
-    "created_at": 1783065600,
-    "source": "restored_from_admin_avatar_reference"
-  },
   "avatar_recovered_gray_suit_male_04.png": {
     "name": "灰西装男主播",
     "gender": "male",

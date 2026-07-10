@@ -5,8 +5,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
-from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from xml.etree import ElementTree as ET
 
 import requests
