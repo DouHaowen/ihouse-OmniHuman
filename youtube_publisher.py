@@ -13,6 +13,7 @@ load_dotenv(override=False)
 YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+YOUTUBE_PLAYLIST_ITEMS_URL = "https://www.googleapis.com/youtube/v3/playlistItems"
 YOUTUBE_UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 YOUTUBE_THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube"
@@ -207,6 +208,78 @@ def get_youtube_video_metrics(token_store_path: Path, video_id: str) -> dict[str
         "favorite_count": int(statistics.get("favoriteCount") or 0),
         "raw": item,
     }
+
+
+def find_recent_youtube_upload(
+    token_store_path: Path,
+    *,
+    title: str = "",
+    source_url: str = "",
+    max_results: int = 50,
+) -> dict[str, Any]:
+    """Find an existing upload by its source URL, falling back to an exact title match."""
+    access_token = refresh_youtube_access_token(token_store_path)
+    headers = {"Authorization": f"Bearer {access_token}"}
+    channel_response = requests.get(
+        YOUTUBE_CHANNELS_URL,
+        params={"part": "contentDetails", "mine": "true"},
+        headers=headers,
+        timeout=30,
+    )
+    if channel_response.status_code >= 400:
+        raise YouTubePublishError(
+            f"核对 YouTube 最近视频失败：{channel_response.status_code} {channel_response.text[:500]}"
+        )
+    channel_items = channel_response.json().get("items") or []
+    if not channel_items:
+        raise YouTubePublishError("核对 YouTube 最近视频失败：当前授权账号没有可用频道")
+    uploads_playlist = (
+        ((channel_items[0].get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads") or ""
+    )
+    if not uploads_playlist:
+        raise YouTubePublishError("核对 YouTube 最近视频失败：频道缺少 uploads 播放列表")
+
+    playlist_response = requests.get(
+        YOUTUBE_PLAYLIST_ITEMS_URL,
+        params={
+            "part": "snippet",
+            "playlistId": uploads_playlist,
+            "maxResults": min(50, max(1, int(max_results or 50))),
+        },
+        headers=headers,
+        timeout=30,
+    )
+    if playlist_response.status_code >= 400:
+        raise YouTubePublishError(
+            f"核对 YouTube 最近视频失败：{playlist_response.status_code} {playlist_response.text[:500]}"
+        )
+
+    source_url = str(source_url or "").strip().lower()
+    normalized_title = " ".join(str(title or "").strip().lower().split())
+    for item in playlist_response.json().get("items") or []:
+        snippet = item.get("snippet") if isinstance(item, dict) else {}
+        snippet = snippet if isinstance(snippet, dict) else {}
+        candidate_title = str(snippet.get("title") or "").strip()
+        candidate_description = str(snippet.get("description") or "")
+        if source_url:
+            matched = source_url in candidate_description.lower()
+        else:
+            matched = bool(normalized_title) and " ".join(candidate_title.lower().split()) == normalized_title
+        if not matched:
+            continue
+        video_id = str(((snippet.get("resourceId") or {}).get("videoId") or "")).strip()
+        if not video_id:
+            continue
+        return {
+            "video_id": video_id,
+            "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+            "title": candidate_title,
+            "description": candidate_description,
+            "published_at": str(snippet.get("publishedAt") or ""),
+            "channel_id": str(snippet.get("channelId") or ""),
+            "raw": item,
+        }
+    return {}
 
 
 def _clean_tags(tags: Any) -> list[str]:

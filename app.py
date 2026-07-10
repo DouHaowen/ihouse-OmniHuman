@@ -143,6 +143,7 @@ from youtube_publisher import (
     YOUTUBE_SCOPE,
     YouTubePublishError,
     exchange_youtube_code_for_tokens,
+    find_recent_youtube_upload,
     get_youtube_channel,
     get_youtube_video_metrics,
     save_youtube_oauth_app_config,
@@ -218,8 +219,12 @@ X_UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
 X_UPLOAD_LOCK = threading.Lock()
 FACEBOOK_UPLOAD_JOBS: dict[str, dict[str, Any]] = {}
 FACEBOOK_UPLOAD_LOCK = threading.Lock()
+FACEBOOK_PUBLISH_STATE_LOCK = threading.RLock()
+FACEBOOK_PUBLISH_SERIAL_LOCK = threading.Lock()
 OPENNEWS_BATCH_AUTO_PRODUCE_LOCK = threading.Lock()
 OPENNEWS_CHANNEL_CONFIG_LOCK = threading.Lock()
+RESULT_FILE_WRITE_LOCK = threading.RLock()
+OPENNEWS_YOUTUBE_PUBLISH_LEDGER_LOCK = threading.RLock()
 ASSETS_DIR = BASE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
 AVATAR_LIBRARY_MANIFEST_PATH = ASSETS_DIR / "avatar_library_manifest.json"
@@ -302,6 +307,7 @@ OPENNEWS_COLLECTION_DIR = OUTPUT_DIR / "opennews_collections"
 YOUTUBE_AUTH_DIR = OUTPUT_DIR / "youtube_auth"
 YOUTUBE_TOKEN_STORE_PATH = YOUTUBE_AUTH_DIR / "youtube_token.json"
 YOUTUBE_THUMBNAIL_RETRY_DIR = OUTPUT_DIR / "youtube_thumbnail_retries"
+OPENNEWS_YOUTUBE_PUBLISH_LEDGER_DIR = OUTPUT_DIR / "opennews_youtube_publish_ledger"
 YOUTUBE_THUMBNAIL_COOLDOWN_PATH = YOUTUBE_AUTH_DIR / "thumbnail_cooldown.json"
 X_AUTH_DIR = OUTPUT_DIR / "x_auth"
 X_TOKEN_STORE_PATH = X_AUTH_DIR / "x_token.json"
@@ -315,6 +321,7 @@ OPENNEWS_BATCH_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_COLLECTION_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_THUMBNAIL_RETRY_DIR.mkdir(parents=True, exist_ok=True)
+OPENNEWS_YOUTUBE_PUBLISH_LEDGER_DIR.mkdir(parents=True, exist_ok=True)
 X_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 FACEBOOK_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 COMPOSE_READY_RECOVERY_STARTED = False
@@ -423,30 +430,38 @@ def _facebook_min_post_interval_seconds() -> int:
         return 1800
 
 
-def _facebook_frequency_cooldown_seconds() -> int:
+def _facebook_frequency_cooldown_seconds(block_count: int = 1) -> int:
     try:
-        return max(600, int(os.getenv("OPENNEWS_FACEBOOK_FREQUENCY_COOLDOWN_SECONDS", "7200") or "7200"))
+        base = max(3600, int(os.getenv("OPENNEWS_FACEBOOK_FREQUENCY_COOLDOWN_SECONDS", "86400") or "86400"))
+        maximum = max(base, int(os.getenv("OPENNEWS_FACEBOOK_FREQUENCY_MAX_COOLDOWN_SECONDS", "259200") or "259200"))
+        return min(maximum, base * (2 ** max(0, int(block_count or 1) - 1)))
     except Exception:
-        return 7200
+        return 86400
 
 
 def _load_facebook_publish_state() -> dict:
-    try:
-        if FACEBOOK_PUBLISH_STATE_PATH.exists():
-            data = json.loads(FACEBOOK_PUBLISH_STATE_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
+    with FACEBOOK_PUBLISH_STATE_LOCK:
+        try:
+            if FACEBOOK_PUBLISH_STATE_PATH.exists():
+                data = json.loads(FACEBOOK_PUBLISH_STATE_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
     return {}
 
 
 def _save_facebook_publish_state(state: dict) -> None:
-    try:
-        FACEBOOK_PUBLISH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        FACEBOOK_PUBLISH_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        print(f"[facebook throttle] 写入发帖状态失败: {exc}", flush=True)
+    with FACEBOOK_PUBLISH_STATE_LOCK:
+        try:
+            FACEBOOK_PUBLISH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = FACEBOOK_PUBLISH_STATE_PATH.with_name(
+                f".{FACEBOOK_PUBLISH_STATE_PATH.name}.{threading.get_ident()}.tmp"
+            )
+            tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(FACEBOOK_PUBLISH_STATE_PATH)
+        except Exception as exc:
+            print(f"[facebook throttle] 写入发帖状态失败: {exc}", flush=True)
 
 
 def _is_facebook_frequency_block(error_text: str) -> bool:
@@ -487,21 +502,41 @@ def _facebook_page_state_bucket(state: dict, page_id: str) -> dict:
 
 
 def _facebook_publish_cooldown_remaining(page_id: str = "") -> float:
-    state = _load_facebook_publish_state()
-    bucket = _facebook_page_state_bucket(state, page_id)
-    until = float(bucket.get("cooldown_until") or 0)
-    return max(0.0, until - time.time())
+    with FACEBOOK_PUBLISH_STATE_LOCK:
+        state = _load_facebook_publish_state()
+        bucket = _facebook_page_state_bucket(state, page_id)
+        until = float(bucket.get("cooldown_until") or 0)
+        cooldown_set_at = float(bucket.get("cooldown_set_at") or 0)
+        cooldown_reason = str(bucket.get("cooldown_reason") or "")
+        # 旧版本只冷却 2 小时。首次读取时把仍有效的 368 状态迁移到新的安全窗口，
+        # 避免部署后立刻再次撞 Meta 限制。
+        if (
+            cooldown_set_at
+            and not bucket.get("frequency_block_count")
+            and _is_facebook_frequency_block(cooldown_reason)
+        ):
+            migrated_until = max(until, cooldown_set_at + _facebook_frequency_cooldown_seconds(1))
+            if migrated_until > until:
+                until = migrated_until
+                bucket["cooldown_until"] = until
+                bucket["frequency_block_count"] = 1
+                bucket["cooldown_migrated_at"] = time.time()
+                _save_facebook_publish_state(state)
+        return max(0.0, until - time.time())
 
 
 def _trigger_facebook_publish_cooldown(reason: str = "", page_id: str = "") -> float:
-    cooldown = _facebook_frequency_cooldown_seconds()
-    until = time.time() + cooldown
-    state = _load_facebook_publish_state()
-    bucket = _facebook_page_state_bucket(state, page_id)
-    bucket["cooldown_until"] = until
-    bucket["cooldown_reason"] = str(reason or "")[:300]
-    bucket["cooldown_set_at"] = time.time()
-    _save_facebook_publish_state(state)
+    with FACEBOOK_PUBLISH_STATE_LOCK:
+        state = _load_facebook_publish_state()
+        bucket = _facebook_page_state_bucket(state, page_id)
+        block_count = max(0, int(bucket.get("frequency_block_count") or 0)) + 1
+        cooldown = _facebook_frequency_cooldown_seconds(block_count)
+        until = time.time() + cooldown
+        bucket["frequency_block_count"] = block_count
+        bucket["cooldown_until"] = until
+        bucket["cooldown_reason"] = str(reason or "")[:300]
+        bucket["cooldown_set_at"] = time.time()
+        _save_facebook_publish_state(state)
     print(f"[facebook throttle] Page={page_id or 'default'} 触发 368 冷却，暂停 {int(cooldown/60)} 分钟", flush=True)
     return until
 
@@ -510,20 +545,42 @@ def _facebook_publish_throttle_remaining(page_id: str = "") -> float:
     interval = _facebook_min_post_interval_seconds()
     if interval <= 0:
         return 0.0
-    state = _load_facebook_publish_state()
-    bucket = _facebook_page_state_bucket(state, page_id)
-    last = float(bucket.get("last_post_at") or 0)
-    return max(0.0, (last + interval) - time.time())
+    with FACEBOOK_PUBLISH_STATE_LOCK:
+        state = _load_facebook_publish_state()
+        bucket = _facebook_page_state_bucket(state, page_id)
+        last = float(bucket.get("last_post_at") or 0)
+        return max(0.0, (last + interval) - time.time())
 
 
 def _record_facebook_publish_success(page_id: str = "") -> None:
-    state = _load_facebook_publish_state()
-    bucket = _facebook_page_state_bucket(state, page_id)
-    bucket["last_post_at"] = time.time()
-    # 发成功即清掉该 Page 的冷却(说明已解封)。
-    bucket.pop("cooldown_until", None)
-    bucket.pop("cooldown_reason", None)
-    _save_facebook_publish_state(state)
+    with FACEBOOK_PUBLISH_STATE_LOCK:
+        state = _load_facebook_publish_state()
+        bucket = _facebook_page_state_bucket(state, page_id)
+        bucket["last_post_at"] = time.time()
+        bucket["frequency_block_count"] = 0
+        # 发成功即清掉该 Page 的冷却(说明已解封)。
+        bucket.pop("cooldown_until", None)
+        bucket.pop("cooldown_reason", None)
+        _save_facebook_publish_state(state)
+
+
+def _mark_facebook_publish_pending(result: dict, *, retry_at: float, reason: str) -> None:
+    result["facebook_publish_pending_at"] = max(time.time() + 30, float(retry_at or 0))
+    result["facebook_publish_pending_reason"] = str(reason or "Facebook 发布等待重试")[:300]
+
+
+def _clear_facebook_publish_pending(result: dict) -> None:
+    result.pop("facebook_publish_pending_at", None)
+    result.pop("facebook_publish_pending_reason", None)
+    result.pop("facebook_publish_throttled", None)
+
+
+def _facebook_publish_pending_due(result: dict, now_ts: Optional[float] = None) -> bool:
+    try:
+        retry_at = float((result or {}).get("facebook_publish_pending_at") or 0)
+    except Exception:
+        return False
+    return bool(retry_at and retry_at <= float(now_ts if now_ts is not None else time.time()))
 
 
 def _opennews_material_review_blocks_publish() -> bool:
@@ -1304,22 +1361,27 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
             dir_ts = float(str(output_dir.name).split("_", 1)[0])
         except Exception:
             dir_ts = now_ts
-        if now_ts - dir_ts > recovery_max_age:
-            continue
+        history_too_old = (now_ts - dir_ts) > recovery_max_age
         result_path = output_dir / "result.json"
         try:
-            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result = _load_result_from_output_dir(output_dir)
             if not isinstance(result, dict):
                 continue
         except Exception as exc:
             print(f"[compose-ready recovery] read error dir={output_dir.name} err={exc!r}", flush=True)
             continue
+        if history_too_old and not result.get("facebook_publish_pending_at"):
+            continue
+        # 外部自动批次仍由主线程负责合成/发布时，恢复线程不得抢跑。
+        if _opennews_external_produce_active(output_dir):
+            continue
+        facebook_retry_due = _facebook_publish_pending_due(result, now_ts)
         # 已发布过的 OpenNews 成片视为完成：不再重合成或补发，避免重合成丢记录后又重新上传同一条。
         if _history_is_opennews_result(result) and (
             result.get("youtube_publish_records")
             or result.get("facebook_publish_records")
             or result.get("x_publish_records")
-        ):
+        ) and not facebook_retry_due:
             continue
         lifecycle = _build_history_lifecycle(output_dir, result)
         if lifecycle.get("live_task_id"):
@@ -1335,8 +1397,8 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
                 except Exception:
                     recently_touched = False
                 if (
-                    not recently_touched
-                    and output_dir.name not in _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED
+                    (facebook_retry_due or not recently_touched)
+                    and (facebook_retry_due or output_dir.name not in _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED)
                     and _history_is_opennews_result(result)
                     and _opennews_result_has_publishable_video(output_dir, result)
                 ):
@@ -1344,19 +1406,24 @@ def _recover_ready_compose_histories_once(max_items: int = COMPOSE_READY_RECOVER
                         result.get("x_publish_records")
                         or result.get("facebook_publish_records")
                         or result.get("youtube_publish_records")
-                    )
+                    ) and not facebook_retry_due
                     # 只把“真实失败”的错误当作阻断；“成片未就绪”这类临时错误现在成片已存在，应放行补发。
                     already_errored = any(
                         v and not _is_stale_publish_error(v)
-                        for v in (
-                            result.get("x_auto_publish_error"),
-                            result.get("facebook_auto_publish_error"),
-                            result.get("youtube_auto_publish_error"),
+                        for key, v in (
+                            ("x", result.get("x_auto_publish_error")),
+                            ("facebook", result.get("facebook_auto_publish_error")),
+                            ("youtube", result.get("youtube_auto_publish_error")),
                         )
+                        if not (facebook_retry_due and key == "facebook")
                     )
+                    if not facebook_retry_due and _opennews_youtube_publish_claim_active(result, now_ts=now_ts):
+                        continue
                     if not already_published and not already_errored:
-                        _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED.add(output_dir.name)
-                        print(f"[publish-ready recovery] auto-publish dir={output_dir.name}", flush=True)
+                        if not facebook_retry_due:
+                            _OPENNEWS_PUBLISH_RECOVERY_ATTEMPTED.add(output_dir.name)
+                        reason = "facebook-retry" if facebook_retry_due else "unpublished"
+                        print(f"[publish-ready recovery] auto-publish dir={output_dir.name} reason={reason}", flush=True)
                         _schedule_opennews_post_compose_publish("", str(output_dir), result)
                         recovered += 1
             except Exception as pub_exc:
@@ -2889,9 +2956,12 @@ def _build_history_lifecycle(output_dir: Optional[Path], result: Optional[dict])
             stage_key = "audio"
         else:
             stage_key = "script"
-    elif materials_ready:
+    elif materials_ready and digital_human_ready:
         status = "ready_compose"
         stage_key = "compose"
+    elif audio_ready and not digital_human_ready:
+        status = "interrupted"
+        stage_key = "digital_human"
     elif digital_human_ready:
         status = "interrupted"
         stage_key = "materials"
@@ -2908,8 +2978,8 @@ def _build_history_lifecycle(output_dir: Optional[Path], result: Optional[dict])
     return {
         "status": status,
         "stage_key": stage_key,
-        "can_resume_production": bool(has_script and not materials_ready and not compose_ready),
-        "can_compose": bool(materials_ready and not compose_ready),
+        "can_resume_production": bool(has_script and not (materials_ready and digital_human_ready) and not compose_ready),
+        "can_compose": bool(materials_ready and digital_human_ready and not compose_ready),
         "live_task_id": "",
         "error_message": error_message,
     }
@@ -2927,10 +2997,7 @@ def _history_is_opennews_result(result: Optional[dict]) -> bool:
 
 
 def _write_history_result(output_dir: Path, result: dict) -> None:
-    (output_dir / "result.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
+    _save_result_to_output_dir(output_dir, result)
 
 
 def _compose_history_result(
@@ -3131,9 +3198,30 @@ def run_pipeline_with_progress(
         tts_speed = float(voice_preset.get("selected_speed", voice_preset.get("default_speed", 1.1)))
         tts_volume = float(voice_preset.get("selected_volume", voice_preset.get("default_volume", 1.0)))
         avatar_prompt = avatar_option.get("style_prompt", "") if avatar_option else ""
+        opennews_persistence_config = {
+            "opennews_channel_id": workflow_config.get("opennews_channel_id") or "",
+            "opennews_channel_name": workflow_config.get("opennews_channel_name") or "",
+            "opennews_language_markets": workflow_config.get("opennews_language_markets"),
+            "opennews_presenter": workflow_config.get("opennews_presenter") or {},
+            "material_strategy": workflow_config.get("material_strategy") or "",
+            "batch_job_id": workflow_config.get("batch_job_id") or "",
+            "external_produce_managed": bool(workflow_config.get("external_produce_managed")),
+            "x_auto_publish": _parse_bool_form(workflow_config.get("x_auto_publish")) if "x_auto_publish" in workflow_config else _opennews_x_auto_publish_default(),
+            "facebook_auto_publish": _parse_bool_form(workflow_config.get("facebook_auto_publish")) if "facebook_auto_publish" in workflow_config else _opennews_facebook_auto_publish_default(),
+            "youtube_auto_publish": _parse_bool_form(workflow_config.get("youtube_auto_publish")) if "youtube_auto_publish" in workflow_config else _opennews_youtube_auto_publish_default(),
+            "x_aspects": workflow_config.get("x_aspects") or ["vertical"],
+            "facebook_aspects": workflow_config.get("facebook_aspects") or ["vertical"],
+            "youtube_aspects": workflow_config.get("youtube_aspects") or ["vertical"],
+        }
 
         output_dir = _create_output_dir("full", topic)
         task["output_dir"] = output_dir
+        if opennews_persistence_config.get("external_produce_managed"):
+            _mark_opennews_external_produce_active(
+                Path(output_dir),
+                task_id=task_id,
+                batch_job_id=str(opennews_persistence_config.get("batch_job_id") or ""),
+            )
 
         image_url = None
         if image_path and os.path.exists(image_path):
@@ -3196,6 +3284,7 @@ def run_pipeline_with_progress(
                 "allow_local_digital_human": bool(workflow_config.get("allow_local_digital_human")),
                 "digital_human_engine": digital_human_engine,
                 "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
+                **opennews_persistence_config,
             },
             "image_path": image_path,
             "image_url": image_url or "",
@@ -3297,6 +3386,7 @@ def run_pipeline_with_progress(
                 "allow_local_digital_human": bool(workflow_config.get("allow_local_digital_human")),
                 "digital_human_engine": digital_human_engine,
                 "digital_human_engine_name": _digital_human_engine_label(digital_human_engine),
+                **opennews_persistence_config,
             },
             "image_path": image_path,
             "image_url": image_url,
@@ -3432,6 +3522,7 @@ def run_pipeline_with_progress(
                 "opennews_presenter": workflow_config.get("opennews_presenter") or {},
                 "material_strategy": workflow_config.get("material_strategy") or "",
                 "batch_job_id": workflow_config.get("batch_job_id") or "",
+                **opennews_persistence_config,
             },
             "cost_entries": task.get("cost_entries", []),
             "cost_summary": task.get("cost_summary", _empty_cost_summary()),
@@ -3494,8 +3585,8 @@ def run_pipeline_with_progress(
             result_data.get("workflow_config", {}).get("opennews")
             or result_data.get("workflow_config", {}).get("opennews_material_only")
             or result_data.get("workflow_config", {}).get("digital_human_engine") == "opennews_material_only"
-        ):
-            tracker.log("OpenNews 成片已保存，正在后台自动发布到 X / Facebook...")
+        ) and not result_data.get("workflow_config", {}).get("external_produce_managed"):
+            tracker.log("OpenNews 成片已保存，正在后台自动发布到 X / Facebook / YouTube...")
             _schedule_opennews_post_compose_publish(task_id, output_dir, result_data)
     except TaskCancelled as exc:
         tracker.cancel(str(exc) or "任务已停止")
@@ -6470,19 +6561,231 @@ def _resolve_history_output_dir(history_id: str) -> Optional[Path]:
     return None
 
 
+def _restore_result_generated_segment_paths(output_dir: Path, result: dict) -> bool:
+    """用输出目录里的确定性文件名补回被旧检查点覆盖的分段产物路径。"""
+    changed = False
+    workflow_config = result.get("workflow_config") if isinstance(result.get("workflow_config"), dict) else {}
+    digital_human_engine = str(workflow_config.get("digital_human_engine") or "")
+    segments = result.get("segments") if isinstance(result.get("segments"), list) else []
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            continue
+        audio_path = str(segment.get("audio_path") or "").strip()
+        if not audio_path or not Path(audio_path).exists():
+            audio_candidates = sorted((Path(output_dir) / "audio").glob(f"segment_{index:02d}_*.mp3"))
+            if audio_candidates:
+                segment["audio_path"] = str(audio_candidates[0])
+                changed = True
+        if str(segment.get("type") or "") != "digital_human":
+            continue
+        video_path = str(segment.get("video_path") or "").strip()
+        candidate = Path(output_dir) / "digital_human" / f"dh_{index:02d}.mp4"
+        if (not video_path or not Path(video_path).exists()) and candidate.exists() and candidate.stat().st_size > 0:
+            segment["video_path"] = str(candidate)
+            if digital_human_engine:
+                segment["digital_human_engine"] = digital_human_engine
+            changed = True
+    return changed
+
+
+def _opennews_batch_publish_state_for_history(history_id: str, *, limit: int = 200) -> dict:
+    """Recover platform receipts that survived in a batch job after result.json was overwritten."""
+    history_id = str(history_id or "").strip()
+    jobs_dir = OPENNEWS_BATCH_DIR / "batch_jobs"
+    if not history_id or not jobs_dir.exists():
+        return {}
+    recovered: dict[str, Any] = {}
+    try:
+        job_paths = sorted(
+            jobs_dir.glob("opennews_batch_*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[: max(20, int(limit or 200))]
+    except Exception:
+        return {}
+    for job_path in job_paths:
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for item in (job.get("items") or []) if isinstance(job, dict) else []:
+            if not isinstance(item, dict) or str(item.get("history_id") or "").strip() != history_id:
+                continue
+            for records_key, batch_records_key in (
+                ("youtube_publish_records", "youtube_records"),
+                ("facebook_publish_records", "facebook_records"),
+                ("x_publish_records", "x_records"),
+            ):
+                records = item.get(records_key) or item.get(batch_records_key)
+                if isinstance(records, list) and records:
+                    recovered.setdefault(records_key, []).extend(copy.deepcopy(records))
+            if recovered:
+                recovered["publish_receipts_recovered_from_batch_job"] = job_path.stem
+    return recovered
+
+
 def _load_result_from_output_dir(output_dir: Path) -> Optional[dict]:
     result_path = Path(output_dir) / "result.json"
     if not result_path.exists():
         return None
     try:
-        result = json.loads(result_path.read_text(encoding="utf-8"))
+        with RESULT_FILE_WRITE_LOCK:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
     except Exception:
         return None
+    batch_publish_state = _opennews_batch_publish_state_for_history(Path(output_dir).name)
+    if batch_publish_state:
+        result = _merge_result_for_persistence(result, batch_publish_state)
+    _restore_result_generated_segment_paths(Path(output_dir), result)
     if not isinstance(result.get("cost_entries"), list):
         result["cost_entries"] = []
     if not result.get("cost_summary"):
         result["cost_summary"] = _summarize_cost_entries(result["cost_entries"])
     return result
+
+
+_RESULT_PLATFORM_RECORD_KEYS = (
+    "youtube_publish_records",
+    "facebook_publish_records",
+    "x_publish_records",
+)
+_RESULT_WORKFLOW_IDENTITY_KEYS = (
+    "source",
+    "opennews_channel_id",
+    "opennews_channel_name",
+    "opennews_language_markets",
+    "opennews_presenter",
+    "material_strategy",
+    "batch_job_id",
+)
+
+
+def _publish_record_identity(record: Any) -> str:
+    if not isinstance(record, dict):
+        return str(record)
+    for key in ("video_id", "post_id", "tweet_id", "id", "youtube_url", "facebook_url", "x_url", "job_id"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return f"{key}:{value}"
+    return json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _publish_record_created_at(record: dict) -> float:
+    try:
+        return float((record or {}).get("created_at") or 0)
+    except Exception:
+        return 0.0
+
+
+_RESULT_SEGMENT_ARTIFACT_KEYS = (
+    "audio_path",
+    "audio_url",
+    "tts_provider",
+    "video_path",
+    "digital_human_engine",
+    "material_paths",
+    "material_items",
+    "material_quality",
+)
+
+
+def _merge_result_segments(existing: Any, incoming: Any) -> list[dict]:
+    existing_segments = existing if isinstance(existing, list) else []
+    incoming_segments = incoming if isinstance(incoming, list) else []
+    if not incoming_segments:
+        return copy.deepcopy(existing_segments)
+    merged_segments = copy.deepcopy(incoming_segments)
+    for index, segment in enumerate(merged_segments):
+        if not isinstance(segment, dict) or index >= len(existing_segments):
+            continue
+        previous = existing_segments[index]
+        if not isinstance(previous, dict):
+            continue
+        if str(previous.get("type") or "") != str(segment.get("type") or ""):
+            continue
+        for key in _RESULT_SEGMENT_ARTIFACT_KEYS:
+            if segment.get(key) in (None, "", [], {}) and previous.get(key) not in (None, "", [], {}):
+                segment[key] = copy.deepcopy(previous[key])
+    return merged_segments
+
+
+def _merge_result_for_persistence(existing: Optional[dict], incoming: dict) -> dict:
+    """合并可能来自主生产、恢复合成和发布线程的结果，保住路由与平台回执。"""
+    existing = existing if isinstance(existing, dict) else {}
+    incoming = incoming if isinstance(incoming, dict) else {}
+    merged = copy.deepcopy(existing)
+    merged.update(copy.deepcopy(incoming))
+
+    existing_workflow = existing.get("workflow_config") if isinstance(existing.get("workflow_config"), dict) else {}
+    incoming_workflow = incoming.get("workflow_config") if isinstance(incoming.get("workflow_config"), dict) else {}
+    workflow = copy.deepcopy(existing_workflow)
+    workflow.update(copy.deepcopy(incoming_workflow))
+    for key in _RESULT_WORKFLOW_IDENTITY_KEYS:
+        incoming_value = incoming_workflow.get(key)
+        existing_value = existing_workflow.get(key)
+        routed_to_general = (
+            key == "opennews_channel_id"
+            and str(incoming_value or "") == "general"
+            and str(existing_value or "") not in {"", "general"}
+        )
+        if (incoming_value in (None, "", [], {}) or routed_to_general) and existing_value not in (None, "", [], {}):
+            workflow[key] = copy.deepcopy(existing_workflow[key])
+    if workflow:
+        merged["workflow_config"] = workflow
+
+    if isinstance(existing.get("segments"), list) or isinstance(incoming.get("segments"), list):
+        merged["segments"] = _merge_result_segments(existing.get("segments"), incoming.get("segments"))
+        merged["segment_count"] = len(merged["segments"])
+
+    for records_key in _RESULT_PLATFORM_RECORD_KEYS:
+        combined: list[dict] = []
+        seen: set[str] = set()
+        for record in list(incoming.get(records_key) or []) + list(existing.get(records_key) or []):
+            if not isinstance(record, dict):
+                continue
+            identity = _publish_record_identity(record)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            combined.append(copy.deepcopy(record))
+        if combined:
+            combined.sort(key=_publish_record_created_at, reverse=True)
+            merged[records_key] = combined[:20]
+            latest_key = records_key.replace("_records", "_latest")
+            merged[latest_key] = copy.deepcopy(combined[0])
+        if incoming.get(records_key):
+            platform = records_key.split("_", 1)[0]
+            merged.pop(f"{platform}_auto_publish_error", None)
+            merged.pop(f"{platform}_publish_error", None)
+            if platform == "facebook":
+                merged.pop("facebook_publish_pending_at", None)
+                merged.pop("facebook_publish_pending_reason", None)
+                merged.pop("facebook_publish_throttled", None)
+
+    return merged
+
+
+def _persist_result_file(output_dir: Path, result: dict) -> dict:
+    output_dir = Path(output_dir)
+    path = output_dir / "result.json"
+    with RESULT_FILE_WRITE_LOCK:
+        existing: dict = {}
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except Exception:
+                existing = {}
+        merged = _merge_result_for_persistence(existing, result)
+        _restore_result_generated_segment_paths(output_dir, merged)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
+        tmp_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        tmp_path.replace(path)
+        result.clear()
+        result.update(copy.deepcopy(merged))
+        return merged
 
 
 def _find_live_task_id_for_output_dir(output_dir: str) -> str:
@@ -6543,6 +6846,51 @@ def _find_reusable_running_task(*, owner_username: str, submission_key: str, ded
     return None
 
 
+_OPENNEWS_EXTERNAL_PRODUCE_MARKER = ".opennews-external-produce.json"
+
+
+def _mark_opennews_external_produce_active(output_dir: Path, *, task_id: str, batch_job_id: str) -> None:
+    path = Path(output_dir) / _OPENNEWS_EXTERNAL_PRODUCE_MARKER
+    payload = {
+        "task_id": str(task_id or ""),
+        "batch_job_id": str(batch_job_id or ""),
+        "updated_at": time.time(),
+    }
+    try:
+        tmp_path = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp_path.replace(path)
+    except Exception as exc:
+        print(f"[OpenNews produce owner] marker write failed dir={Path(output_dir).name} err={exc!r}", flush=True)
+
+
+def _opennews_external_produce_active(output_dir: Path) -> bool:
+    path = Path(output_dir) / _OPENNEWS_EXTERNAL_PRODUCE_MARKER
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        updated_at = float((payload or {}).get("updated_at") or path.stat().st_mtime)
+    except Exception:
+        updated_at = path.stat().st_mtime
+    try:
+        ttl = max(1800, int(os.getenv("OPENNEWS_EXTERNAL_PRODUCE_MARKER_TTL_SECONDS", "10800") or "10800"))
+    except Exception:
+        ttl = 10800
+    return (time.time() - updated_at) < ttl
+
+
+def _clear_opennews_external_produce_active(output_dir: Optional[Path]) -> None:
+    if not output_dir:
+        return
+    try:
+        (Path(output_dir) / _OPENNEWS_EXTERNAL_PRODUCE_MARKER).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"[OpenNews produce owner] marker cleanup failed dir={Path(output_dir).name} err={exc!r}", flush=True)
+
+
 
 def _acquire_publish_lock(output_dir: Path, ttl_seconds: int = 1800) -> bool:
     """为某条成片获取“正在发布”互斥锁（原子创建锁文件）。已被占用则返回 False。
@@ -6597,9 +6945,14 @@ def _schedule_opennews_post_compose_publish(task_id: str, output_dir: str, resul
             final = _load_result_from_output_dir(path) or result
             if material_review:
                 final["material_review"] = material_review
-            final["x_auto_publish_error"] = publish_result.get("x_error") or ""
-            final["facebook_auto_publish_error"] = publish_result.get("facebook_error") or ""
-            final["youtube_auto_publish_error"] = publish_result.get("youtube_error") or ""
+            for platform in ("x", "facebook", "youtube"):
+                error_value = str(publish_result.get(f"{platform}_error") or "")
+                records = publish_result.get(f"{platform}_records") or []
+                if error_value:
+                    final[f"{platform}_auto_publish_error"] = error_value
+                elif records:
+                    final.pop(f"{platform}_auto_publish_error", None)
+                    final.pop(f"{platform}_publish_error", None)
             _save_result_to_output_dir(path, final)
             try:
                 task = tasks.get(task_id)
@@ -6620,8 +6973,7 @@ def _persist_task_result(task: dict):
     result = task.get("result")
     if not output_dir or not result:
         return
-    path = Path(output_dir) / "result.json"
-    path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    task["result"] = _persist_result_file(Path(output_dir), result)
 
 
 def _build_file_entries(output_dir: str) -> list[dict]:
@@ -7041,8 +7393,8 @@ def _resolve_history_for_user(history_id: str, user: Optional[dict]) -> tuple[Op
     return output_dir, result, None
 
 
-def _save_result_to_output_dir(output_dir: Path, result: dict) -> None:
-    (output_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+def _save_result_to_output_dir(output_dir: Path, result: dict) -> dict:
+    return _persist_result_file(Path(output_dir), result)
 
 
 def _platform_metrics_path(output_dir: Path) -> Path:
@@ -7323,6 +7675,294 @@ def _opennews_youtube_token_path_for(channel_id: str, target_market: str):
     return Path(token_path) if token_path else YOUTUBE_TOKEN_STORE_PATH
 
 
+def _opennews_youtube_publish_identity(
+    result: dict,
+    *,
+    channel_id: str,
+    target_market: str,
+    language_version: str,
+    aspect_ratio: str,
+) -> dict:
+    source_url = _opennews_result_source_url(result)
+    event_key = _opennews_event_identity_dedupe_key(_opennews_item_event_identity(result))
+    title = re.sub(r"\s+", " ", str(result.get("title") or result.get("topic") or "").strip().lower())
+    content_identity = f"url:{source_url}" if source_url else event_key or f"title:{title}"
+    account = _opennews_publish_account_for(channel_id, target_market, "youtube").get("account") or {}
+    account_scope = str(account.get("channel_name") or account.get("token_store_path") or "default").strip().lower()
+    return {
+        "platform": "youtube",
+        "channel_id": _safe_opennews_channel_id(channel_id),
+        "account_scope": account_scope,
+        "target_market": str(target_market or "cn").strip().lower(),
+        "language_version": str(language_version or "primary").strip().lower(),
+        "aspect_ratio": str(aspect_ratio or "vertical").strip().lower(),
+        "content_identity": content_identity,
+        "source_url": source_url,
+    }
+
+
+def _opennews_youtube_publish_ledger_path(identity: dict) -> Path:
+    raw = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return OPENNEWS_YOUTUBE_PUBLISH_LEDGER_DIR / f"{digest}.json"
+
+
+def _read_opennews_youtube_publish_ledger(identity: dict) -> dict:
+    path = _opennews_youtube_publish_ledger_path(identity)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_opennews_youtube_publish_ledger(identity: dict, payload: dict) -> dict:
+    path = _opennews_youtube_publish_ledger_path(identity)
+    with OPENNEWS_YOUTUBE_PUBLISH_LEDGER_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        saved = {
+            "schema_version": 1,
+            "identity": copy.deepcopy(identity),
+            **copy.deepcopy(payload),
+            "updated_at": time.time(),
+        }
+        tmp_path = path.with_name(f".{path.name}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
+        tmp_path.write_text(json.dumps(saved, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        tmp_path.replace(path)
+        return saved
+
+
+def _claim_opennews_youtube_publish(identity: dict, *, history_id: str) -> dict:
+    stale_seconds = _opennews_youtube_publish_claim_ttl_seconds()
+    with OPENNEWS_YOUTUBE_PUBLISH_LEDGER_LOCK:
+        existing = _read_opennews_youtube_publish_ledger(identity)
+        if existing.get("status") == "published" and isinstance(existing.get("record"), dict):
+            return {"acquired": False, "status": "published", "record": copy.deepcopy(existing["record"])}
+        try:
+            age_seconds = time.time() - float(existing.get("updated_at") or 0)
+        except Exception:
+            age_seconds = stale_seconds + 1
+        if existing and age_seconds < stale_seconds:
+            return {
+                "acquired": False,
+                "status": str(existing.get("status") or "publishing"),
+                "age_seconds": max(0, age_seconds),
+            }
+        claim_id = uuid.uuid4().hex
+        saved = _write_opennews_youtube_publish_ledger(
+            identity,
+            {
+                "status": "publishing",
+                "claim_id": claim_id,
+                "history_id": str(history_id or ""),
+                "started_at": time.time(),
+                "takeover": bool(existing),
+            },
+        )
+        return {
+            "acquired": True,
+            "status": "publishing",
+            "claim_id": claim_id,
+            "takeover": bool(existing),
+            "ledger": saved,
+        }
+
+
+def _opennews_youtube_publish_claim_ttl_seconds() -> int:
+    try:
+        return max(
+            300,
+            int(os.getenv("OPENNEWS_YOUTUBE_PUBLISH_CLAIM_TTL_SECONDS", "3600") or "3600"),
+        )
+    except Exception:
+        return 3600
+
+
+def _opennews_youtube_publish_claim_active(result: dict, *, now_ts: Optional[float] = None) -> bool:
+    workflow_config = result.get("workflow_config") if isinstance(result, dict) else {}
+    workflow_config = workflow_config if isinstance(workflow_config, dict) else {}
+    channel_id = _opennews_result_channel_id(result)
+    target_market = str(workflow_config.get("target_market") or "cn")
+    aspects_raw = workflow_config.get("youtube_aspects") or ["vertical"]
+    if isinstance(aspects_raw, str):
+        aspects = [part.strip() for part in aspects_raw.split(",") if part.strip()]
+    else:
+        aspects = [str(part or "").strip() for part in aspects_raw if str(part or "").strip()]
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    ttl_seconds = _opennews_youtube_publish_claim_ttl_seconds()
+    for aspect in aspects or ["vertical"]:
+        identity = _opennews_youtube_publish_identity(
+            result,
+            channel_id=channel_id,
+            target_market=target_market,
+            language_version="primary",
+            aspect_ratio=aspect,
+        )
+        state = _read_opennews_youtube_publish_ledger(identity)
+        if str(state.get("status") or "") not in {"publishing", "uncertain"}:
+            continue
+        try:
+            age_seconds = now_ts - float(state.get("updated_at") or 0)
+        except Exception:
+            age_seconds = ttl_seconds + 1
+        if age_seconds < ttl_seconds:
+            return True
+    return False
+
+
+def _complete_opennews_youtube_publish(identity: dict, record: dict, *, claim_id: str = "") -> None:
+    with OPENNEWS_YOUTUBE_PUBLISH_LEDGER_LOCK:
+        existing = _read_opennews_youtube_publish_ledger(identity)
+        existing_claim_id = str(existing.get("claim_id") or "")
+        if claim_id and existing_claim_id and claim_id != existing_claim_id:
+            return
+        _write_opennews_youtube_publish_ledger(
+            identity,
+            {
+                "status": "published",
+                "claim_id": claim_id or existing_claim_id,
+                "history_id": str(record.get("history_id") or existing.get("history_id") or ""),
+                "published_at": time.time(),
+                "record": copy.deepcopy(record),
+            },
+        )
+
+
+def _mark_opennews_youtube_publish_uncertain(identity: dict, *, claim_id: str, error: str) -> None:
+    with OPENNEWS_YOUTUBE_PUBLISH_LEDGER_LOCK:
+        existing = _read_opennews_youtube_publish_ledger(identity)
+        if str(existing.get("claim_id") or "") not in {"", str(claim_id or "")}:
+            return
+        _write_opennews_youtube_publish_ledger(
+            identity,
+            {
+                **existing,
+                "status": "uncertain",
+                "claim_id": str(claim_id or existing.get("claim_id") or ""),
+                "error": str(error or "")[:1000],
+            },
+        )
+
+
+def _youtube_record_for_history(record: dict, output_dir: Path) -> dict:
+    adapted = copy.deepcopy(record)
+    original_history_id = str(adapted.get("history_id") or "").strip()
+    if original_history_id and original_history_id != output_dir.name:
+        adapted["deduplicated_publish"] = True
+        adapted["deduplicated_from_history_id"] = original_history_id
+        adapted["history_id"] = output_dir.name
+    return adapted
+
+
+def _publish_opennews_youtube_once(
+    output_dir: Path,
+    identity_result: dict,
+    *,
+    channel_id: str,
+    target_market: str,
+    language_version: str,
+    aspect_ratio: str,
+    video_path: Path,
+    thumbnail_path: Optional[Path],
+    metadata: dict,
+    privacy_status: str,
+    category_id: str,
+) -> dict:
+    identity = _opennews_youtube_publish_identity(
+        identity_result,
+        channel_id=channel_id,
+        target_market=target_market,
+        language_version=language_version,
+        aspect_ratio=aspect_ratio,
+    )
+    claim = _claim_opennews_youtube_publish(identity, history_id=output_dir.name)
+    if claim.get("status") == "published" and isinstance(claim.get("record"), dict):
+        return _youtube_record_for_history(claim["record"], output_dir)
+
+    token_path = _opennews_youtube_token_path_for(channel_id, target_market)
+    source_url = str(identity.get("source_url") or "")
+    try:
+        remote_record = find_recent_youtube_upload(
+            token_path,
+            title=str(metadata.get("title") or ""),
+            source_url=source_url,
+        )
+    except Exception as exc:
+        if claim.get("takeover"):
+            _mark_opennews_youtube_publish_uncertain(
+                identity,
+                claim_id=str(claim.get("claim_id") or ""),
+                error=f"reconcile_failed: {exc}",
+            )
+            raise YouTubePublishError(f"YouTube 防重核对失败，已暂停重试以避免重复发布：{exc}") from exc
+        remote_record = {}
+        print(f"[youtube dedup] recent upload lookup failed, fresh publish continues: {exc}", flush=True)
+
+    if remote_record:
+        record = {
+            "job_id": f"reconciled_opennews_{aspect_ratio}_{int(time.time())}",
+            "history_id": output_dir.name,
+            "aspect_ratio": aspect_ratio,
+            "youtube_format": "shorts" if aspect_ratio == "vertical" else "standard",
+            "language_version": language_version,
+            "target_market": target_market,
+            "video_path": str(video_path),
+            "thumbnail_path": str(thumbnail_path) if thumbnail_path else "",
+            "created_at": time.time(),
+            "privacy_status": privacy_status,
+            "recovered_from_youtube": True,
+            **remote_record,
+        }
+        _complete_opennews_youtube_publish(identity, record, claim_id=str(claim.get("claim_id") or ""))
+        print(
+            f"[youtube dedup] restored existing upload dir={output_dir.name} video_id={record.get('video_id')}",
+            flush=True,
+        )
+        return record
+
+    if not claim.get("acquired"):
+        print(
+            f"[youtube dedup] publish already in progress dir={output_dir.name} identity={identity.get('content_identity')}",
+            flush=True,
+        )
+        return {}
+
+    try:
+        upload_result = upload_video_to_youtube(
+            token_path,
+            video_path,
+            title=metadata["title"],
+            description=metadata["description"],
+            tags=metadata["tags"],
+            privacy_status=privacy_status,
+            category_id=category_id,
+            made_for_kids=False,
+            thumbnail_path=thumbnail_path,
+        )
+    except Exception as exc:
+        _mark_opennews_youtube_publish_uncertain(
+            identity,
+            claim_id=str(claim.get("claim_id") or ""),
+            error=str(exc),
+        )
+        raise
+
+    record = {
+        "job_id": f"auto_opennews_{language_version}_{aspect_ratio}_{int(time.time())}",
+        "history_id": output_dir.name,
+        "aspect_ratio": aspect_ratio,
+        "youtube_format": "shorts" if aspect_ratio == "vertical" else "standard",
+        "language_version": language_version,
+        "target_market": target_market,
+        "video_path": str(video_path),
+        "thumbnail_path": str(thumbnail_path) if thumbnail_path else "",
+        "created_at": time.time(),
+        **upload_result,
+    }
+    _complete_opennews_youtube_publish(identity, record, claim_id=str(claim.get("claim_id") or ""))
+    return record
+
+
 def _publish_opennews_result_to_youtube(
     output_dir: Path,
     result: dict,
@@ -7348,29 +7988,21 @@ def _publish_opennews_result_to_youtube(
         video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_key)
         thumbnail_path = _resolve_youtube_thumbnail(output_dir, result, aspect_ratio=aspect_key)
         upload_metadata = _build_youtube_shorts_metadata(metadata) if aspect_key == "vertical" else metadata
-        upload_result = upload_video_to_youtube(
-            _opennews_youtube_token_path_for(channel_id, target_market),
-            video_path,
-            title=upload_metadata["title"],
-            description=upload_metadata["description"],
-            tags=upload_metadata["tags"],
+        record = _publish_opennews_youtube_once(
+            output_dir,
+            result,
+            channel_id=channel_id,
+            target_market=target_market,
+            language_version="primary",
+            aspect_ratio=aspect_key,
+            video_path=video_path,
+            thumbnail_path=thumbnail_path,
+            metadata=upload_metadata,
             privacy_status=privacy_status,
             category_id=category_id,
-            made_for_kids=False,
-            thumbnail_path=thumbnail_path,
         )
-        record = {
-            "job_id": f"auto_opennews_{aspect_key}_{int(time.time())}",
-            "history_id": output_dir.name,
-            "aspect_ratio": aspect_key,
-            "youtube_format": "shorts" if aspect_key == "vertical" else "standard",
-            "language_version": "primary",
-            "target_market": str((result.get("workflow_config") or {}).get("target_market") or "cn"),
-            "video_path": str(video_path),
-            "thumbnail_path": str(thumbnail_path) if thumbnail_path else "",
-            "created_at": time.time(),
-            **upload_result,
-        }
+        if not record:
+            continue
         existing_records.insert(0, record)
         records.append(record)
     if records:
@@ -7401,35 +8033,27 @@ def _publish_opennews_result_to_youtube(
                 video_path = _resolve_youtube_publish_video(output_dir, version, aspect_ratio=aspect_key)
                 thumbnail_path = _resolve_youtube_thumbnail(output_dir, version, aspect_ratio=aspect_key)
                 version_upload_metadata = _build_youtube_shorts_metadata(version_metadata) if aspect_key == "vertical" else version_metadata
-                upload_result = upload_video_to_youtube(
-                    _opennews_youtube_token_path_for(channel_id, target_market),
-                    video_path,
-                    title=version_upload_metadata["title"],
-                    description=version_upload_metadata["description"],
-                    tags=version_upload_metadata["tags"],
+                record = _publish_opennews_youtube_once(
+                    output_dir,
+                    result,
+                    channel_id=channel_id,
+                    target_market=target_market,
+                    language_version=target_market,
+                    aspect_ratio=aspect_key,
+                    video_path=video_path,
+                    thumbnail_path=thumbnail_path,
+                    metadata=version_upload_metadata,
                     privacy_status=privacy_status,
                     category_id=category_id,
-                    made_for_kids=False,
-                    thumbnail_path=thumbnail_path,
                 )
-                record = {
-                    "job_id": f"auto_opennews_{target_market}_{aspect_key}_{int(time.time())}",
-                    "history_id": output_dir.name,
-                    "aspect_ratio": aspect_key,
-                    "youtube_format": "shorts" if aspect_key == "vertical" else "standard",
-                    "language_version": target_market,
-                    "target_market": target_market,
-                    "video_path": str(video_path),
-                    "thumbnail_path": str(thumbnail_path) if thumbnail_path else "",
-                    "created_at": time.time(),
-                    **upload_result,
-                }
+                if not record:
+                    continue
                 version_records.insert(0, record)
                 records.append(record)
             if version_records:
                 version["youtube_publish_records"] = version_records[:20]
                 version["youtube_publish_latest"] = version_records[0]
-        _save_result_to_output_dir(output_dir, result)
+    _save_result_to_output_dir(output_dir, result)
     return records
 
 
@@ -7583,6 +8207,11 @@ def _upload_video_to_opennews_x(
     mode = _opennews_x_publish_mode()
     if mode == "browser":
         try:
+            login_status = x_browser_login_status()
+            if login_status.get("running"):
+                raise XBrowserPublishError("X 可视化登录窗口仍在运行，请先结束登录会话再自动发布。")
+            if login_status.get("degraded") or login_status.get("profile_in_use"):
+                stop_x_browser_login()
             result = publish_video_to_x_browser(
                 video_path,
                 text=text,
@@ -7706,7 +8335,7 @@ def _publish_opennews_result_to_x(
             elif version_error:
                 version["x_auto_publish_error"] = version_error
                 version["x_publish_error"] = version_error
-        _save_result_to_output_dir(output_dir, result)
+    _save_result_to_output_dir(output_dir, result)
     return records
 
 
@@ -7767,6 +8396,24 @@ def _publish_opennews_result_to_facebook(
     text: str = "",
     include_language_versions: bool = True,
 ) -> list[dict]:
+    with FACEBOOK_PUBLISH_SERIAL_LOCK:
+        return _publish_opennews_result_to_facebook_locked(
+            output_dir,
+            result,
+            aspects=aspects,
+            text=text,
+            include_language_versions=include_language_versions,
+        )
+
+
+def _publish_opennews_result_to_facebook_locked(
+    output_dir: Path,
+    result: dict,
+    *,
+    aspects: list[str] | tuple[str, ...] = ("vertical",),
+    text: str = "",
+    include_language_versions: bool = True,
+) -> list[dict]:
     records: list[dict] = []
     existing_records = result.get("facebook_publish_records")
     if not isinstance(existing_records, list):
@@ -7775,12 +8422,15 @@ def _publish_opennews_result_to_facebook(
     # 该频道主语言用哪个 Page(用于按 Page 分桶节流/冷却)。
     _primary_market = str((result.get("workflow_config") or {}).get("target_market") or "cn")
     _primary_pt = _opennews_publish_account_for(channel_id, _primary_market, "facebook")
+    if not _primary_pt.get("enabled", True):
+        return records
     fb_page_key = str((_primary_pt.get("account") or {}).get("page_id") or "")
     # 368 频率封锁冷却中:直接跳过 FB 发布,记明原因,不硬撞。
     cooldown_remaining = _facebook_publish_cooldown_remaining(fb_page_key)
     if cooldown_remaining > 0:
-        note = f"Facebook 频率封锁(368)冷却中，暂停发布约 {int(cooldown_remaining/60)} 分钟后自动恢复。"
-        result["facebook_auto_publish_error"] = note
+        note = f"Facebook 频率封锁(368)冷却中，约 {int(cooldown_remaining/60)} 分钟后自动补发。"
+        _mark_facebook_publish_pending(result, retry_at=time.time() + cooldown_remaining, reason=note)
+        _save_result_to_output_dir(output_dir, result)
         print(f"[facebook throttle] 跳过 {output_dir.name}：{note}", flush=True)
         return records
     for aspect in aspects:
@@ -7796,8 +8446,9 @@ def _publish_opennews_result_to_facebook(
         # 发帖最小间隔节流:距上次成功发帖太近则本条跳过(不算失败),让发帖节奏拉开避免被封。
         throttle_remaining = _facebook_publish_throttle_remaining(page_key)
         if throttle_remaining > 0:
-            note = f"距上次 Facebook 发帖不足最小间隔，本条跳过(约 {int(throttle_remaining/60)} 分钟后可再发)。"
+            note = f"距上次 Facebook 发帖不足最小间隔，约 {int(throttle_remaining/60)} 分钟后自动补发。"
             result["facebook_publish_throttled"] = note
+            _mark_facebook_publish_pending(result, retry_at=time.time() + throttle_remaining, reason=note)
             print(f"[facebook throttle] 跳过 {output_dir.name}：{note}", flush=True)
             continue
         video_path = _resolve_youtube_publish_video(output_dir, result, aspect_ratio=aspect_key)
@@ -7813,7 +8464,8 @@ def _publish_opennews_result_to_facebook(
             )
         except Exception as exc:
             if _is_facebook_frequency_block(str(exc)):
-                _trigger_facebook_publish_cooldown(str(exc), page_id=page_key)
+                retry_at = _trigger_facebook_publish_cooldown(str(exc), page_id=page_key)
+                _mark_facebook_publish_pending(result, retry_at=retry_at, reason="Facebook 368 限制，已排队等待自动补发。")
             raise
         _record_facebook_publish_success(page_key)
         record = {
@@ -7834,6 +8486,7 @@ def _publish_opennews_result_to_facebook(
     if records:
         result["facebook_publish_records"] = existing_records[:20]
         result["facebook_publish_latest"] = records[-1]
+        _clear_facebook_publish_pending(result)
         result.pop("facebook_auto_publish_error", None)
         result.pop("facebook_publish_error", None)
     if include_language_versions:
@@ -7899,7 +8552,7 @@ def _publish_opennews_result_to_facebook(
             elif version_error:
                 version["facebook_auto_publish_error"] = version_error
                 version["facebook_publish_error"] = version_error
-        _save_result_to_output_dir(output_dir, result)
+    _save_result_to_output_dir(output_dir, result)
     return records
 
 
@@ -12677,6 +13330,51 @@ def _opennews_channel_published_event_keys(channel_id: str, *, platform: str = "
         u = _opennews_result_source_url(result)
         if u:
             keys.add("url:" + u)
+    # 外部生产任务会先把平台回执写进 batch job；即使 result.json 后续被陈旧检查点覆盖，
+    # 跨目录去重也必须能看到这份独立回执。
+    batch_records_field = {
+        "youtube": "youtube_records",
+        "facebook": "facebook_records",
+        "x": "x_records",
+    }.get(platform, "youtube_records")
+    jobs_dir = OPENNEWS_BATCH_DIR / "batch_jobs"
+    try:
+        job_paths = sorted(
+            jobs_dir.glob("opennews_batch_*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[: max(20, limit)]
+    except Exception:
+        job_paths = []
+    for job_path in job_paths:
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        job_channel = _safe_opennews_channel_id(job.get("opennews_channel_id") or job.get("channel_id") or "")
+        for item in job.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            if exclude_dir and str(item.get("history_id") or "") == exclude_dir:
+                continue
+            records = item.get(batch_records_field) or item.get(rec_field)
+            if not isinstance(records, list) or not records:
+                continue
+            article = item.get("article") if isinstance(item.get("article"), dict) else item
+            item_channel = _safe_opennews_channel_id(
+                item.get("opennews_channel_id")
+                or article.get("opennews_channel_id")
+                or job_channel
+                or ""
+            )
+            if item_channel != channel_id:
+                continue
+            key = _opennews_event_identity_dedupe_key(_opennews_item_event_identity(article))
+            if key:
+                keys.add(key)
+            source_url = str(article.get("url") or article.get("source_url") or "").strip().lower()
+            if source_url:
+                keys.add("url:" + source_url)
     return keys
 
 
@@ -12978,6 +13676,7 @@ def _wait_for_opennews_task_done(task_id: str, *, timeout_seconds: int = 5400, e
             task.get("result")
             and task.get("output_dir")
             and tracker_status not in {"error", "cancelled"}
+            and not bool((task.get("workflow_config") or {}).get("external_produce_managed"))
             and _opennews_task_result_ready_for_compose(task.get("result"))
         ):
             return task
@@ -13114,6 +13813,7 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                         break
             update_opennews_batch_job(OPENNEWS_BATCH_DIR, job_id, updater)
 
+        output_dir: Optional[Path] = None
         try:
             article = dict(item.get("article") or {})
             mark_item(status="drafting", message="正在生成新闻口播稿...")
@@ -13134,6 +13834,13 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                 opennews_channel_id=opennews_channel_id,
                 opennews_channel_name=opennews_channel_name,
                 opennews_language_markets=opennews_language_markets,
+                x_auto_publish=x_auto_publish,
+                facebook_auto_publish=facebook_auto_publish,
+                youtube_auto_publish=youtube_auto_publish,
+                x_aspects=x_aspects,
+                facebook_aspects=["vertical"],
+                youtube_aspects=youtube_aspects,
+                external_produce_managed=True,
             )
             task_id = str(task_result.get("task_id") or "")
             mark_item(task_id=task_id, message=f"视频生产任务已提交：{task_id}，等待中间产物完成...")
@@ -13141,9 +13848,12 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                 task_id,
                 expected_title=str(draft.get("video_title") or article.get("title") or ""),
             )
+            output_dir_value = str(task.get("output_dir") or "").strip()
+            if not output_dir_value:
+                raise RuntimeError("OpenNews 任务没有生成输出目录。")
+            output_dir = Path(output_dir_value)
             mark_item(status="composing", message="中间产物完成，正在自动合成横屏和竖屏成片...")
             composed_result = _compose_opennews_task_video(task_id, preferred_aspect_ratio=preferred_aspect_ratio)
-            output_dir = Path(task.get("output_dir") or "")
             material_review = _opennews_material_review_status(composed_result, output_dir)
             if material_review.get("uses_strict_source_fallback"):
                 composed_result["material_review"] = material_review
@@ -13196,6 +13906,18 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                     )
                 except Exception as facebook_exc:
                     facebook_error = str(facebook_exc)
+            if youtube_error:
+                composed_result["youtube_auto_publish_error"] = youtube_error
+                composed_result["youtube_publish_error"] = youtube_error
+            if x_error:
+                composed_result["x_auto_publish_error"] = x_error
+                composed_result["x_publish_error"] = x_error
+            if facebook_error:
+                composed_result["facebook_auto_publish_error"] = facebook_error
+                composed_result["facebook_publish_error"] = facebook_error
+            _save_result_to_output_dir(output_dir, composed_result)
+            facebook_pending_at = float(composed_result.get("facebook_publish_pending_at") or 0)
+            facebook_pending_reason = str(composed_result.get("facebook_publish_pending_reason") or "").strip()
             final_status = "completed"
             published_platforms = []
             failed_parts = []
@@ -13203,28 +13925,38 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
             if youtube_publish_this_item:
                 if youtube_error:
                     failed_parts.append(f"YouTube 发布失败：{youtube_error}")
-                else:
+                elif youtube_records:
                     published_platforms.append("YouTube")
+                else:
+                    skipped_parts.append("YouTube 未返回发布记录，已保留成片等待恢复检查。")
             elif youtube_error:
                 skipped_parts.append(f"YouTube 自动发布已跳过：{youtube_error}")
             if x_publish_this_item:
                 if x_error:
                     failed_parts.append(f"X 发布失败：{x_error}")
-                else:
+                elif x_records:
                     published_platforms.append("X")
+                else:
+                    skipped_parts.append("X 未返回发布记录。")
             elif x_error:
                 skipped_parts.append(f"X 自动发布已跳过：{x_error}")
             if facebook_publish_this_item:
-                if facebook_error:
+                if facebook_pending_at:
+                    skipped_parts.append(facebook_pending_reason or "Facebook 已排队等待自动补发。")
+                elif facebook_error:
                     failed_parts.append(f"Facebook 发布失败：{facebook_error}")
-                else:
+                elif facebook_records:
                     published_platforms.append("Facebook")
+                else:
+                    skipped_parts.append("Facebook 未返回发布记录，已保留成片等待恢复检查。")
             elif facebook_error:
                 skipped_parts.append(f"Facebook 自动发布已跳过：{facebook_error}")
             if published_platforms:
                 final_message = f"成片已完成，{' / '.join(published_platforms)} 已发布。"
                 if failed_parts:
                     final_message += " 但" + "；".join(failed_parts)
+                if skipped_parts:
+                    final_message += " " + "；".join(skipped_parts)
             elif failed_parts:
                 final_message = "成片已完成，但" + "；".join(failed_parts)
             elif skipped_parts:
@@ -13244,6 +13976,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                 x_error=x_error,
                 facebook_records=facebook_records,
                 facebook_error=facebook_error,
+                facebook_pending_at=facebook_pending_at,
+                facebook_pending_reason=facebook_pending_reason,
                 material_review=material_review,
                 error="",
             )
@@ -13261,6 +13995,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
                 x_error=x_error,
                 facebook_records=facebook_records,
                 facebook_error=facebook_error,
+                facebook_pending_at=facebook_pending_at,
+                facebook_pending_reason=facebook_pending_reason,
                 material_review=material_review,
                 error="",
                 completed_at=time.time(),
@@ -13269,6 +14005,8 @@ def _run_opennews_external_produce_job(job_id: str, *, user: dict, public_base_u
         except Exception as exc:
             mark_item(status="failed", message=f"生成失败：{exc}", error=str(exc))
             sync_batch_item(item_id, status="failed", message=f"生成失败：{exc}", error=str(exc), completed_at=time.time())
+        finally:
+            _clear_opennews_external_produce_active(output_dir)
         update_opennews_batch_job(
             OPENNEWS_BATCH_DIR,
             job_id,
@@ -13932,6 +14670,13 @@ def _create_opennews_material_task(
     opennews_channel_id: str = "",
     opennews_channel_name: str = "",
     opennews_language_markets: Optional[list[str]] = None,
+    x_auto_publish: Optional[bool] = None,
+    facebook_auto_publish: Optional[bool] = None,
+    youtube_auto_publish: Optional[bool] = None,
+    x_aspects: Optional[list[str]] = None,
+    facebook_aspects: Optional[list[str]] = None,
+    youtube_aspects: Optional[list[str]] = None,
+    external_produce_managed: bool = False,
 ) -> dict:
     presenter_config = _normalize_opennews_presenter_config(presenter_config)
     target_market = str(target_market or user.get("target_market") or "cn").strip() or "cn"
@@ -14025,6 +14770,13 @@ def _create_opennews_material_task(
             "opennews_channel_id": opennews_channel_id,
             "opennews_channel_name": opennews_channel_name,
             **({"opennews_language_markets": requested_language_markets} if requested_language_markets else {}),
+            **({"x_auto_publish": bool(x_auto_publish)} if x_auto_publish is not None else {}),
+            **({"facebook_auto_publish": bool(facebook_auto_publish)} if facebook_auto_publish is not None else {}),
+            **({"youtube_auto_publish": bool(youtube_auto_publish)} if youtube_auto_publish is not None else {}),
+            **({"x_aspects": list(x_aspects)} if x_aspects is not None else {}),
+            **({"facebook_aspects": list(facebook_aspects)} if facebook_aspects is not None else {}),
+            **({"youtube_aspects": list(youtube_aspects)} if youtube_aspects is not None else {}),
+            "external_produce_managed": bool(external_produce_managed),
         },
         "cost_entries": [],
         "cost_summary": _empty_cost_summary(),
@@ -14889,10 +15641,7 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
             material_review = _opennews_material_review_status(working_result, output_dir)
             if material_review.get("uses_strict_source_fallback"):
                 working_result["material_review"] = material_review
-            output_dir.joinpath("result.json").write_text(
-                json.dumps(working_result, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
-            )
+            _save_result_to_output_dir(output_dir, working_result)
             mark_item(item_id, status="composing", message="人工审核素材已确认，正在合成横竖屏成片...", material_review=material_review)
             composed_result = _compose_opennews_result(
                 output_dir,
@@ -14901,10 +15650,7 @@ def _run_opennews_manual_review_resume_job(job_id: str, *, user: dict, public_ba
                 user=user,
                 cost_scope="manual_review_resume",
             )
-            output_dir.joinpath("result.json").write_text(
-                json.dumps(composed_result, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
-            )
+            _save_result_to_output_dir(output_dir, composed_result)
             _sync_live_task_result(str(output_dir), composed_result)
             video_payload = _external_video_urls_for_result(public_base_url, output_dir, composed_result)
             youtube_records: list[dict] = []

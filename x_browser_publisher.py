@@ -1,11 +1,16 @@
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+import fcntl
 
 from dotenv import load_dotenv
 
@@ -31,6 +36,37 @@ X_BROWSER_POST_SETTLE_SECONDS = max(5, int(os.getenv("X_BROWSER_POST_SETTLE_SECO
 X_BROWSER_COMPOSE_URL = os.getenv("X_BROWSER_COMPOSE_URL", "https://x.com/compose/post").strip() or "https://x.com/compose/post"
 X_BROWSER_EXECUTABLE_PATH = os.getenv("X_BROWSER_EXECUTABLE_PATH", "").strip()
 X_BROWSER_DEBUG_DIR = Path(os.getenv("X_BROWSER_DEBUG_DIR", str(X_BROWSER_STATE_DIR / "debug"))).resolve()
+X_BROWSER_PREPARED_VIDEO_DIR = Path(
+    os.getenv("X_BROWSER_PREPARED_VIDEO_DIR", str(X_BROWSER_STATE_DIR / "prepared_videos"))
+).resolve()
+X_BROWSER_PUBLISH_STATE_PATH = Path(
+    os.getenv("X_BROWSER_PUBLISH_STATE_PATH", str(X_BROWSER_STATE_DIR / "publish_state.json"))
+).resolve()
+X_BROWSER_TRANSCODE_UPLOAD = (os.getenv("X_BROWSER_TRANSCODE_UPLOAD", "1") or "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+X_BROWSER_TRANSCODE_TIMEOUT_SECONDS = max(
+    120,
+    int(os.getenv("X_BROWSER_TRANSCODE_TIMEOUT_SECONDS", "900") or "900"),
+)
+X_BROWSER_MIN_POST_INTERVAL_SECONDS = max(
+    0,
+    int(os.getenv("X_BROWSER_MIN_POST_INTERVAL_SECONDS", "90") or "90"),
+)
+X_BROWSER_MEDIA_UI_RETRIES = max(0, int(os.getenv("X_BROWSER_MEDIA_UI_RETRIES", "2") or "2"))
+X_BROWSER_MEDIA_FULL_RETRIES = max(0, int(os.getenv("X_BROWSER_MEDIA_FULL_RETRIES", "1") or "1"))
+X_BROWSER_MEDIA_RETRY_DELAY_SECONDS = max(
+    5,
+    int(os.getenv("X_BROWSER_MEDIA_RETRY_DELAY_SECONDS", "30") or "30"),
+)
+X_BROWSER_MEDIA_READY_SETTLE_SECONDS = max(
+    5,
+    int(os.getenv("X_BROWSER_MEDIA_READY_SETTLE_SECONDS", "12") or "12"),
+)
+X_BROWSER_PUBLISH_STATE_LOCK = threading.RLock()
 
 
 def _xvfb_running(display: str) -> bool:
@@ -91,17 +127,17 @@ def _ensure_publish_display() -> str:
 
 
 def _resolve_browser_executable() -> str:
-    # 只在显式设置 X_BROWSER_EXECUTABLE_PATH 时使用指定的浏览器；
-    # 否则返回空字符串，让 Playwright 使用它自带的、版本匹配的 chromium。
-    # 不再自动回退到系统 chromium —— 系统包版本常与 Playwright 协议不兼容，
-    # 导致 launch_persistent_context 启动即崩（TargetClosedError）。
-    if X_BROWSER_EXECUTABLE_PATH:
+    # Debian 12 的系统 Chromium 带 H.264 支持；Playwright 自带的 ARM64 Chromium
+    # 缺少 H.264，X 会在选中 MP4 后直接报媒体加载失败。
+    for candidate in (X_BROWSER_EXECUTABLE_PATH, "/usr/bin/chromium"):
+        if not candidate:
+            continue
         try:
-            path = Path(X_BROWSER_EXECUTABLE_PATH)
+            path = Path(candidate)
             if path.is_file():
                 return str(path)
         except Exception:
-            pass
+            continue
     return ""
 
 
@@ -116,6 +152,12 @@ def x_browser_env_config() -> dict[str, Any]:
         "upload_timeout_seconds": X_BROWSER_UPLOAD_TIMEOUT_SECONDS,
         "post_timeout_seconds": X_BROWSER_POST_TIMEOUT_SECONDS,
         "post_settle_seconds": X_BROWSER_POST_SETTLE_SECONDS,
+        "prepared_video_dir": str(X_BROWSER_PREPARED_VIDEO_DIR),
+        "transcode_upload": X_BROWSER_TRANSCODE_UPLOAD,
+        "min_post_interval_seconds": X_BROWSER_MIN_POST_INTERVAL_SECONDS,
+        "media_ui_retries": X_BROWSER_MEDIA_UI_RETRIES,
+        "media_full_retries": X_BROWSER_MEDIA_FULL_RETRIES,
+        "media_ready_settle_seconds": X_BROWSER_MEDIA_READY_SETTLE_SECONDS,
     }
 
 
@@ -153,6 +195,200 @@ def _ensure_video_path(video_path: Path) -> Path:
     if not path.is_file():
         raise XBrowserPublishError(f"X 浏览器发布失败：视频文件不存在：{path}")
     return path.resolve()
+
+
+def _prepared_video_cache_path(video_path: Path) -> Path:
+    stat = video_path.stat()
+    raw = f"h264-mp4-v2:{video_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    return X_BROWSER_PREPARED_VIDEO_DIR / f"x_{digest}.mp4"
+
+
+def _cleanup_prepared_video_cache(*, keep: int = 30) -> None:
+    try:
+        files = sorted(
+            X_BROWSER_PREPARED_VIDEO_DIR.glob("x_*.mp4"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return
+    for path in files[max(1, int(keep or 30)) :]:
+        try:
+            path.unlink()
+        except Exception:
+            pass
+
+
+def prepare_x_video_for_upload(video_path: Path) -> Path:
+    """Normalize media for X web upload and cache it by source file identity."""
+    source = _ensure_video_path(video_path)
+    if not X_BROWSER_TRANSCODE_UPLOAD:
+        return source
+    X_BROWSER_PREPARED_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    output = _prepared_video_cache_path(source)
+    if output.exists() and output.stat().st_size > 0:
+        return output
+    tmp_path = output.with_suffix(f".{threading.get_ident()}.part.mp4")
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2:in_range=auto:out_range=tv,format=yuv420p,fps=30",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "22",
+        "-profile:v",
+        "high",
+        "-level:v",
+        "4.1",
+        "-pix_fmt",
+        "yuv420p",
+        "-color_range",
+        "tv",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        "-max_muxing_queue_size",
+        "1024",
+        str(tmp_path),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=X_BROWSER_TRANSCODE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+        raise XBrowserPublishError(f"X 上传兼容转码失败：{exc}") from exc
+    if completed.returncode != 0 or not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+        error = (completed.stderr or completed.stdout or "ffmpeg failed").strip()[-1000:]
+        raise XBrowserPublishError(f"X 上传兼容转码失败：{error}")
+    tmp_path.replace(output)
+    _cleanup_prepared_video_cache()
+    return output
+
+
+def _profile_publish_key(profile_dir: Path) -> str:
+    return hashlib.sha256(str(profile_dir.resolve()).encode("utf-8")).hexdigest()[:24]
+
+
+def _profile_publish_lock_path(profile_dir: Path) -> Path:
+    lock_dir = X_BROWSER_STATE_DIR / "publish_locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / f"{_profile_publish_key(profile_dir)}.lock"
+
+
+@contextmanager
+def _exclusive_profile_publish_lock(profile_dir: Path):
+    lock_path = _profile_publish_lock_path(profile_dir)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps({"pid": os.getpid(), "acquired_at": time.time()}))
+        handle.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _load_x_browser_publish_state() -> dict:
+    with X_BROWSER_PUBLISH_STATE_LOCK:
+        try:
+            payload = json.loads(X_BROWSER_PUBLISH_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {"profiles": {}}
+        if not isinstance(payload, dict):
+            return {"profiles": {}}
+        if not isinstance(payload.get("profiles"), dict):
+            payload["profiles"] = {}
+        return payload
+
+
+def _save_x_browser_publish_state(state: dict) -> None:
+    with X_BROWSER_PUBLISH_STATE_LOCK:
+        X_BROWSER_PUBLISH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = X_BROWSER_PUBLISH_STATE_PATH.with_name(
+            f".{X_BROWSER_PUBLISH_STATE_PATH.name}.{threading.get_ident()}.tmp"
+        )
+        tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(X_BROWSER_PUBLISH_STATE_PATH)
+
+
+def _wait_for_x_browser_publish_slot(profile_dir: Path) -> None:
+    if X_BROWSER_MIN_POST_INTERVAL_SECONDS <= 0:
+        return
+    state = _load_x_browser_publish_state()
+    profile_state = (state.get("profiles") or {}).get(_profile_publish_key(profile_dir)) or {}
+    try:
+        last_success_at = float(profile_state.get("last_success_at") or 0)
+    except Exception:
+        last_success_at = 0
+    wait_seconds = X_BROWSER_MIN_POST_INTERVAL_SECONDS - (time.time() - last_success_at)
+    if wait_seconds > 0:
+        print(f"[X browser] waiting {int(wait_seconds)}s for the account publish interval", flush=True)
+        time.sleep(wait_seconds)
+
+
+def _record_x_browser_publish_success(profile_dir: Path, result: dict) -> None:
+    state = _load_x_browser_publish_state()
+    profiles = state.setdefault("profiles", {})
+    profiles[_profile_publish_key(profile_dir)] = {
+        "profile_dir": str(profile_dir),
+        "last_success_at": time.time(),
+        "post_id": str(result.get("post_id") or ""),
+        "x_url": str(result.get("x_url") or ""),
+    }
+    state["updated_at"] = time.time()
+    _save_x_browser_publish_state(state)
+
+
+def _is_retryable_media_failure(error: Exception | str) -> bool:
+    text = str(error or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "media failed",
+            "upload failed",
+            "failed to load",
+            "媒体上传失败",
+            "视频上传失败",
+        )
+    )
 
 
 def _tweet_id_from_url(url: str) -> str:
@@ -330,9 +566,23 @@ def _normalize_text(value: str, *, limit: int = 120) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
 
 
+def _post_text_match_candidates(value: str) -> list[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    first_line = next((line.strip() for line in raw.splitlines() if line.strip()), "")
+    without_urls = re.sub(r"https?://\S+", "", raw, flags=re.I)
+    candidates = [
+        _normalize_text(first_line, limit=80),
+        _normalize_text(without_urls, limit=80),
+        _normalize_text(raw, limit=48),
+    ]
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
 def _find_matching_post_on_profile(page: Any, handle: str, text: str) -> dict[str, str]:
-    target = _normalize_text(text, limit=80)
-    if not handle or not target:
+    targets = _post_text_match_candidates(text)
+    if not handle or not targets:
         return {}
     articles = page.locator('article[data-testid="tweet"]')
     count = min(articles.count(), 8)
@@ -340,7 +590,7 @@ def _find_matching_post_on_profile(page: Any, handle: str, text: str) -> dict[st
         article = articles.nth(index)
         try:
             article_text = _normalize_text(article.inner_text(timeout=3000), limit=400)
-            if target not in article_text:
+            if not any(target in article_text for target in targets):
                 continue
             links = article.locator(f'a[href^="/{handle}/status/"]')
             for link_index in range(min(links.count(), 5)):
@@ -349,7 +599,10 @@ def _find_matching_post_on_profile(page: Any, handle: str, text: str) -> dict[st
                 if post_id:
                     has_media = False
                     try:
-                        has_media = article.locator('video, img[src*="twimg"], div[data-testid="tweetPhoto"]').count() > 0
+                        has_media = article.locator(
+                            'video, div[data-testid="videoPlayer"], div[data-testid="tweetPhoto"], '
+                            'a[href*="/video/"], a[href$="/photo/1"]'
+                        ).count() > 0
                     except Exception:
                         has_media = False
                     return {
@@ -381,9 +634,32 @@ def _upload_video_file(page: Any, video_path: Path, *, debug_events: list[dict[s
     raise XBrowserPublishError(f"找不到 X 视频上传控件：{last_error}")
 
 
+def _click_media_retry(page: Any, *, debug_events: list[dict[str, Any]] | None = None) -> bool:
+    patterns = [
+        re.compile(r"^\s*retry\s*$", re.I),
+        re.compile(r"^\s*重试\s*$"),
+        re.compile(r"^\s*再試行\s*$"),
+        re.compile(r"^\s*やり直す\s*$"),
+    ]
+    for pattern in patterns:
+        try:
+            button = page.get_by_role("button", name=pattern).first
+            if not button.is_visible(timeout=1500):
+                continue
+            button.click(timeout=5000)
+            if debug_events is not None:
+                _append_debug_event(debug_events, "media_retry_clicked", page, pattern=pattern.pattern)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def _wait_video_ready(page: Any, video_name: str, *, debug_events: list[dict[str, Any]] | None = None) -> None:
     deadline = time.time() + X_BROWSER_UPLOAD_TIMEOUT_SECONDS
     last_state = ""
+    ui_retry_count = 0
+    ready_since = 0.0
     while time.time() < deadline:
         pending_text = ""
         try:
@@ -423,30 +699,41 @@ def _wait_video_ready(page: Any, video_name: str, *, debug_events: list[dict[str
             _append_debug_event(debug_events, "upload_state", page, state=state)
             last_state = state
         if failed:
+            if ui_retry_count < X_BROWSER_MEDIA_UI_RETRIES and _click_media_retry(page, debug_events=debug_events):
+                ui_retry_count += 1
+                if debug_events is not None:
+                    _append_debug_event(debug_events, "media_retry_wait", page, retry=ui_retry_count)
+                time.sleep(5)
+                continue
             raise XBrowserPublishError("X 视频上传失败，页面提示 media/upload failed")
         if uploading:
+            ready_since = 0.0
             time.sleep(5)
             continue
         if not has_video_chip:
+            ready_since = 0.0
             time.sleep(2)
             continue
         try:
             button = page.locator('button[data-testid="tweetButton"], div[data-testid="tweetButton"]').first
             if button.is_enabled(timeout=2000):
+                if ready_since <= 0:
+                    ready_since = time.time()
+                    if debug_events is not None:
+                        _append_debug_event(debug_events, "upload_ready_settling", page)
+                if time.time() - ready_since < X_BROWSER_MEDIA_READY_SETTLE_SECONDS:
+                    time.sleep(2)
+                    continue
                 if debug_events is not None:
                     _append_debug_event(debug_events, "upload_ready", page)
                 return
         except Exception:
-            pass
+            ready_since = 0.0
         time.sleep(3)
     raise XBrowserPublishError(f"等待 X 视频上传处理超时（{X_BROWSER_UPLOAD_TIMEOUT_SECONDS} 秒）")
 
 
 def _click_post_button(page: Any, *, debug_events: list[dict[str, Any]] | None = None) -> None:
-    dialog_selectors = [
-        'div[role="dialog"]',
-        'div[data-testid="sheetDialog"]',
-    ]
     selectors = [
         'button[data-testid="tweetButton"]',
         'div[data-testid="tweetButton"]',
@@ -454,59 +741,42 @@ def _click_post_button(page: Any, *, debug_events: list[dict[str, Any]] | None =
         'div[data-testid="tweetButtonInline"]',
     ]
     last_error: Exception | None = None
-    scoped_roots = []
-    for dialog_selector in dialog_selectors:
-        try:
-            dialog = page.locator(dialog_selector).first
-            if dialog.count():
-                scoped_roots.append((f"dialog:{dialog_selector}", dialog))
-        except Exception:
-            continue
+    scoped_roots: list[tuple[str, Any]] = []
+    try:
+        dialogs = page.locator('div[role="dialog"]:visible, div[data-testid="sheetDialog"]:visible')
+        for index in reversed(range(min(dialogs.count(), 4))):
+            scoped_roots.append((f"dialog:{index}", dialogs.nth(index)))
+    except Exception:
+        pass
     scoped_roots.append(("page", page))
     for scope_name, root in scoped_roots:
         for selector in selectors:
             try:
-                button = _first_visible(root.locator(selector), timeout_ms=5000)
-                button.click(timeout=10000)
-                if debug_events is not None:
-                    _append_debug_event(debug_events, "post_clicked", page, selector=f"{scope_name}:{selector}")
-                return
-            except Exception as exc:
-                last_error = exc
-    text_patterns = [
-        re.compile(r"^\s*post\s*$", re.I),
-        re.compile(r"^\s*post all\s*$", re.I),
-        re.compile(r"^\s*ポストする\s*$"),
-        re.compile(r"^\s*投稿\s*$"),
-        re.compile(r"^\s*发布\s*$"),
-        re.compile(r"^\s*發佈\s*$"),
-        re.compile(r"^\s*發布\s*$"),
-    ]
-    for scope_name, root in scoped_roots:
-        for pattern in text_patterns:
-            try:
-                button = root.get_by_role("button", name=pattern).first
-                button.wait_for(timeout=5000)
-                button.click(timeout=10000)
-                if debug_events is not None:
-                    _append_debug_event(debug_events, "post_clicked", page, selector=f"{scope_name}:role_button:{pattern.pattern}")
-                return
+                candidates = root.locator(selector)
+                for index in reversed(range(min(candidates.count(), 6))):
+                    button = candidates.nth(index)
+                    if not button.is_visible(timeout=300) or not button.is_enabled(timeout=300):
+                        continue
+                    button.click(timeout=5000)
+                    if debug_events is not None:
+                        _append_debug_event(debug_events, "post_clicked", page, selector=f"{scope_name}:{selector}:{index}")
+                    return
             except Exception as exc:
                 last_error = exc
     try:
         for scope_name, root in scoped_roots:
             candidates = root.locator("button, [role='button']")
             matched: list[tuple[float, float, int, str]] = []
-            for index in range(candidates.count()):
+            for index in range(min(candidates.count(), 100)):
                 item = candidates.nth(index)
                 try:
-                    if not item.is_visible(timeout=1000):
+                    if not item.is_visible(timeout=200) or not item.is_enabled(timeout=200):
                         continue
-                    text = re.sub(r"\s+", " ", (item.inner_text(timeout=1000) or "")).strip()
+                    text = re.sub(r"\s+", " ", (item.inner_text(timeout=200) or "")).strip()
                     if not text:
                         continue
                     lowered = text.lower()
-                    if not any(token in lowered for token in ("post", "ポスト", "投稿", "发布", "發佈", "發布")):
+                    if lowered not in {"post", "post all", "ポストする", "投稿", "发布", "發佈", "發布"}:
                         continue
                     box = item.bounding_box() or {}
                     x = float(box.get("x", 0.0))
@@ -526,7 +796,7 @@ def _click_post_button(page: Any, *, debug_events: list[dict[str, Any]] | None =
             for _, _, index, text in matched:
                 try:
                     item = candidates.nth(index)
-                    item.click(timeout=10000, force=True)
+                    item.click(timeout=5000)
                     if debug_events is not None:
                         _append_debug_event(debug_events, "post_clicked", page, selector=f"{scope_name}:generic_button:{text}")
                     return
@@ -537,7 +807,43 @@ def _click_post_button(page: Any, *, debug_events: list[dict[str, Any]] | None =
     raise XBrowserPublishError(f"找不到 X 发布按钮：{last_error}")
 
 
+def _x_post_submission_signal(page: Any, state: dict[str, Any], *, timeout_seconds: float = 12.0) -> str:
+    deadline = time.time() + max(1.0, timeout_seconds)
+    hidden_polls = 0
+    while time.time() < deadline:
+        if state.get("request_seen"):
+            return "create_tweet_request"
+        try:
+            dialog = page.locator('div[role="dialog"]:visible').first
+            editor = page.locator('div[data-testid="tweetTextarea_0"]:visible').first
+            visible = dialog.is_visible(timeout=200) and editor.is_visible(timeout=200)
+        except Exception:
+            visible = False
+        hidden_polls = 0 if visible else hidden_polls + 1
+        if hidden_polls >= 3:
+            return "composer_closed"
+        page.wait_for_timeout(250)
+    return ""
+
+
 def _submit_post(page: Any, *, debug_events: list[dict[str, Any]] | None = None) -> None:
+    submission: dict[str, Any] = {"request_seen": False, "request_url": "", "response_status": 0}
+
+    def on_request(request: Any) -> None:
+        url = str(getattr(request, "url", "") or "")
+        if "createtweet" not in url.lower() and "createpost" not in url.lower():
+            return
+        submission["request_seen"] = True
+        submission["request_url"] = url
+
+    def on_response(response: Any) -> None:
+        url = str(getattr(response, "url", "") or "")
+        if "createtweet" not in url.lower() and "createpost" not in url.lower():
+            return
+        submission["response_status"] = int(getattr(response, "status", 0) or 0)
+
+    page.on("request", on_request)
+    page.on("response", on_response)
     focus_selectors = [
         'div[role="dialog"] div[data-testid="tweetTextarea_0"]',
         'div[role="dialog"] div[role="textbox"]',
@@ -553,21 +859,36 @@ def _submit_post(page: Any, *, debug_events: list[dict[str, Any]] | None = None)
             break
         except Exception:
             continue
-    shortcuts = ["Control+Enter", "Meta+Enter"]
     last_error: Exception | None = None
-    for shortcut in shortcuts:
+    try:
+        _click_post_button(page, debug_events=debug_events)
+        signal = _x_post_submission_signal(page, submission)
+        if signal:
+            if debug_events is not None:
+                _append_debug_event(debug_events, "post_submit_confirmed", page, signal=signal, **submission)
+            return
+        last_error = XBrowserPublishError("点击 Post 后没有触发 CreateTweet 请求，编辑器也没有关闭")
+    except Exception as exc:
+        last_error = exc
+    for shortcut in ("Control+Enter", "Meta+Enter"):
         try:
+            for selector in focus_selectors:
+                try:
+                    page.locator(selector).first.click(timeout=1000)
+                    break
+                except Exception:
+                    continue
             page.keyboard.press(shortcut)
             if debug_events is not None:
                 _append_debug_event(debug_events, "post_submit_shortcut", page, shortcut=shortcut)
-            return
+            signal = _x_post_submission_signal(page, submission)
+            if signal:
+                if debug_events is not None:
+                    _append_debug_event(debug_events, "post_submit_confirmed", page, signal=signal, **submission)
+                return
+            last_error = XBrowserPublishError(f"{shortcut} 没有触发 CreateTweet 请求，编辑器也没有关闭")
         except Exception as exc:
             last_error = exc
-    try:
-        _click_post_button(page, debug_events=debug_events)
-        return
-    except Exception as exc:
-        last_error = exc
     raise XBrowserPublishError(f"提交 X Post 失败：{last_error}")
 
 
@@ -591,7 +912,9 @@ def _wait_post_result(
         if post_id and (not expected_handle or f"/{expected_handle}/status/{post_id}" not in existing_profile_status_hrefs):
             if debug_events is not None:
                 _append_debug_event(debug_events, "post_result_url", page, post_id=post_id)
-            return {"post_id": post_id, "x_url": f"https://x.com/i/web/status/{post_id}"}
+            best_candidate = {"post_id": post_id, "x_url": f"https://x.com/i/web/status/{post_id}"}
+            if not expected_handle or not normalized_text:
+                return best_candidate
         try:
             links = page.locator('a[href*="/status/"]')
             for index in range(min(links.count(), 20)):
@@ -622,7 +945,7 @@ def _wait_post_result(
                 page.goto(f"https://x.com/{expected_handle}", wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(4000)
                 current_profile_hrefs = set(_status_links_for_handle(page, expected_handle, limit=20))
-                matching = _find_matching_post_on_profile(page, expected_handle, normalized_text)
+                matching = _find_matching_post_on_profile(page, expected_handle, text)
                 if debug_events is not None:
                     _append_debug_event(
                         debug_events,
@@ -643,19 +966,21 @@ def _wait_post_result(
         if best_candidate:
             if debug_events is not None:
                 _append_debug_event(debug_events, "post_result_candidate_fallback", page, **best_candidate)
-            return best_candidate
+            if not expected_handle or not normalized_text:
+                return best_candidate
         time.sleep(2)
     return {"post_id": "", "x_url": ""}
 
 
-def publish_video_to_x_browser(
+def _publish_video_to_x_browser_locked(
     video_path: Path,
     *,
     text: str,
     made_with_ai: bool = True,
     user_data_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    video_path = _ensure_video_path(video_path)
+    source_video_path = _ensure_video_path(video_path)
+    video_path = prepare_x_video_for_upload(source_video_path)
     profile_dir = Path(user_data_dir).expanduser().resolve() if user_data_dir else X_BROWSER_USER_DATA_DIR
     profile_dir.mkdir(parents=True, exist_ok=True)
     # 清理上次异常退出残留的 Singleton 锁,否则新 chromium 会以为 profile 被占用而启动失败。
@@ -691,6 +1016,7 @@ def publish_video_to_x_browser(
             display=(launch_env or {}).get("DISPLAY", ""),
             compose_url=X_BROWSER_COMPOSE_URL,
             video_path=str(video_path),
+            source_video_path=str(source_video_path),
             user_data_dir=str(profile_dir),
         )
         context = browser_type.launch_persistent_context(
@@ -758,19 +1084,33 @@ def publish_video_to_x_browser(
                 text=text,
                 debug_events=debug_events,
             )
-            if not result.get("x_url"):
+            if result.get("x_url"):
+                result["verified_media"] = True
+            else:
                 screenshot = _screenshot(page, "x_post_result_unknown")
                 _append_debug_event(debug_events, "post_result_unknown", page, screenshot=screenshot)
-                result["warning"] = "X 页面未返回明确帖子链接，请到主页确认是否已发布"
+                result["verified_media"] = False
+                result["warning"] = "X 页面未返回可验证的视频帖子，请到主页人工复核"
                 if screenshot:
                     result["screenshot"] = screenshot
             debug_path = _write_debug_log(debug_log_path, debug_events)
+            if not result.get("post_id") or not result.get("x_url") or not result.get("verified_media"):
+                raise XBrowserPublishError(
+                    "X 未返回可验证的新视频帖子，不能记为发布成功。"
+                    + (f" 截图：{result.get('screenshot')}" if result.get("screenshot") else "")
+                    + f" 调试日志：{debug_path}"
+                )
             return {
                 "post_id": result.get("post_id", ""),
                 "x_url": result.get("x_url", ""),
                 "text": str(text or "").strip()[:280],
                 "media_id": "",
-                "media": {"provider": "browser", "video_path": str(video_path)},
+                "media": {
+                    "provider": "browser",
+                    "video_path": str(video_path),
+                    "source_video_path": str(source_video_path),
+                    "transcoded": video_path != source_video_path,
+                },
                 "made_with_ai": made_with_ai,
                 "publisher": "browser",
                 "debug_log": debug_path,
@@ -791,3 +1131,47 @@ def publish_video_to_x_browser(
             raise XBrowserPublishError(message) from exc
         finally:
             context.close()
+
+
+def publish_video_to_x_browser(
+    video_path: Path,
+    *,
+    text: str,
+    made_with_ai: bool = True,
+    user_data_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    source = _ensure_video_path(video_path)
+    profile_dir = Path(user_data_dir).expanduser().resolve() if user_data_dir else X_BROWSER_USER_DATA_DIR
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    with _exclusive_profile_publish_lock(profile_dir):
+        _wait_for_x_browser_publish_slot(profile_dir)
+        last_error: Exception | None = None
+        attempts = X_BROWSER_MEDIA_FULL_RETRIES + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                result = _publish_video_to_x_browser_locked(
+                    source,
+                    text=text,
+                    made_with_ai=made_with_ai,
+                    user_data_dir=profile_dir,
+                )
+                raw_result = result.get("raw") if isinstance(result.get("raw"), dict) else {}
+                if (
+                    not str(result.get("post_id") or "").strip()
+                    or not str(result.get("x_url") or "").strip()
+                    or raw_result.get("verified_media") is False
+                ):
+                    raise XBrowserPublishError("X 未返回可验证的新视频帖子，不能记为发布成功")
+                _record_x_browser_publish_success(profile_dir, result)
+                return result
+            except XBrowserPublishError as exc:
+                last_error = exc
+                if attempt >= attempts or not _is_retryable_media_failure(exc):
+                    raise
+                print(
+                    f"[X browser] media upload failed, retrying full publish "
+                    f"in {X_BROWSER_MEDIA_RETRY_DELAY_SECONDS}s ({attempt}/{attempts})",
+                    flush=True,
+                )
+                time.sleep(X_BROWSER_MEDIA_RETRY_DELAY_SECONDS)
+        raise XBrowserPublishError(str(last_error or "X 浏览器自动发布失败"))
