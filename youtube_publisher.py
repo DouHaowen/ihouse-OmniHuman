@@ -13,6 +13,7 @@ load_dotenv(override=False)
 YOUTUBE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+YOUTUBE_COMMENT_THREADS_URL = "https://www.googleapis.com/youtube/v3/commentThreads"
 YOUTUBE_PLAYLIST_ITEMS_URL = "https://www.googleapis.com/youtube/v3/playlistItems"
 YOUTUBE_UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 YOUTUBE_THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
@@ -208,6 +209,80 @@ def get_youtube_video_metrics(token_store_path: Path, video_id: str) -> dict[str
         "favorite_count": int(statistics.get("favoriteCount") or 0),
         "raw": item,
     }
+
+
+def get_youtube_video_comments(
+    token_store_path: Path,
+    video_id: str,
+    *,
+    max_results: int = 100,
+) -> list[dict[str, Any]]:
+    video_id = str(video_id or "").strip()
+    if not video_id:
+        raise YouTubePublishError("读取 YouTube 评论失败：缺少 video_id")
+    access_token = refresh_youtube_access_token(token_store_path)
+    response = requests.get(
+        YOUTUBE_COMMENT_THREADS_URL,
+        params={
+            "part": "snippet,replies",
+            "videoId": video_id,
+            "maxResults": min(100, max(1, int(max_results or 100))),
+            "order": "time",
+            "textFormat": "plainText",
+        },
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise YouTubePublishError(f"读取 YouTube 评论失败：{response.status_code} {response.text[:500]}")
+    comments: list[dict[str, Any]] = []
+    for thread in response.json().get("items") or []:
+        if not isinstance(thread, dict):
+            continue
+        thread_snippet = thread.get("snippet") if isinstance(thread.get("snippet"), dict) else {}
+        top_level = thread_snippet.get("topLevelComment") if isinstance(thread_snippet.get("topLevelComment"), dict) else {}
+        top_snippet = top_level.get("snippet") if isinstance(top_level.get("snippet"), dict) else {}
+        top_id = str(top_level.get("id") or "").strip()
+        if top_id:
+            comments.append(
+                {
+                    "comment_id": top_id,
+                    "parent_id": "",
+                    "author_id": str(((top_snippet.get("authorChannelId") or {}).get("value")) or "").strip(),
+                    "author_name": str(top_snippet.get("authorDisplayName") or "").strip(),
+                    "author_avatar_url": str(top_snippet.get("authorProfileImageUrl") or "").strip(),
+                    "message": str(top_snippet.get("textOriginal") or top_snippet.get("textDisplay") or "").strip(),
+                    "published_at_text": str(top_snippet.get("publishedAt") or "").strip(),
+                    "like_count": int(top_snippet.get("likeCount") or 0),
+                    "reply_count": int(thread_snippet.get("totalReplyCount") or 0),
+                    "url": f"https://www.youtube.com/watch?v={video_id}&lc={top_id}",
+                    "raw": top_level,
+                }
+            )
+        replies = ((thread.get("replies") or {}).get("comments") or []) if isinstance(thread.get("replies"), dict) else []
+        for reply in replies:
+            if not isinstance(reply, dict):
+                continue
+            snippet = reply.get("snippet") if isinstance(reply.get("snippet"), dict) else {}
+            reply_id = str(reply.get("id") or "").strip()
+            if not reply_id:
+                continue
+            comments.append(
+                {
+                    "comment_id": reply_id,
+                    "parent_id": str(snippet.get("parentId") or top_id).strip(),
+                    "author_id": str(((snippet.get("authorChannelId") or {}).get("value")) or "").strip(),
+                    "author_name": str(snippet.get("authorDisplayName") or "").strip(),
+                    "author_avatar_url": str(snippet.get("authorProfileImageUrl") or "").strip(),
+                    "message": str(snippet.get("textOriginal") or snippet.get("textDisplay") or "").strip(),
+                    "published_at_text": str(snippet.get("publishedAt") or "").strip(),
+                    "like_count": int(snippet.get("likeCount") or 0),
+                    "reply_count": 0,
+                    "url": f"https://www.youtube.com/watch?v={video_id}&lc={reply_id}",
+                    "raw": reply,
+                }
+            )
+    return comments
 
 
 def find_recent_youtube_upload(

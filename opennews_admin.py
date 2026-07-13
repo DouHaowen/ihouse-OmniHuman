@@ -36,9 +36,13 @@ for _key, _value in dotenv_values().items():
         "OPENAI_RELAY_BASE_URL",
         "OPENAI_RELAY_MODEL",
         "OPENAI_RELAY_REASONING_EFFORT",
+        "OPENAI_RELAY_USE_CHAT_COMPLETIONS",
         "OPENNEWS_MODEL_PROVIDER",
         "OPENNEWS_TEXT_MODEL_PROVIDER",
         "OPENNEWS_RELAY_MODEL",
+        "OPENNEWS_RELAY_USE_CHAT_COMPLETIONS",
+        "OPENNEWS_RELAY_FALLBACK_MODELS",
+        "OPENAI_RELAY_OPENNEWS_FALLBACK_MODELS",
         "OPENAI_RELAY_OPENNEWS_MODEL",
         "OPENNEWS_RELAY_REASONING_EFFORT",
         "OPENAI_RELAY_OPENNEWS_REASONING_EFFORT",
@@ -103,16 +107,15 @@ def _opennews_relay_use_chat_completions() -> bool:
 
 
 def _get_openai_relay_model() -> str:
-    return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.5").strip() or "gpt-5.5"
+    return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.4").strip() or "gpt-5.4"
 
 
 def _get_opennews_relay_model() -> str:
-    # OpenNews uses Claude through the OpenAI-compatible relay, not the native Anthropic client.
     return (
         os.getenv("OPENNEWS_RELAY_MODEL")
         or os.getenv("OPENAI_RELAY_OPENNEWS_MODEL")
-        or "claude-sonnet-4-6"
-    ).strip() or "claude-sonnet-4-6"
+        or "gpt-5.4"
+    ).strip() or "gpt-5.4"
 
 
 def _get_opennews_relay_model_attempts() -> list[str]:
@@ -126,7 +129,7 @@ def _get_opennews_relay_model_attempts() -> list[str]:
     for model in [primary, *[part.strip() for part in raw_fallbacks.split(",")]]:
         if model and model not in models:
             models.append(model)
-    return models or ["claude-sonnet-4-6"]
+    return models or ["gpt-5.4"]
 
 
 def _get_opennews_relay_retry_attempts() -> int:
@@ -3485,7 +3488,7 @@ def generate_opennews_draft(*, article: dict, target_market: str = "cn", notes: 
     model_provider = _get_opennews_model_provider()
     if model_provider in {"relay", "api_relay", "openai_relay", "claude_relay"}:
         model_name = _get_opennews_relay_model()
-        model_provider_label = "API中转模型 / Claude"
+        model_provider_label = "API中转模型 / GPT-5.4"
     elif model_provider in {"claude", "anthropic"}:
         model_name = os.getenv("ANTHROPIC_OPENNEWS_MODEL", "claude-sonnet-4-6")
         model_provider_label = "Claude"

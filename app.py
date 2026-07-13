@@ -128,6 +128,7 @@ from facebook_publisher import (
     exchange_facebook_long_lived_user_token,
     facebook_env_config,
     get_facebook_pages,
+    get_facebook_video_comments,
     get_facebook_video_metrics,
     get_facebook_page,
     load_facebook_token_store,
@@ -140,6 +141,7 @@ from youtube_publisher import (
     exchange_youtube_code_for_tokens,
     find_recent_youtube_upload,
     get_youtube_channel,
+    get_youtube_video_comments,
     get_youtube_video_metrics,
     save_youtube_oauth_app_config,
     save_youtube_refresh_token,
@@ -154,6 +156,7 @@ from x_publisher import (
     build_x_authorization_url,
     exchange_x_code_for_tokens,
     generate_x_pkce_pair,
+    get_x_post_comments,
     get_x_post_metrics,
     get_x_user,
     load_x_token_store,
@@ -161,6 +164,7 @@ from x_publisher import (
     upload_video_to_x,
     x_env_config,
 )
+from media_insights import MediaInsightsStore, MediaInsightsSynchronizer
 from x_browser_publisher import (
     XBrowserPublishError,
     x_browser_auth_ready,
@@ -306,6 +310,10 @@ X_TOKEN_STORE_PATH = X_AUTH_DIR / "x_token.json"
 FACEBOOK_AUTH_DIR = OUTPUT_DIR / "facebook_auth"
 FACEBOOK_TOKEN_STORE_PATH = FACEBOOK_AUTH_DIR / "facebook_token.json"
 FACEBOOK_PUBLISH_STATE_PATH = FACEBOOK_AUTH_DIR / "publish_state.json"
+MEDIA_INSIGHTS_DIR = OUTPUT_DIR / "media_insights"
+MEDIA_INSIGHTS_DB_PATH = Path(
+    os.getenv("MEDIA_INSIGHTS_DB_PATH", str(MEDIA_INSIGHTS_DIR / "media_insights.db"))
+).expanduser()
 AUTO_DIGITAL_BATCH_DIR.mkdir(parents=True, exist_ok=True)
 FLOORPLAN_NAV_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_AUTO_DIR.mkdir(parents=True, exist_ok=True)
@@ -316,7 +324,11 @@ YOUTUBE_THUMBNAIL_RETRY_DIR.mkdir(parents=True, exist_ok=True)
 OPENNEWS_YOUTUBE_PUBLISH_LEDGER_DIR.mkdir(parents=True, exist_ok=True)
 X_AUTH_DIR.mkdir(parents=True, exist_ok=True)
 FACEBOOK_AUTH_DIR.mkdir(parents=True, exist_ok=True)
+MEDIA_INSIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 COMPOSE_READY_RECOVERY_STARTED = False
+MEDIA_INSIGHTS_WORKER_STARTED = False
+MEDIA_INSIGHTS_STORE = MediaInsightsStore(MEDIA_INSIGHTS_DB_PATH)
+MEDIA_INSIGHTS_SYNC: Optional[MediaInsightsSynchronizer] = None
 
 MATERIAL_VECTOR_SERVICE_URL = os.getenv("OPENNEWS_MATERIAL_VECTOR_URL", "http://192.168.0.34:8897").strip().rstrip("/")
 MATERIAL_VECTOR_SYNC_ENABLED = (
@@ -1520,6 +1532,7 @@ async def _start_opennews_batch_scheduler() -> None:
     _start_compose_ready_recovery_worker()
     _start_topic_auto_scheduler(poll_seconds=60)
     _start_property_auto_scheduler(poll_seconds=60)
+    _start_media_insights_worker()
 
 VOICE_PRESETS = [
     {
@@ -1861,7 +1874,7 @@ SCRIPT_MODEL_OPTIONS = [
     {
         "id": SCRIPT_MODEL_API_RELAY,
         "name": "API中转模型",
-        "description": "管理员测试：走 sub2api 中转站 Responses 接口，默认 gpt-5.5。",
+        "description": "统一走 api.office.ihousejapan.cn 的 GPT-5.4 Chat Completions 接口。",
         "admin_only": True,
         "default": False,
     },
@@ -5353,6 +5366,277 @@ def _start_property_auto_scheduler(poll_seconds: int = 60) -> None:
     threading.Thread(target=loop, name="property-auto-scheduler", daemon=True).start()
 
 
+def _media_insights_global_account_config(platform: str) -> dict[str, Any]:
+    platform = str(platform or "").strip().lower()
+    if platform == "facebook":
+        store = load_facebook_token_store(FACEBOOK_TOKEN_STORE_PATH)
+        env = facebook_env_config()
+        return {
+            "binding_mode": "global",
+            "page_id": store.get("page_id") or env.get("page_id") or "",
+            "page_name": store.get("page_name") or "",
+            "page_access_token": store.get("page_access_token") or env.get("page_access_token") or "",
+        }
+    if platform == "x":
+        store = load_x_token_store(X_TOKEN_STORE_PATH)
+        meta = store.get("meta") if isinstance(store.get("meta"), dict) else {}
+        user = meta.get("user") if isinstance(meta.get("user"), dict) else {}
+        debug = _latest_x_browser_account_context() if "_latest_x_browser_account_context" in globals() else {}
+        return {
+            "binding_mode": "global",
+            "handle": debug.get("handle") or user.get("username") or meta.get("username") or "",
+            "account_label": user.get("name") or "",
+            "profile_dir": str(x_browser_profile_dir()),
+        }
+    if platform == "youtube":
+        return {
+            "binding_mode": "global",
+            "channel_name": "全局 YouTube" if YOUTUBE_TOKEN_STORE_PATH.exists() else "",
+            "token_store_path": str(YOUTUBE_TOKEN_STORE_PATH) if YOUTUBE_TOKEN_STORE_PATH.exists() else "",
+        }
+    return {}
+
+
+def _media_insights_account_config(item: dict[str, Any]) -> dict[str, Any]:
+    platform = str(item.get("platform") or "").strip().lower()
+    workflow = str(item.get("workflow") or "").strip()
+    channel_id = str(item.get("channel_id") or "").strip()
+    target_market = str(item.get("target_market") or "cn").strip() or "cn"
+    account: dict[str, Any] = {}
+    if workflow == "opennews":
+        account = (_opennews_publish_account_for(channel_id, target_market, platform).get("account") or {})
+    elif workflow in {"digital_human", "property_video"}:
+        topic_config = _load_topic_auto_config()
+        account = topic_config.get(platform) if isinstance(topic_config.get(platform), dict) else {}
+    if not account or str(account.get("binding_mode") or "").strip().lower() == "global":
+        global_account = _media_insights_global_account_config(platform)
+        account = {
+            **account,
+            **{key: value for key, value in global_account.items() if value not in (None, "", [], {})},
+        }
+    return dict(account)
+
+
+def _media_insights_account_identity(
+    platform: str,
+    account: dict[str, Any],
+    *,
+    fallback_label: str = "",
+) -> dict[str, str]:
+    platform = str(platform or "").strip().lower()
+    if platform == "x":
+        handle = str(account.get("handle") or account.get("username") or "").strip().lstrip("@")
+        external_id = handle
+        label = f"@{handle}" if handle else str(account.get("account_label") or account.get("label") or fallback_label).strip()
+    elif platform == "facebook":
+        external_id = str(account.get("page_id") or "").strip()
+        label = str(account.get("page_name") or external_id or fallback_label).strip()
+    elif platform == "youtube":
+        external_id = str(account.get("channel_id") or "").strip()
+        label = str(account.get("channel_name") or fallback_label).strip()
+    else:
+        external_id = ""
+        label = str(fallback_label or platform).strip()
+    scope = external_id or label
+    if not scope:
+        return {}
+    digest = hashlib.sha256(f"{platform}:{scope.lower()}".encode("utf-8")).hexdigest()[:16]
+    return {
+        "account_key": f"{platform}:{digest}",
+        "account_label": label,
+        "account_external_id": external_id,
+    }
+
+
+def _enrich_media_insights_publication(item: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(item)
+    platform = str(enriched.get("platform") or "").strip().lower()
+    discovered_account = enriched.get("publish_account") if isinstance(enriched.get("publish_account"), dict) else {}
+    account = {**_media_insights_account_config(enriched), **discovered_account}
+    identity = _media_insights_account_identity(
+        platform,
+        account,
+        fallback_label={"youtube": "YouTube 账号", "facebook": "Facebook Page", "x": "X 账号"}.get(platform, platform),
+    )
+    enriched.update(identity)
+    return enriched
+
+
+def _build_media_insights_configured_catalog() -> dict[str, list[dict[str, Any]]]:
+    channels: dict[str, dict[str, Any]] = {}
+    accounts: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add_channel(channel_id: str, channel_name: str) -> None:
+        channel_id = str(channel_id or "").strip()
+        if channel_id:
+            channels[channel_id] = {"channel_id": channel_id, "channel_name": str(channel_name or channel_id).strip()}
+
+    def add_account(platform: str, account: dict[str, Any], channel_id: str, target_market: str) -> None:
+        identity = _media_insights_account_identity(platform, account)
+        if not identity:
+            return
+        key = (platform, identity["account_key"])
+        entry = accounts.setdefault(
+            key,
+            {
+                "platform": platform,
+                **identity,
+                "channel_ids": [],
+                "target_markets": [],
+            },
+        )
+        if channel_id and channel_id not in entry["channel_ids"]:
+            entry["channel_ids"].append(channel_id)
+        if target_market and target_market not in entry["target_markets"]:
+            entry["target_markets"].append(target_market)
+
+    config = _load_opennews_channels_config(include_secrets=True)
+    global_accounts = {platform: _media_insights_global_account_config(platform) for platform in ("youtube", "facebook", "x")}
+    for channel in config.get("channels") or []:
+        if not isinstance(channel, dict) or not channel.get("enabled"):
+            continue
+        channel_id = str(channel.get("id") or "").strip()
+        add_channel(channel_id, str(channel.get("name") or channel_id))
+        platform_flags = channel.get("platforms") if isinstance(channel.get("platforms"), dict) else {}
+        for market, slots in (channel.get("accounts") or {}).items():
+            if not isinstance(slots, dict):
+                continue
+            for platform in ("youtube", "facebook", "x"):
+                slot = slots.get(platform) if isinstance(slots.get(platform), dict) else {}
+                if not platform_flags.get(platform) or not slot.get("enabled", True):
+                    continue
+                account = dict(slot)
+                if str(account.get("binding_mode") or "").strip().lower() == "global":
+                    account.update({key: value for key, value in global_accounts[platform].items() if value not in (None, "", [], {})})
+                add_account(platform, account, channel_id, str(market or ""))
+
+    topic_config = _load_topic_auto_config()
+    topic_accounts: list[tuple[str, dict[str, Any]]] = []
+    for platform in ("youtube", "facebook"):
+        account = topic_config.get(platform) if isinstance(topic_config.get(platform), dict) else {}
+        if account.get("enabled"):
+            topic_accounts.append((platform, dict(account)))
+    if topic_accounts:
+        add_channel("digital_human", "自动化数字人")
+        add_channel("property_video", "房源实拍")
+        for platform, account in topic_accounts:
+            add_account(platform, account, "digital_human", "cn")
+            add_account(platform, account, "property_video", "cn")
+
+    override_path = str(os.getenv("MEDIA_INSIGHTS_ACCOUNT_CATALOG_PATH", "")).strip()
+    if override_path:
+        try:
+            override = json.loads(Path(override_path).expanduser().read_text(encoding="utf-8"))
+        except Exception:
+            override = {}
+        for channel in override.get("channels") or []:
+            if isinstance(channel, dict):
+                add_channel(str(channel.get("channel_id") or ""), str(channel.get("channel_name") or ""))
+        for item in override.get("accounts") or []:
+            if not isinstance(item, dict):
+                continue
+            account = {
+                "channel_name": item.get("account_label") if item.get("platform") == "youtube" else "",
+                "page_name": item.get("account_label") if item.get("platform") == "facebook" else "",
+                "page_id": item.get("account_external_id") if item.get("platform") == "facebook" else "",
+                "handle": str(item.get("account_label") or "").lstrip("@") if item.get("platform") == "x" else "",
+            }
+            for channel_id in item.get("channel_ids") or [""]:
+                add_account(str(item.get("platform") or ""), account, str(channel_id or ""), "")
+
+    return {"channels": list(channels.values()), "accounts": list(accounts.values())}
+
+
+def _media_insights_youtube_token_path(item: dict[str, Any]) -> Path:
+    if str(item.get("workflow") or "") == "opennews":
+        return _opennews_youtube_token_path_for(
+            str(item.get("channel_id") or "general"),
+            str(item.get("target_market") or "cn"),
+        )
+    if str(item.get("workflow") or "") in {"digital_human", "property_video"}:
+        config = _load_topic_auto_config()
+        youtube = config.get("youtube") if isinstance(config.get("youtube"), dict) else {}
+        token_path = str(youtube.get("token_store_path") or "").strip()
+        if token_path:
+            return Path(token_path)
+    return YOUTUBE_TOKEN_STORE_PATH
+
+
+def _media_insights_facebook_token(item: dict[str, Any]) -> str:
+    account = _media_insights_account_config(item)
+    return str(account.get("page_access_token") or "").strip()
+
+
+def _fetch_media_insights_metrics(item: dict[str, Any]) -> dict[str, Any]:
+    platform = str(item.get("platform") or "").strip().lower()
+    external_id = str(item.get("external_id") or "").strip()
+    if platform == "youtube":
+        return get_youtube_video_metrics(_media_insights_youtube_token_path(item), external_id)
+    if platform == "facebook":
+        return get_facebook_video_metrics(
+            FACEBOOK_TOKEN_STORE_PATH,
+            external_id,
+            page_access_token=_media_insights_facebook_token(item),
+        )
+    if platform == "x":
+        return get_x_post_metrics(X_TOKEN_STORE_PATH, external_id)
+    raise ValueError(f"不支持的平台：{platform}")
+
+
+def _fetch_media_insights_comments(item: dict[str, Any]) -> list[dict[str, Any]]:
+    platform = str(item.get("platform") or "").strip().lower()
+    external_id = str(item.get("external_id") or "").strip()
+    if platform == "youtube":
+        return get_youtube_video_comments(_media_insights_youtube_token_path(item), external_id, max_results=100)
+    if platform == "facebook":
+        return get_facebook_video_comments(
+            FACEBOOK_TOKEN_STORE_PATH,
+            external_id,
+            page_access_token=_media_insights_facebook_token(item),
+            max_results=100,
+        )
+    if platform == "x":
+        return get_x_post_comments(X_TOKEN_STORE_PATH, external_id, max_results=100)
+    raise ValueError(f"不支持的平台：{platform}")
+
+
+def _get_media_insights_synchronizer() -> MediaInsightsSynchronizer:
+    global MEDIA_INSIGHTS_SYNC
+    if MEDIA_INSIGHTS_SYNC is None:
+        MEDIA_INSIGHTS_SYNC = MediaInsightsSynchronizer(
+            MEDIA_INSIGHTS_STORE,
+            OUTPUT_DIR,
+            _enrich_media_insights_publication,
+            _fetch_media_insights_metrics,
+            _fetch_media_insights_comments,
+            result_loader=_load_result_from_output_dir,
+        )
+    return MEDIA_INSIGHTS_SYNC
+
+
+def _start_media_insights_worker() -> None:
+    global MEDIA_INSIGHTS_WORKER_STARTED
+    if MEDIA_INSIGHTS_WORKER_STARTED:
+        return
+    if os.getenv("MEDIA_INSIGHTS_SYNC_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    MEDIA_INSIGHTS_WORKER_STARTED = True
+    interval_seconds = max(300, int(os.getenv("MEDIA_INSIGHTS_SYNC_INTERVAL_SECONDS", "1800") or "1800"))
+    batch_size = max(10, min(int(os.getenv("MEDIA_INSIGHTS_SYNC_BATCH_SIZE", "120") or "120"), 500))
+
+    def loop() -> None:
+        time.sleep(15)
+        while True:
+            try:
+                result = _get_media_insights_synchronizer().sync_once(limit=batch_size)
+                print(f"[media-insights] sync result={result}", flush=True)
+            except Exception as exc:
+                print(f"[media-insights] sync failed: {exc!r}", flush=True)
+            time.sleep(interval_seconds)
+
+    threading.Thread(target=loop, name="media-insights-sync", daemon=True).start()
+
+
 def _push_live_event(event_type: str, message: str, task: Optional[dict] = None, extra: Optional[dict] = None):
     payload = {
         "time": time.time(),
@@ -6188,7 +6472,7 @@ def _jclaw_lab_secret_keys() -> list[tuple[str, bytes]]:
     return keys
 
 
-def _verify_jclaw_lab_token(token: str) -> Optional[dict[str, Any]]:
+def _verify_jclaw_lab_token(token: str, *, expected_app: str = "") -> Optional[dict[str, Any]]:
     parts = str(token or "").split(".")
     if len(parts) != 3 or not all(parts):
         return None
@@ -6217,8 +6501,8 @@ def _verify_jclaw_lab_token(token: str) -> Optional[dict[str, Any]]:
         return None
     if payload.get("nbf") and int(payload.get("nbf") or 0) > now + 30:
         return None
-    expected_app = os.getenv("JCLAW_LAB_APP_KEY", "").strip()
-    if expected_app and str(payload.get("app") or "").strip() != expected_app:
+    required_app = str(expected_app or os.getenv("JCLAW_LAB_APP_KEY", "")).strip()
+    if required_app and str(payload.get("app") or "").strip() != required_app:
         return None
     issuer = str(payload.get("iss") or "").strip()
     if issuer and issuer != "jclaw-lab":
@@ -6234,11 +6518,11 @@ def _resolve_jclaw_lab_user(payload: dict[str, Any]) -> str:
     return _resolve_jclaw_user(normalized_payload)
 
 
-def _get_current_user_or_jclaw_lab(request: Request) -> Optional[dict]:
+def _get_current_user_or_jclaw_lab(request: Request, *, expected_app: str = "") -> Optional[dict]:
     user = _get_current_user(request)
     if user:
         return user
-    payload = _verify_jclaw_lab_token(_jclaw_lab_token_from_request(request))
+    payload = _verify_jclaw_lab_token(_jclaw_lab_token_from_request(request), expected_app=expected_app)
     if not payload:
         return None
     try:
@@ -6256,8 +6540,8 @@ def _get_current_user_or_jclaw_lab(request: Request) -> Optional[dict]:
     return user
 
 
-def _get_current_jclaw_lab_user(request: Request) -> Optional[dict]:
-    payload = _verify_jclaw_lab_token(_jclaw_lab_token_from_request(request))
+def _get_current_jclaw_lab_user(request: Request, *, expected_app: str = "") -> Optional[dict]:
+    payload = _verify_jclaw_lab_token(_jclaw_lab_token_from_request(request), expected_app=expected_app)
     if not payload:
         return None
     try:
@@ -6275,20 +6559,25 @@ def _get_current_jclaw_lab_user(request: Request) -> Optional[dict]:
     return user
 
 
-def _require_lab_or_user(request: Request) -> tuple[Optional[dict], Optional[JSONResponse]]:
-    user = _get_current_user_or_jclaw_lab(request)
+def _require_lab_or_user(request: Request, *, expected_app: str = "") -> tuple[Optional[dict], Optional[JSONResponse]]:
+    user = _get_current_user_or_jclaw_lab(request, expected_app=expected_app)
     if not user:
         return None, _auth_error("请先通过 JClaw 小程序或网页登录")
     return user, None
 
 
-def _require_jclaw_lab_user(request: Request) -> tuple[Optional[dict], Optional[JSONResponse]]:
-    user = _get_current_jclaw_lab_user(request)
+def _require_jclaw_lab_user(
+    request: Request,
+    *,
+    expected_app: str = "",
+    preview_url: str = "/lab/opennews",
+) -> tuple[Optional[dict], Optional[JSONResponse]]:
+    user = _get_current_jclaw_lab_user(request, expected_app=expected_app)
     if not user:
         return None, JSONResponse(
             {
-                "error": "这个地址是 JClaw Lab 小程序正式入口，请通过同事 App 打开。浏览器预览请使用 /lab/opennews。",
-                "preview_url": "/lab/opennews",
+                "error": f"这个地址是 JClaw Lab 小程序正式入口，请通过同事 App 打开。浏览器预览请使用 {preview_url}。",
+                "preview_url": preview_url,
             },
             status_code=401,
         )
@@ -9700,6 +9989,52 @@ async def lab_opennews_manifest(request: Request):
     }
 
 
+@app.get("/lab/media-insights", response_class=HTMLResponse)
+async def lab_media_insights_page(request: Request):
+    if not _get_current_user(request):
+        return RedirectResponse(url="/?next=%2Flab%2Fmedia-insights", status_code=302)
+    return templates.TemplateResponse(request, "lab_media_insights.html")
+
+
+@app.get("/lab/apps/media-insights", response_class=HTMLResponse)
+async def lab_media_insights_private_app(request: Request):
+    user, error = _require_jclaw_lab_user(
+        request,
+        expected_app="ihouse-media-insights",
+        preview_url="/lab/media-insights",
+    )
+    if error:
+        return error
+    return templates.TemplateResponse(request, "lab_media_insights.html", {"lab_user": user})
+
+
+@app.get("/lab/media-insights/manifest.json")
+async def lab_media_insights_manifest(request: Request):
+    base_url = _get_public_base_url(request).rstrip("/")
+    return {
+        "key": "ihouse-media-insights",
+        "appKey": "ihouse-media-insights",
+        "name": "iHouse 媒体数据中心",
+        "description": "汇总本系统发布到 YouTube、Facebook 和 X 的视频数据与评论。",
+        "entry_url": f"{base_url}/lab/apps/media-insights",
+        "preview_url": f"{base_url}/lab/media-insights",
+        "icon_url": f"{base_url}/public/assets/ihouse-logo.webp",
+        "type": "web",
+        "network": "public",
+        "private": True,
+        "scopes": ["auth.read", "auth.token"],
+        "backend": {
+            "base_url": base_url,
+            "auth": "Authorization: Bearer <JClaw Lab JWT>",
+            "health_url": f"{base_url}/api/lab/media-insights/me",
+        },
+        "notes": [
+            "只统计带有系统发布回执的平台视频，不读取人工发布内容。",
+            "entry_url 需要 app=ihouse-media-insights 的 JClaw Lab JWT。",
+        ],
+    }
+
+
 @app.get("/sso/login", response_class=HTMLResponse)
 async def jclaw_sso_login(request: Request):
     handoff = request.query_params.get("handoff") or request.query_params.get("token")
@@ -11453,6 +11788,91 @@ async def lab_opennews_me(request: Request):
     if error:
         return error
     return {"user": user}
+
+
+def _require_media_insights_user(request: Request) -> tuple[Optional[dict], Optional[JSONResponse]]:
+    return _require_lab_or_user(request, expected_app="ihouse-media-insights")
+
+
+@app.get("/api/lab/media-insights/me")
+async def lab_media_insights_me(request: Request):
+    user, error = _require_media_insights_user(request)
+    if error:
+        return error
+    return {"user": user, "can_sync": _is_admin(user)}
+
+
+@app.get("/api/lab/media-insights/dashboard")
+async def lab_media_insights_dashboard(
+    request: Request,
+    days: int = 30,
+    channel_id: str = "",
+    platform: str = "",
+    account_key: str = "",
+    search: str = "",
+    limit: int = 50,
+    offset: int = 0,
+):
+    _, error = _require_media_insights_user(request)
+    if error:
+        return error
+    status = MEDIA_INSIGHTS_STORE.sync_status()
+    if not status.get("content_count"):
+        try:
+            _get_media_insights_synchronizer().discover()
+        except Exception as exc:
+            print(f"[media-insights] initial discovery failed: {exc!r}", flush=True)
+    catalog = _build_media_insights_configured_catalog()
+    return MEDIA_INSIGHTS_STORE.dashboard(
+        days=days,
+        channel_id=channel_id,
+        platform=platform,
+        account_key=account_key,
+        search=search,
+        limit=limit,
+        offset=offset,
+        configured_channels=catalog.get("channels") or [],
+        configured_accounts=catalog.get("accounts") or [],
+    )
+
+
+@app.get("/api/lab/media-insights/contents/{platform}/{external_id}/comments")
+async def lab_media_insights_comments(platform: str, external_id: str, request: Request, limit: int = 100):
+    _, error = _require_media_insights_user(request)
+    if error:
+        return error
+    payload = MEDIA_INSIGHTS_STORE.comments(platform, external_id, limit=limit)
+    if not payload.get("content"):
+        return JSONResponse({"error": "未找到该系统发布内容"}, status_code=404)
+    return payload
+
+
+@app.get("/api/lab/media-insights/sync-status")
+async def lab_media_insights_sync_status(request: Request):
+    _, error = _require_media_insights_user(request)
+    if error:
+        return error
+    return MEDIA_INSIGHTS_STORE.sync_status()
+
+
+@app.post("/api/lab/media-insights/sync")
+async def lab_media_insights_sync_now(request: Request):
+    user, error = _require_media_insights_user(request)
+    if error:
+        return error
+    if not _is_admin(user):
+        return _forbidden_error("只有管理员可以手动刷新平台数据")
+    status = MEDIA_INSIGHTS_STORE.sync_status()
+    if status.get("running"):
+        return JSONResponse({"ok": False, "running": True, "message": "媒体数据正在同步"}, status_code=202)
+    thread = threading.Thread(
+        target=_get_media_insights_synchronizer().sync_once,
+        kwargs={"force": True, "limit": 200},
+        name="media-insights-manual-sync",
+        daemon=True,
+    )
+    thread.start()
+    return JSONResponse({"ok": True, "running": True, "message": "已开始刷新媒体数据"}, status_code=202)
 
 
 @app.post("/api/lab/opennews/batches/run-now")

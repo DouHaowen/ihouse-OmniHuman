@@ -704,7 +704,7 @@ def _openai_relay_use_chat_completions() -> bool:
 
 
 def _get_openai_relay_model() -> str:
-    return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.5").strip() or "gpt-5.5"
+    return (os.getenv("OPENAI_RELAY_MODEL") or "gpt-5.4").strip() or "gpt-5.4"
 
 
 def _get_openai_relay_reasoning_effort() -> str:

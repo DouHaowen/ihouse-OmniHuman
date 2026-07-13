@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>iHouse 媒体数据中心</title>
+  <script src="/public/assets/jclaw-lab-sdk.browser.js"></script>
+  <style>
+    :root {
+      --ink: #17211b;
+      --muted: #66716a;
+      --line: #dbe2dd;
+      --panel: #ffffff;
+      --wash: #f4f7f5;
+      --green: #087a52;
+      --green-soft: #e6f4ed;
+      --coral: #c55335;
+      --coral-soft: #fff0eb;
+      --blue: #17669a;
+      --blue-soft: #e9f3f9;
+      --black: #111713;
+      --shadow: 0 12px 28px rgba(18, 32, 23, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--wash);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      letter-spacing: 0;
+    }
+    button, input, select { font: inherit; letter-spacing: 0; }
+    button, select { cursor: pointer; }
+    .shell { min-height: 100vh; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 64px;
+      padding: 10px max(18px, env(safe-area-inset-left));
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.96);
+      backdrop-filter: blur(14px);
+    }
+    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .brand img { width: 38px; height: 38px; object-fit: cover; border-radius: 6px; }
+    .brand h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 760; }
+    .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .top-actions { display: flex; align-items: center; gap: 8px; }
+    .identity {
+      max-width: 150px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .button {
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--ink);
+      background: #fff;
+      font-weight: 650;
+    }
+    .button:hover { border-color: #9eaaa2; }
+    .button.primary { color: #fff; border-color: var(--black); background: var(--black); }
+    .button:disabled { cursor: default; opacity: .48; }
+    main { width: min(1440px, 100%); margin: 0 auto; padding: 22px 24px 60px; }
+    .statusline {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .statusline strong { color: var(--ink); font-weight: 650; }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .metric { min-height: 108px; padding: 19px 20px; border-right: 1px solid var(--line); }
+    .metric:last-child { border-right: 0; }
+    .metric-label { color: var(--muted); font-size: 13px; }
+    .metric-value { margin-top: 8px; font-size: 30px; font-weight: 760; line-height: 1; }
+    .metric:nth-child(2) .metric-value { color: var(--green); }
+    .metric:nth-child(3) .metric-value { color: var(--coral); }
+    .metric:nth-child(4) .metric-value { color: var(--blue); }
+    .controls {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr 1fr minmax(200px, 1.4fr) auto;
+      gap: 10px;
+      align-items: end;
+      margin: 18px 0 12px;
+    }
+    .field label { display: block; margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+    .field select, .field input {
+      width: 100%;
+      height: 40px;
+      padding: 0 11px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      outline: none;
+      color: var(--ink);
+      background: #fff;
+    }
+    .field select:focus, .field input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(8,122,82,.12); }
+    .periods { display: flex; height: 40px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+    .periods button { flex: 1; min-width: 56px; border: 0; border-right: 1px solid var(--line); background: #fff; color: var(--muted); }
+    .periods button:last-child { border-right: 0; }
+    .periods button.active { color: #fff; background: var(--green); }
+    .table-wrap { border: 1px solid var(--line); border-radius: 7px; background: #fff; overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th { padding: 11px 12px; color: var(--muted); background: #f9fbfa; font-size: 12px; text-align: left; font-weight: 650; }
+    td { padding: 13px 12px; border-top: 1px solid var(--line); font-size: 13px; vertical-align: middle; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover, tbody tr.selected { background: #f3f8f5; }
+    .title-cell { width: 36%; }
+    .video-title { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-weight: 680; line-height: 1.45; }
+    .video-meta { margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .platform {
+      display: inline-flex;
+      align-items: center;
+      height: 25px;
+      padding: 0 8px;
+      border-radius: 5px;
+      background: var(--green-soft);
+      color: var(--green);
+      font-size: 11px;
+      font-weight: 720;
+      text-transform: uppercase;
+    }
+    .platform.facebook { color: var(--blue); background: var(--blue-soft); }
+    .platform.x { color: #fff; background: var(--black); }
+    .number { font-variant-numeric: tabular-nums; font-weight: 700; }
+    .unavailable { color: var(--coral); font-size: 11px; }
+    .empty { padding: 54px 20px; color: var(--muted); text-align: center; }
+    .mobile-list { display: none; }
+    .comment-section { margin-top: 20px; border-top: 3px solid var(--black); background: #fff; }
+    .comment-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 18px 18px 14px; border-bottom: 1px solid var(--line); }
+    .comment-head h2 { margin: 0; font-size: 17px; }
+    .comment-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .comment-feed { max-height: 520px; overflow: auto; }
+    .comment { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 11px; padding: 15px 18px; border-bottom: 1px solid var(--line); }
+    .avatar { width: 38px; height: 38px; border-radius: 50%; object-fit: cover; background: var(--green-soft); }
+    .avatar-fallback { display: grid; place-items: center; color: var(--green); font-size: 14px; font-weight: 760; }
+    .comment-author { font-size: 13px; font-weight: 700; }
+    .comment-text { margin-top: 4px; white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.55; }
+    .comment-time { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .link { color: var(--blue); text-decoration: none; font-weight: 650; }
+    .errorbar { display: none; margin: 12px 0; padding: 10px 12px; border-left: 3px solid var(--coral); color: #87351f; background: var(--coral-soft); font-size: 12px; }
+    .errorbar.show { display: block; }
+    .loading { opacity: .58; pointer-events: none; }
+    @media (max-width: 920px) {
+      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metric:nth-child(2) { border-right: 0; }
+      .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .field.search-field { grid-column: 1 / -1; }
+      .period-field { grid-column: 1 / -1; }
+      .desktop-table { display: none; }
+      .mobile-list { display: block; }
+      .mobile-item { padding: 15px; border-bottom: 1px solid var(--line); cursor: pointer; }
+      .mobile-item:last-child { border-bottom: 0; }
+      .mobile-item.selected { background: #f3f8f5; }
+      .mobile-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .mobile-title { margin-top: 10px; font-size: 14px; font-weight: 700; line-height: 1.45; }
+      .mobile-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+      .mobile-metric { padding: 8px; background: var(--wash); }
+      .mobile-metric span { display: block; color: var(--muted); font-size: 10px; }
+      .mobile-metric strong { display: block; margin-top: 3px; font-size: 14px; }
+    }
+    @media (max-width: 600px) {
+      .topbar { min-height: 58px; padding: 8px 12px; }
+      .brand img { width: 34px; height: 34px; }
+      .brand h1 { font-size: 16px; }
+      .brand p, .identity { display: none; }
+      .button { min-height: 36px; padding: 0 10px; font-size: 12px; }
+      main { padding: 14px 12px 42px; }
+      .statusline { display: block; line-height: 1.7; }
+      .statusline span { display: block; }
+      .summary { box-shadow: none; }
+      .metric { min-height: 88px; padding: 14px; }
+      .metric-value { font-size: 24px; }
+      .controls { grid-template-columns: 1fr; }
+      .field.search-field, .period-field { grid-column: auto; }
+      .comment { grid-template-columns: 34px minmax(0, 1fr); padding: 14px; }
+      .avatar { width: 34px; height: 34px; }
+      .comment-time { grid-column: 2; }
+      .comment-head { padding: 15px 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell" id="appShell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="/public/assets/ihouse-logo.webp" alt="iHouse">
+        <div>
+          <h1>媒体数据中心</h1>
+          <p>系统发布内容</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span class="identity" id="identity">连接中</span>
+        <button class="button primary" id="syncBtn" type="button">刷新数据</button>
+      </div>
+    </header>
+
+    <main>
+      <div class="statusline">
+        <span>统计范围：<strong id="rangeLabel">最近 30 天发布内容</strong></span>
+        <span id="syncLabel">等待首次同步</span>
+      </div>
+      <section class="summary" aria-label="核心数据">
+        <div class="metric"><div class="metric-label">发布视频</div><div class="metric-value" id="contentCount">--</div></div>
+        <div class="metric"><div class="metric-label">累计浏览</div><div class="metric-value" id="viewCount">--</div></div>
+        <div class="metric"><div class="metric-label">累计点赞</div><div class="metric-value" id="likeCount">--</div></div>
+        <div class="metric"><div class="metric-label">累计评论</div><div class="metric-value" id="commentCount">--</div></div>
+      </section>
+
+      <div class="errorbar" id="errorBar"></div>
+
+      <section class="controls" aria-label="筛选">
+        <div class="field">
+          <label for="channelFilter">频道</label>
+          <select id="channelFilter"><option value="">全部频道</option></select>
+        </div>
+        <div class="field">
+          <label for="platformFilter">平台</label>
+          <select id="platformFilter">
+            <option value="">全部平台</option>
+            <option value="youtube">YouTube</option>
+            <option value="facebook">Facebook</option>
+            <option value="x">X</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="accountFilter">账号</label>
+          <select id="accountFilter"><option value="">全部账号</option></select>
+        </div>
+        <div class="field search-field">
+          <label for="searchInput">搜索视频</label>
+          <input id="searchInput" type="search" placeholder="标题、频道或账号">
+        </div>
+        <div class="field period-field">
+          <label>时间范围</label>
+          <div class="periods" id="periods">
+            <button type="button" data-days="7">7 天</button>
+            <button class="active" type="button" data-days="30">30 天</button>
+            <button type="button" data-days="90">90 天</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="table-wrap" id="contentArea">
+        <div class="desktop-table">
+          <table>
+            <thead><tr><th class="title-cell">视频</th><th>平台</th><th>账号</th><th>浏览</th><th>点赞</th><th>评论</th><th>发布时间</th></tr></thead>
+            <tbody id="contentRows"></tbody>
+          </table>
+        </div>
+        <div class="mobile-list" id="mobileList"></div>
+        <div class="empty" id="emptyState">正在读取媒体数据</div>
+      </section>
+
+      <section class="comment-section" id="commentSection" hidden>
+        <div class="comment-head">
+          <div><h2 id="commentTitle">评论</h2><p id="commentMeta"></p></div>
+          <a class="link" id="platformLink" href="#" target="_blank" rel="noopener">打开平台</a>
+        </div>
+        <div class="errorbar" id="commentError"></div>
+        <div class="comment-feed" id="commentFeed"></div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const state = {
+      token: "",
+      tokenAt: 0,
+      user: null,
+      canSync: false,
+      days: 30,
+      channelId: "",
+      platform: "",
+      accountKey: "",
+      search: "",
+      dashboard: null,
+      selected: null,
+    };
+    const $ = (id) => document.getElementById(id);
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
+
+    function toast(message, error = false) {
+      if (window.jclaw?.ui?.toast && window.jclaw.isHosted()) {
+        window.jclaw.ui.toast({ text: String(message), type: error ? "error" : "success" }).catch(() => {});
+      }
+      const bar = $("errorBar");
+      if (error) {
+        bar.textContent = message;
+        bar.classList.add("show");
+      } else {
+        bar.classList.remove("show");
+      }
+    }
+
+    async function setupJClaw() {
+      const jclaw = window.jclaw;
+      if (!jclaw) throw new Error("JClaw SDK 未加载");
+      if (!jclaw.isHosted()) {
+        jclaw.mock({
+          auth: {
+            getUser: () => ({ id: "browser", username: "browser", displayName: "浏览器预览" }),
+            getToken: () => ({ token: "", tokenType: "Bearer", expiresIn: 0 }),
+          },
+          navigation: { setTitle: () => true },
+          ui: { toast: () => true },
+          lifecycle: { ready: () => true },
+        });
+      }
+      await jclaw.ready();
+      await jclaw.navigation.setTitle("媒体数据中心").catch(() => {});
+      state.user = await jclaw.auth.getUser().catch(() => null);
+      await refreshToken();
+    }
+
+    async function refreshToken() {
+      if (!window.jclaw) return "";
+      const tokenResult = await window.jclaw.auth.getToken().catch(() => null);
+      state.token = tokenResult?.token || "";
+      state.tokenAt = Date.now();
+      return state.token;
+    }
+
+    async function api(path, options = {}, retry = true) {
+      if (window.jclaw?.isHosted() && Date.now() - state.tokenAt > 180000) await refreshToken();
+      const headers = { ...(options.headers || {}) };
+      if (state.token) headers.Authorization = `Bearer ${state.token}`;
+      if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+      const response = await fetch(path, { ...options, headers });
+      if (response.status === 401 && retry && window.jclaw?.isHosted()) {
+        await refreshToken();
+        return api(path, options, false);
+      }
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(payload.error || `请求失败 (${response.status})`);
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    }
+
+    function formatNumber(value) {
+      if (value === null || value === undefined || value === "") return "--";
+      const number = Number(value);
+      if (!Number.isFinite(number)) return "--";
+      if (number >= 100000000) return `${(number / 100000000).toFixed(number >= 1000000000 ? 0 : 1)}亿`;
+      if (number >= 10000) return `${(number / 10000).toFixed(number >= 100000 ? 0 : 1)}万`;
+      return number.toLocaleString("zh-CN");
+    }
+
+    function formatTime(timestamp, text = "") {
+      const date = Number(timestamp) > 0 ? new Date(Number(timestamp) * 1000) : (text ? new Date(text) : null);
+      if (!date || Number.isNaN(date.getTime())) return "--";
+      return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+    }
+
+    function metricCell(item, key) {
+      if (item[key] === null || item[key] === undefined) {
+        return item.metrics_status === "error" ? '<span class="unavailable">暂不可读</span>' : "--";
+      }
+      return `<span class="number">${formatNumber(item[key])}</span>`;
+    }
+
+    function platformLabel(platform) {
+      return platform === "youtube" ? "YouTube" : platform === "facebook" ? "Facebook" : "X";
+    }
+
+    function populateFilters(data) {
+      const channel = $("channelFilter");
+      const account = $("accountFilter");
+      const channelValue = channel.value;
+      const accountValue = account.value;
+      channel.innerHTML = '<option value="">全部频道</option>' + (data.channels || []).map((item) =>
+        `<option value="${escapeHtml(item.channel_id)}">${escapeHtml(item.channel_name || item.channel_id)} (${item.content_count})</option>`
+      ).join("");
+      account.innerHTML = '<option value="">全部账号</option>' + (data.accounts || [])
+        .filter((item) => !state.platform || item.platform === state.platform)
+        .filter((item) => !state.channelId || (item.channel_ids || []).includes(state.channelId))
+        .map((item) => `<option value="${escapeHtml(item.account_key)}">${escapeHtml(item.account_label)} · ${platformLabel(item.platform)}</option>`).join("");
+      channel.value = channelValue;
+      account.value = accountValue;
+    }
+
+    function renderDashboard() {
+      const data = state.dashboard || {};
+      const summary = data.summary || {};
+      const hasReadyMetrics = Number(summary.metrics_ready_count || 0) > 0 || Number(summary.content_count || 0) === 0;
+      $("contentCount").textContent = formatNumber(summary.content_count ?? 0);
+      $("viewCount").textContent = hasReadyMetrics ? formatNumber(summary.view_count ?? 0) : "--";
+      $("likeCount").textContent = hasReadyMetrics ? formatNumber(summary.like_count ?? 0) : "--";
+      $("commentCount").textContent = hasReadyMetrics ? formatNumber(summary.comment_count ?? 0) : "--";
+      $("rangeLabel").textContent = `最近 ${state.days} 天发布内容`;
+      const sync = data.sync || {};
+      const readyCount = Number(summary.metrics_ready_count || 0);
+      const totalCount = Number(summary.content_count || 0);
+      const coverage = totalCount && readyCount < totalCount ? ` · 已读取 ${readyCount}/${totalCount}` : "";
+      $("syncLabel").textContent = sync.running ? `平台数据同步中${coverage}` : sync.finished_at ? `上次同步 ${formatTime(sync.finished_at)}${coverage}` : `等待首次同步${coverage}`;
+      populateFilters(data);
+      renderContents(data.contents || []);
+    }
+
+    function renderContents(contents) {
+      $("emptyState").style.display = contents.length ? "none" : "block";
+      $("emptyState").textContent = contents.length ? "" : "当前筛选范围内没有系统发布视频";
+      $("contentRows").innerHTML = contents.map((item) => {
+        const selected = state.selected && state.selected.platform === item.platform && state.selected.external_id === item.external_id;
+        return `<tr class="${selected ? "selected" : ""}" data-platform="${escapeHtml(item.platform)}" data-id="${escapeHtml(item.external_id)}">
+          <td class="title-cell"><div class="video-title">${escapeHtml(item.title || "未命名视频")}</div><div class="video-meta">${escapeHtml(item.channel_name)} · ${escapeHtml(item.target_market || "")}</div></td>
+          <td><span class="platform ${escapeHtml(item.platform)}">${platformLabel(item.platform)}</span></td>
+          <td>${escapeHtml(item.account_label || "未识别账号")}</td>
+          <td>${metricCell(item, "view_count")}</td><td>${metricCell(item, "like_count")}</td><td>${metricCell(item, "comment_count")}</td>
+          <td>${formatTime(item.published_at)}</td>
+        </tr>`;
+      }).join("");
+      $("mobileList").innerHTML = contents.map((item) => {
+        const selected = state.selected && state.selected.platform === item.platform && state.selected.external_id === item.external_id;
+        return `<article class="mobile-item ${selected ? "selected" : ""}" data-platform="${escapeHtml(item.platform)}" data-id="${escapeHtml(item.external_id)}">
+          <div class="mobile-top"><span class="platform ${escapeHtml(item.platform)}">${platformLabel(item.platform)}</span><span class="video-meta">${formatTime(item.published_at)}</span></div>
+          <div class="mobile-title">${escapeHtml(item.title || "未命名视频")}</div>
+          <div class="video-meta">${escapeHtml(item.channel_name)} · ${escapeHtml(item.account_label || "未识别账号")}</div>
+          <div class="mobile-metrics"><div class="mobile-metric"><span>浏览</span><strong>${metricCell(item, "view_count")}</strong></div><div class="mobile-metric"><span>点赞</span><strong>${metricCell(item, "like_count")}</strong></div><div class="mobile-metric"><span>评论</span><strong>${metricCell(item, "comment_count")}</strong></div></div>
+        </article>`;
+      }).join("");
+      document.querySelectorAll("[data-platform][data-id]").forEach((element) => element.addEventListener("click", () => openComments(element.dataset.platform, element.dataset.id)));
+    }
+
+    async function loadDashboard() {
+      $("appShell").classList.add("loading");
+      try {
+        const params = new URLSearchParams({ days: String(state.days), limit: "100" });
+        if (state.channelId) params.set("channel_id", state.channelId);
+        if (state.platform) params.set("platform", state.platform);
+        if (state.accountKey) params.set("account_key", state.accountKey);
+        if (state.search) params.set("search", state.search);
+        state.dashboard = await api(`/api/lab/media-insights/dashboard?${params}`);
+        renderDashboard();
+        toast("");
+      } catch (error) {
+        toast(error.message || String(error), true);
+        $("emptyState").textContent = "媒体数据读取失败";
+      } finally {
+        $("appShell").classList.remove("loading");
+      }
+    }
+
+    async function openComments(platform, externalId) {
+      const item = (state.dashboard?.contents || []).find((row) => row.platform === platform && row.external_id === externalId);
+      if (!item) return;
+      state.selected = item;
+      renderContents(state.dashboard.contents || []);
+      $("commentSection").hidden = false;
+      $("commentTitle").textContent = item.title || "评论";
+      $("commentMeta").textContent = `${platformLabel(item.platform)} · ${item.account_label || "未识别账号"}`;
+      $("platformLink").href = item.url || "#";
+      $("platformLink").hidden = !item.url;
+      $("commentFeed").innerHTML = '<div class="empty">正在读取评论</div>';
+      const errorBar = $("commentError");
+      errorBar.classList.remove("show");
+      try {
+        const data = await api(`/api/lab/media-insights/contents/${encodeURIComponent(platform)}/${encodeURIComponent(externalId)}/comments?limit=200`);
+        const comments = data.comments || [];
+        if (!comments.length) {
+          const content = data.content || {};
+          if (content.comments_status === "error") {
+            errorBar.textContent = content.comments_error || "平台暂时无法读取评论内容";
+            errorBar.classList.add("show");
+          }
+          $("commentFeed").innerHTML = '<div class="empty">暂时没有可显示的评论</div>';
+          return;
+        }
+        $("commentFeed").innerHTML = comments.map((comment) => {
+          const initial = escapeHtml((comment.author_name || "用").slice(0, 1));
+          const avatar = comment.author_avatar_url
+            ? `<img class="avatar" src="${escapeHtml(comment.author_avatar_url)}" alt="">`
+            : `<div class="avatar avatar-fallback">${initial}</div>`;
+          const body = `<div><div class="comment-author">${escapeHtml(comment.author_name || "平台用户")}</div><div class="comment-text">${escapeHtml(comment.message || "")}</div></div>`;
+          const time = comment.url
+            ? `<a class="comment-time link" href="${escapeHtml(comment.url)}" target="_blank" rel="noopener">${formatTime(comment.published_at, comment.published_at_text)}</a>`
+            : `<span class="comment-time">${formatTime(comment.published_at, comment.published_at_text)}</span>`;
+          return `<article class="comment">${avatar}${body}${time}</article>`;
+        }).join("");
+      } catch (error) {
+        errorBar.textContent = error.message || String(error);
+        errorBar.classList.add("show");
+        $("commentFeed").innerHTML = '<div class="empty">评论读取失败</div>';
+      }
+      $("commentSection").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    async function syncNow() {
+      if (!state.canSync) return;
+      $("syncBtn").disabled = true;
+      try {
+        await api("/api/lab/media-insights/sync", { method: "POST", body: "{}" });
+        $("syncLabel").textContent = "平台数据同步中";
+        toast("");
+        setTimeout(() => pollSyncCompletion(0), 2500);
+      } catch (error) {
+        toast(error.message || String(error), true);
+      } finally {
+        setTimeout(() => { $("syncBtn").disabled = !state.canSync; }, 1200);
+      }
+    }
+
+    async function pollSyncCompletion(attempt) {
+      try {
+        const status = await api("/api/lab/media-insights/sync-status");
+        if (status.running && attempt < 120) {
+          setTimeout(() => pollSyncCompletion(attempt + 1), 3000);
+          return;
+        }
+        await loadDashboard();
+      } catch (_) {
+        if (attempt < 20) setTimeout(() => pollSyncCompletion(attempt + 1), 3000);
+      }
+    }
+
+    let searchTimer = null;
+    $("channelFilter").addEventListener("change", (event) => { state.channelId = event.target.value; state.accountKey = ""; loadDashboard(); });
+    $("platformFilter").addEventListener("change", (event) => { state.platform = event.target.value; state.accountKey = ""; loadDashboard(); });
+    $("accountFilter").addEventListener("change", (event) => { state.accountKey = event.target.value; loadDashboard(); });
+    $("searchInput").addEventListener("input", (event) => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => { state.search = event.target.value.trim(); loadDashboard(); }, 320);
+    });
+    $("periods").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-days]");
+      if (!button) return;
+      state.days = Number(button.dataset.days || 30);
+      document.querySelectorAll("#periods button").forEach((item) => item.classList.toggle("active", item === button));
+      loadDashboard();
+    });
+    $("syncBtn").addEventListener("click", syncNow);
+
+    (async function main() {
+      try {
+        await setupJClaw();
+        const me = await api("/api/lab/media-insights/me");
+        state.user = me.user || state.user;
+        state.canSync = Boolean(me.can_sync);
+        $("identity").textContent = state.user?.display_name || state.user?.displayName || state.user?.username || "已连接";
+        $("syncBtn").disabled = !state.canSync;
+        await loadDashboard();
+      } catch (error) {
+        if (error.status === 401 && !window.jclaw?.isHosted()) {
+          window.location.replace("/?next=%2Flab%2Fmedia-insights");
+          return;
+        }
+        $("identity").textContent = "未连接";
+        $("syncBtn").disabled = true;
+        toast(error.message || String(error), true);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -19,6 +19,7 @@ X_TOKEN_URL = os.getenv("X_OAUTH_TOKEN_URL", "https://api.x.com/2/oauth2/token")
 X_USERS_ME_URL = os.getenv("X_USERS_ME_URL", "https://api.x.com/2/users/me").strip()
 X_TWEETS_URL = os.getenv("X_TWEETS_URL", "https://api.x.com/2/tweets").strip()
 X_TWEET_DETAIL_URL = os.getenv("X_TWEET_DETAIL_URL", "https://api.x.com/2/tweets").strip()
+X_RECENT_SEARCH_URL = os.getenv("X_RECENT_SEARCH_URL", "https://api.x.com/2/tweets/search/recent").strip()
 X_MEDIA_UPLOAD_URL = os.getenv("X_MEDIA_UPLOAD_URL", "https://api.x.com/2/media/upload").strip()
 X_SCOPE = "tweet.read tweet.write users.read media.write offline.access"
 
@@ -248,6 +249,64 @@ def get_x_post_metrics(token_store_path: Path, post_id: str) -> dict[str, Any]:
         "view_count": int(view_count or 0) if view_count not in (None, "") else None,
         "raw": data,
     }
+
+
+def get_x_post_comments(
+    token_store_path: Path,
+    post_id: str,
+    *,
+    max_results: int = 100,
+) -> list[dict[str, Any]]:
+    post_id = str(post_id or "").strip()
+    if not post_id:
+        raise XPublishError("读取 X 回复失败：缺少 post_id")
+    access_token = refresh_x_access_token(token_store_path)
+    response = requests.get(
+        X_RECENT_SEARCH_URL,
+        params={
+            "query": f"conversation_id:{post_id} is:reply",
+            "max_results": min(100, max(10, int(max_results or 100))),
+            "tweet.fields": "author_id,conversation_id,created_at,in_reply_to_user_id,public_metrics,text",
+            "expansions": "author_id",
+            "user.fields": "id,name,username,profile_image_url",
+        },
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise XPublishError(f"读取 X 回复失败：{response.status_code} {response.text[:500]}")
+    payload = response.json()
+    users = {
+        str(user.get("id") or ""): user
+        for user in ((payload.get("includes") or {}).get("users") or [])
+        if isinstance(user, dict)
+    }
+    comments: list[dict[str, Any]] = []
+    for item in payload.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("id") or "").strip()
+        if not comment_id:
+            continue
+        author = users.get(str(item.get("author_id") or ""), {})
+        metrics = item.get("public_metrics") if isinstance(item.get("public_metrics"), dict) else {}
+        username = str(author.get("username") or "").strip()
+        comments.append(
+            {
+                "comment_id": comment_id,
+                "parent_id": post_id,
+                "author_id": str(item.get("author_id") or "").strip(),
+                "author_name": str(author.get("name") or (f"@{username}" if username else "X 用户")).strip(),
+                "author_avatar_url": str(author.get("profile_image_url") or "").strip(),
+                "message": str(item.get("text") or "").strip(),
+                "published_at_text": str(item.get("created_at") or "").strip(),
+                "like_count": int(metrics.get("like_count") or 0),
+                "reply_count": int(metrics.get("reply_count") or 0),
+                "url": f"https://x.com/{username or 'i'}/status/{comment_id}",
+                "raw": item,
+            }
+        )
+    return comments
 
 
 def _extract_media_id(payload: dict[str, Any]) -> str:

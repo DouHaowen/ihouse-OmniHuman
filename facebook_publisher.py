@@ -254,11 +254,17 @@ def get_facebook_page(token_store_path: Path) -> dict[str, Any]:
     }
 
 
-def get_facebook_video_metrics(token_store_path: Path, video_id: str) -> dict[str, Any]:
+def get_facebook_video_metrics(
+    token_store_path: Path,
+    video_id: str,
+    *,
+    page_access_token: str = "",
+) -> dict[str, Any]:
     video_id = str(video_id or "").strip()
     if not video_id:
         raise FacebookPublishError("读取 Facebook 视频数据失败：缺少 video_id")
-    _, page_access_token = _load_page_config(token_store_path)
+    if not str(page_access_token or "").strip():
+        _, page_access_token = _load_page_config(token_store_path)
     payload = _graph_get(
         video_id,
         params={"fields": "id,title,description,created_time,length,permalink_url,views"},
@@ -297,6 +303,55 @@ def get_facebook_video_metrics(token_store_path: Path, video_id: str) -> dict[st
         "comment_count": comment_count,
         "raw": payload,
     }
+
+
+def get_facebook_video_comments(
+    token_store_path: Path,
+    video_id: str,
+    *,
+    page_access_token: str = "",
+    max_results: int = 100,
+) -> list[dict[str, Any]]:
+    video_id = str(video_id or "").strip()
+    if not video_id:
+        raise FacebookPublishError("读取 Facebook 评论失败：缺少 video_id")
+    if not str(page_access_token or "").strip():
+        _, page_access_token = _load_page_config(token_store_path)
+    payload = _graph_get(
+        f"{video_id}/comments",
+        params={
+            "fields": "id,message,created_time,from,like_count,comment_count,parent,permalink_url",
+            "filter": "stream",
+            "order": "reverse_chronological",
+            "limit": min(100, max(1, int(max_results or 100))),
+        },
+        access_token=page_access_token,
+    )
+    comments: list[dict[str, Any]] = []
+    for item in payload.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("id") or "").strip()
+        if not comment_id:
+            continue
+        author = item.get("from") if isinstance(item.get("from"), dict) else {}
+        parent = item.get("parent") if isinstance(item.get("parent"), dict) else {}
+        comments.append(
+            {
+                "comment_id": comment_id,
+                "parent_id": str(parent.get("id") or "").strip(),
+                "author_id": str(author.get("id") or "").strip(),
+                "author_name": str(author.get("name") or "Facebook 用户").strip(),
+                "author_avatar_url": "",
+                "message": str(item.get("message") or "").strip(),
+                "published_at_text": str(item.get("created_time") or "").strip(),
+                "like_count": int(item.get("like_count") or 0),
+                "reply_count": int(item.get("comment_count") or 0),
+                "url": str(item.get("permalink_url") or "").strip(),
+                "raw": item,
+            }
+        )
+    return comments
 
 
 def upload_video_to_facebook_page(
