@@ -10011,7 +10011,11 @@ async def lab_opennews_manifest(request: Request):
 async def lab_media_insights_page(request: Request):
     if not _get_current_user(request):
         return RedirectResponse(url="/?next=%2Flab%2Fmedia-insights", status_code=302)
-    return templates.TemplateResponse(request, "lab_media_insights.html")
+    return templates.TemplateResponse(
+        request,
+        "lab_media_insights.html",
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 @app.get("/lab/apps/media-insights", response_class=HTMLResponse)
@@ -10023,7 +10027,12 @@ async def lab_media_insights_private_app(request: Request):
     )
     if error:
         return error
-    return templates.TemplateResponse(request, "lab_media_insights.html", {"lab_user": user})
+    return templates.TemplateResponse(
+        request,
+        "lab_media_insights.html",
+        {"lab_user": user},
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 @app.get("/lab/media-insights/manifest.json")
