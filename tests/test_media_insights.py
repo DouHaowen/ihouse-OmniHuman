@@ -86,6 +86,15 @@ class MediaInsightsStoreTests(unittest.TestCase):
         self.assertEqual(account["account_label"], "OpenNews")
         self.assertEqual(account["profile_dir"], "/tmp/profile")
 
+        facebook = merge_media_account_config(
+            "facebook",
+            {"page_id": "page-123", "page_name": "OpenNews"},
+            {"page_id": "", "page_name": "Facebook Page", "profile": "legacy"},
+        )
+        self.assertEqual(facebook["page_id"], "page-123")
+        self.assertEqual(facebook["page_name"], "OpenNews")
+        self.assertEqual(facebook["profile"], "legacy")
+
     def test_configured_accounts_are_visible_before_any_video_is_indexed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = MediaInsightsStore(Path(temp_dir) / "insights.db")

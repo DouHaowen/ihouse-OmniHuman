@@ -65,9 +65,9 @@ def merge_media_account_config(
     receipt = dict(discovered or {})
     placeholders = ACCOUNT_PLACEHOLDERS.get(platform, set())
     identity_keys = {
-        "youtube": ("channel_name", "account_label", "label"),
-        "facebook": ("page_name", "account_label", "label"),
-        "x": ("handle", "username", "account_label", "label"),
+        "youtube": ("channel_id", "channel_name", "account_label", "label"),
+        "facebook": ("page_id", "page_name", "account_label", "label"),
+        "x": ("user_id", "handle", "username", "account_label", "label"),
     }.get(platform, ("account_label", "label"))
     for key in identity_keys:
         value = _text(receipt.get(key))

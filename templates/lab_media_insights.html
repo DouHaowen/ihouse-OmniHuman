@@ -957,7 +957,9 @@
         $("identity").textContent = state.user?.display_name || state.user?.displayName || state.user?.username || "已连接";
         $("syncBtn").disabled = !state.canSync;
         await loadDashboard();
-        await window.jclaw.lifecycle.ready().catch(() => {});
+        if (window.jclaw?.lifecycle?.ready) {
+          await Promise.resolve(window.jclaw.lifecycle.ready()).catch(() => {});
+        }
       } catch (error) {
         toast(error.message || String(error), true);
         $("identity").textContent = "未连接";
