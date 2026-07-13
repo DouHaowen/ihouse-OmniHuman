@@ -553,6 +553,7 @@ class MediaInsightsStore:
                 "platform": key[0],
                 "channel_ids": sorted({_text(value) for value in (item.get("channel_ids") or []) if _text(value)}),
                 "target_markets": sorted({_text(value) for value in (item.get("target_markets") or []) if _text(value)}),
+                "channel_content_counts": {},
                 "content_count": int(item.get("content_count") or 0),
                 "metrics_ready_count": 0,
                 "metrics_error_count": 0,
@@ -571,6 +572,7 @@ class MediaInsightsStore:
                     "platform": key[0],
                     "channel_ids": [],
                     "target_markets": [],
+                    "channel_content_counts": {},
                     "content_count": 0,
                     "metrics_ready_count": 0,
                     "metrics_error_count": 0,
@@ -590,6 +592,9 @@ class MediaInsightsStore:
             channel_value = _text(row["channel_id"])
             if channel_value and channel_value not in existing["channel_ids"]:
                 existing["channel_ids"].append(channel_value)
+            if channel_value:
+                channel_counts = existing["channel_content_counts"]
+                channel_counts[channel_value] = int(channel_counts.get(channel_value) or 0) + int(row["content_count"] or 0)
             if not existing.get("account_label"):
                 existing["account_label"] = _text(row["account_label"])
         for item in account_catalog.values():

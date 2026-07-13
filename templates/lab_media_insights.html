@@ -668,10 +668,11 @@
 
       const accountButton = (account, channelId) => {
         const active = state.accountKey === account.account_key && state.channelId === channelId;
+        const scopedCount = account.channel_content_counts?.[channelId] ?? account.content_count ?? 0;
         return `<button class="nav-account ${active ? "active" : ""}" type="button" data-nav-channel="${escapeHtml(channelId)}" data-nav-account="${escapeHtml(account.account_key)}" data-nav-platform="${escapeHtml(account.platform)}">
           <span class="platform-mark ${escapeHtml(account.platform)}">${platformShort(account.platform)}</span>
           <span><span class="nav-account-name">${escapeHtml(account.account_label || "未识别账号")}</span><span class="nav-account-meta"><i class="status-dot ${escapeHtml(account.analytics_status || "waiting")}"></i>${account.configured ? "已绑定" : "历史账号"} · ${accountStatusLabel(account.analytics_status)}</span></span>
-          <span class="nav-count">${formatNumber(account.content_count || 0)}</span>
+          <span class="nav-count">${formatNumber(scopedCount)}</span>
         </button>`;
       };
       const channelBlock = (channel) => {

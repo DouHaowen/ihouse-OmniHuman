@@ -238,6 +238,7 @@ class MediaInsightsStoreTests(unittest.TestCase):
             )
             self.assertEqual(dashboard["summary"]["average_view_count"], 520 / 3)
             self.assertEqual(dashboard["accounts"][0]["analytics_status"], "partial")
+            self.assertEqual(dashboard["accounts"][0]["channel_content_counts"], {"technology": 4})
 
             zero_only = store.dashboard(days=7, metric_state="zero")
             self.assertEqual([item["external_id"] for item in zero_only["contents"]], ["new-zero"])
