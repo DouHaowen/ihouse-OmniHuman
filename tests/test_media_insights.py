@@ -75,6 +75,113 @@ class MediaInsightsDiscoveryTests(unittest.TestCase):
 
 
 class MediaInsightsStoreTests(unittest.TestCase):
+    def test_agent_context_reports_accounts_publications_metrics_and_comments(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MediaInsightsStore(Path(temp_dir) / "insights.db")
+            now = time.time()
+            publications = [
+                {
+                    "platform": "youtube",
+                    "external_id": "yt-high",
+                    "history_id": "task-1",
+                    "channel_id": "technology",
+                    "channel_name": "科技前沿",
+                    "account_key": "youtube:tech",
+                    "account_label": "科技 YouTube",
+                    "title": "高浏览视频",
+                    "url": "https://youtu.be/yt-high",
+                    "published_at": now - 60,
+                },
+                {
+                    "platform": "facebook",
+                    "external_id": "fb-same-task",
+                    "history_id": "task-1",
+                    "channel_id": "technology",
+                    "channel_name": "科技前沿",
+                    "account_key": "facebook:opennews",
+                    "account_label": "OpenNews Facebook",
+                    "title": "同一任务的 Facebook 发布",
+                    "published_at": now - 50,
+                },
+                {
+                    "platform": "youtube",
+                    "external_id": "yt-old",
+                    "history_id": "task-old",
+                    "channel_id": "property",
+                    "channel_name": "房产频道",
+                    "account_key": "youtube:property",
+                    "account_label": "房产 YouTube",
+                    "title": "历史视频",
+                    "published_at": now - 40 * 86400,
+                },
+            ]
+            store.upsert_publications(publications)
+            store.save_metrics(publications[0], {"view_count": 900, "like_count": 30, "comment_count": 1})
+            store.save_comments(
+                publications[0],
+                [
+                    {
+                        "comment_id": "comment-agent-1",
+                        "author_name": "观众",
+                        "message": "这条内容很有用",
+                        "published_at": now - 30,
+                        "like_count": 2,
+                    }
+                ],
+            )
+            store.save_metrics_error(publications[1], "平台权限不足")
+            store.save_metrics(publications[2], {"view_count": 50, "like_count": 2, "comment_count": 0})
+
+            context = store.agent_context(
+                days=30,
+                top_limit=5,
+                recent_limit=5,
+                comment_limit=5,
+                configured_channels=[
+                    {"channel_id": "technology", "channel_name": "科技前沿"},
+                    {"channel_id": "empty", "channel_name": "待发布频道"},
+                ],
+                configured_accounts=[
+                    {
+                        "platform": "youtube",
+                        "account_key": "youtube:tech",
+                        "account_label": "科技 YouTube",
+                        "channel_ids": ["technology"],
+                        "target_markets": ["cn"],
+                    },
+                    {
+                        "platform": "youtube",
+                        "account_key": "youtube:empty",
+                        "account_label": "待发布账号",
+                        "channel_ids": ["empty"],
+                        "target_markets": ["cn"],
+                    },
+                ],
+            )
+
+            self.assertEqual(context["schema_version"], "1.0")
+            self.assertEqual(context["system"]["total"]["published_video_count"], 3)
+            self.assertEqual(context["system"]["total"]["production_task_count"], 2)
+            self.assertEqual(context["system"]["range"]["published_video_count"], 2)
+            self.assertEqual(context["system"]["range"]["production_task_count"], 1)
+            self.assertEqual(context["system"]["account_count"], 4)
+            self.assertEqual(context["system"]["configured_account_count"], 2)
+            self.assertEqual(context["system"]["published_account_count"], 3)
+            self.assertEqual(context["system"]["supported_platform_count"], 3)
+            self.assertEqual(context["system"]["configured_platform_count"], 1)
+            self.assertEqual(context["system"]["published_platform_count"], 2)
+            self.assertEqual(context["system"]["stored_comment_count"], 1)
+
+            account_by_key = {item["account_key"]: item for item in context["accounts"]}
+            self.assertEqual(account_by_key["youtube:tech"]["total"]["published_video_count"], 1)
+            self.assertEqual(account_by_key["youtube:tech"]["range"]["view_count"], 900)
+            self.assertEqual(account_by_key["facebook:opennews"]["analytics_status"], "unavailable")
+            self.assertEqual(account_by_key["youtube:empty"]["analytics_status"], "waiting")
+            self.assertEqual(account_by_key["youtube:empty"]["channel_ids"], ["empty"])
+            self.assertEqual(account_by_key["youtube:empty"]["channels"][0]["published_video_count"], 0)
+            self.assertEqual(context["top_videos"][0]["external_id"], "yt-high")
+            self.assertEqual(context["recent_comments"][0]["message"], "这条内容很有用")
+
     def test_placeholder_account_does_not_override_configured_identity(self):
         account = merge_media_account_config(
             "x",

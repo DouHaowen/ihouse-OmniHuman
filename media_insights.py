@@ -636,6 +636,331 @@ class MediaInsightsStore:
             "sync": self.sync_status(),
         }
 
+    def agent_context(
+        self,
+        *,
+        days: int = 30,
+        top_limit: int = 10,
+        recent_limit: int = 20,
+        comment_limit: int = 20,
+        configured_channels: Iterable[dict[str, Any]] = (),
+        configured_accounts: Iterable[dict[str, Any]] = (),
+    ) -> dict[str, Any]:
+        """Return one stable, read-only fact package for internal AI assistants."""
+        days = max(1, min(int(days or 30), 3650))
+        top_limit = max(0, min(int(top_limit or 0), 100))
+        recent_limit = max(0, min(int(recent_limit or 0), 100))
+        comment_limit = max(0, min(int(comment_limit or 0), 100))
+        generated_at = time.time()
+        range_since = generated_at - days * 86400
+        configured_channels = list(configured_channels)
+        configured_accounts = list(configured_accounts)
+        catalog = self.dashboard(
+            days=days,
+            limit=1,
+            configured_channels=configured_channels,
+            configured_accounts=configured_accounts,
+        )
+
+        aggregate_columns = """
+            COUNT(*) AS published_video_count,
+            COUNT(DISTINCT NULLIF(history_id, '')) AS production_task_count,
+            COALESCE(SUM(view_count), 0) AS view_count,
+            COALESCE(SUM(like_count), 0) AS like_count,
+            COALESCE(SUM(comment_count), 0) AS comment_count,
+            SUM(CASE WHEN metrics_status='ok' THEN 1 ELSE 0 END) AS metrics_readable_count,
+            SUM(CASE WHEN metrics_status!='ok' THEN 1 ELSE 0 END) AS metrics_unavailable_count,
+            SUM(CASE WHEN metrics_status='ok' AND view_count IS NOT NULL THEN 1 ELSE 0 END) AS view_readable_count,
+            MAX(published_at) AS latest_published_at
+        """
+
+        with self._connect() as connection:
+            total_summary = connection.execute(f"SELECT {aggregate_columns} FROM contents").fetchone()
+            range_summary = connection.execute(
+                f"SELECT {aggregate_columns} FROM contents WHERE published_at >= ?",
+                (range_since,),
+            ).fetchone()
+            platform_total_rows = connection.execute(
+                f"SELECT platform, {aggregate_columns} FROM contents GROUP BY platform"
+            ).fetchall()
+            platform_range_rows = connection.execute(
+                f"SELECT platform, {aggregate_columns} FROM contents WHERE published_at >= ? GROUP BY platform",
+                (range_since,),
+            ).fetchall()
+            channel_total_rows = connection.execute(
+                f"""SELECT channel_id, MAX(channel_name) AS channel_name, {aggregate_columns}
+                    FROM contents GROUP BY channel_id"""
+            ).fetchall()
+            channel_range_rows = connection.execute(
+                f"""SELECT channel_id, MAX(channel_name) AS channel_name, {aggregate_columns}
+                    FROM contents WHERE published_at >= ? GROUP BY channel_id""",
+                (range_since,),
+            ).fetchall()
+            account_total_rows = connection.execute(
+                f"""SELECT platform, account_key, MAX(account_label) AS account_label,
+                    MAX(account_external_id) AS account_external_id, {aggregate_columns}
+                    FROM contents WHERE account_key != '' GROUP BY platform, account_key"""
+            ).fetchall()
+            account_range_rows = connection.execute(
+                f"""SELECT platform, account_key, MAX(account_label) AS account_label,
+                    MAX(account_external_id) AS account_external_id, {aggregate_columns}
+                    FROM contents WHERE account_key != '' AND published_at >= ?
+                    GROUP BY platform, account_key""",
+                (range_since,),
+            ).fetchall()
+            account_channel_rows = connection.execute(
+                """SELECT platform, account_key, channel_id, MAX(channel_name) AS channel_name,
+                    COUNT(*) AS published_video_count
+                    FROM contents WHERE account_key != ''
+                    GROUP BY platform, account_key, channel_id"""
+            ).fetchall()
+            top_rows = connection.execute(
+                """SELECT platform, external_id, history_id, workflow, channel_id, channel_name,
+                    target_market, language_version, account_key, account_label, account_external_id,
+                    title, url, published_at, view_count, like_count, comment_count, repost_count,
+                    metrics_status, metrics_error, comments_status, comments_error
+                    FROM contents WHERE published_at >= ?
+                    ORDER BY CASE WHEN metrics_status='ok' AND view_count IS NOT NULL THEN 0 ELSE 1 END,
+                    view_count DESC, published_at DESC LIMIT ?""",
+                (range_since, top_limit),
+            ).fetchall() if top_limit else []
+            recent_rows = connection.execute(
+                """SELECT platform, external_id, history_id, workflow, channel_id, channel_name,
+                    target_market, language_version, account_key, account_label, account_external_id,
+                    title, url, published_at, view_count, like_count, comment_count, repost_count,
+                    metrics_status, metrics_error, comments_status, comments_error
+                    FROM contents ORDER BY published_at DESC LIMIT ?""",
+                (recent_limit,),
+            ).fetchall() if recent_limit else []
+            comment_count_row = connection.execute("SELECT COUNT(*) AS count FROM comments").fetchone()
+            recent_comment_rows = connection.execute(
+                """SELECT comments.platform, comments.comment_id, comments.author_name,
+                    comments.message, comments.published_at, comments.published_at_text,
+                    comments.like_count, comments.reply_count, comments.url,
+                    contents.external_id, contents.title AS video_title,
+                    contents.account_key, contents.account_label, contents.channel_id,
+                    contents.channel_name
+                    FROM comments JOIN contents
+                    ON contents.platform=comments.platform AND contents.external_id=comments.external_id
+                    ORDER BY comments.published_at DESC LIMIT ?""",
+                (comment_limit,),
+            ).fetchall() if comment_limit else []
+
+        def timestamp_text(value: Any) -> str:
+            timestamp = _timestamp(value)
+            return datetime.fromtimestamp(timestamp).astimezone().isoformat() if timestamp > 0 else ""
+
+        def aggregate_payload(row: Any) -> dict[str, Any]:
+            row = dict(row or {})
+            published_count = int(row.get("published_video_count") or 0)
+            readable_count = int(row.get("metrics_readable_count") or 0)
+            return {
+                "published_video_count": published_count,
+                "production_task_count": int(row.get("production_task_count") or 0),
+                "view_count": int(row.get("view_count") or 0),
+                "like_count": int(row.get("like_count") or 0),
+                "comment_count": int(row.get("comment_count") or 0),
+                "metrics_readable_count": readable_count,
+                "metrics_unavailable_count": int(row.get("metrics_unavailable_count") or 0),
+                "view_readable_count": int(row.get("view_readable_count") or 0),
+                "metrics_coverage_ratio": round(readable_count / published_count, 4) if published_count else None,
+                "latest_published_at": float(row.get("latest_published_at") or 0),
+                "latest_published_at_iso": timestamp_text(row.get("latest_published_at")),
+            }
+
+        def content_payload(row: Any) -> dict[str, Any]:
+            item = dict(row)
+            item["published_at"] = float(item.get("published_at") or 0)
+            item["published_at_iso"] = timestamp_text(item.get("published_at"))
+            for key in ("view_count", "like_count", "comment_count", "repost_count"):
+                item[key] = _number(item.get(key))
+            return item
+
+        total_stats = aggregate_payload(total_summary)
+        range_stats = aggregate_payload(range_summary)
+        platform_total = {_text(row["platform"]): aggregate_payload(row) for row in platform_total_rows}
+        platform_range = {_text(row["platform"]): aggregate_payload(row) for row in platform_range_rows}
+        platforms = []
+        for platform in ("youtube", "facebook", "x"):
+            platforms.append(
+                {
+                    "platform": platform,
+                    "total": platform_total.get(platform, aggregate_payload({})),
+                    "range": platform_range.get(platform, aggregate_payload({})),
+                }
+            )
+
+        channel_total = {_text(row["channel_id"]): dict(row) for row in channel_total_rows}
+        channel_range = {_text(row["channel_id"]): dict(row) for row in channel_range_rows}
+        channel_catalog = {_text(item.get("channel_id")): dict(item) for item in catalog.get("channels") or []}
+        for channel_id, row in channel_total.items():
+            channel_catalog.setdefault(
+                channel_id,
+                {"channel_id": channel_id, "channel_name": _text(row.get("channel_name") or channel_id), "configured": False},
+            )
+
+        account_total = {
+            (_text(row["platform"]), _text(row["account_key"])): dict(row) for row in account_total_rows
+        }
+        account_range = {
+            (_text(row["platform"]), _text(row["account_key"])): dict(row) for row in account_range_rows
+        }
+        account_catalog = {
+            (_text(item.get("platform")), _text(item.get("account_key"))): dict(item)
+            for item in catalog.get("accounts") or []
+        }
+        for key, row in account_total.items():
+            account_catalog.setdefault(
+                key,
+                {
+                    "platform": key[0],
+                    "account_key": key[1],
+                    "account_label": _text(row.get("account_label")),
+                    "account_external_id": _text(row.get("account_external_id")),
+                    "channel_ids": [],
+                    "target_markets": [],
+                    "configured": False,
+                },
+            )
+
+        account_channels: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in account_channel_rows:
+            key = (_text(row["platform"]), _text(row["account_key"]))
+            account_channels.setdefault(key, []).append(
+                {
+                    "channel_id": _text(row["channel_id"]),
+                    "channel_name": _text(row["channel_name"]),
+                    "published_video_count": int(row["published_video_count"] or 0),
+                }
+            )
+
+        accounts = []
+        for key, item in account_catalog.items():
+            total = account_total.get(key, {})
+            ranged = account_range.get(key, {})
+            total_payload = aggregate_payload(total)
+            range_payload = aggregate_payload(ranged)
+            readable_count = range_payload["metrics_readable_count"]
+            unavailable_count = range_payload["metrics_unavailable_count"]
+            analytics_status = (
+                "partial" if readable_count and unavailable_count
+                else "ready" if readable_count
+                else "unavailable" if unavailable_count
+                else "waiting"
+            )
+            channel_items = {
+                value["channel_id"]: dict(value)
+                for value in account_channels.get(key, [])
+                if value.get("channel_id")
+            }
+            for channel_id in item.get("channel_ids") or []:
+                channel_id = _text(channel_id)
+                if not channel_id:
+                    continue
+                configured_channel = channel_catalog.get(channel_id, {})
+                channel_items.setdefault(
+                    channel_id,
+                    {
+                        "channel_id": channel_id,
+                        "channel_name": _text(configured_channel.get("channel_name") or channel_id),
+                        "published_video_count": 0,
+                    },
+                )
+            channels_for_account = sorted(channel_items.values(), key=lambda value: value["channel_name"])
+            accounts.append(
+                {
+                    "platform": key[0],
+                    "account_key": key[1],
+                    "account_label": _text(item.get("account_label") or total.get("account_label")),
+                    "account_external_id": _text(item.get("account_external_id") or total.get("account_external_id")),
+                    "configured": bool(item.get("configured")),
+                    "binding_status": "configured" if item.get("configured") else "historical",
+                    "analytics_status": analytics_status,
+                    "channel_ids": sorted({_text(value.get("channel_id")) for value in channels_for_account if _text(value.get("channel_id"))}),
+                    "channels": channels_for_account,
+                    "target_markets": sorted({_text(value) for value in (item.get("target_markets") or []) if _text(value)}),
+                    "total": total_payload,
+                    "range": range_payload,
+                }
+            )
+
+        channel_account_keys: dict[str, list[str]] = {}
+        for account in accounts:
+            for channel_id in account.get("channel_ids") or []:
+                channel_account_keys.setdefault(channel_id, []).append(account["account_key"])
+        channels = []
+        for channel_id, item in channel_catalog.items():
+            total = aggregate_payload(channel_total.get(channel_id, {}))
+            ranged = aggregate_payload(channel_range.get(channel_id, {}))
+            channels.append(
+                {
+                    "channel_id": channel_id,
+                    "channel_name": _text(item.get("channel_name") or channel_total.get(channel_id, {}).get("channel_name") or channel_id),
+                    "configured": bool(item.get("configured")),
+                    "account_keys": sorted(set(channel_account_keys.get(channel_id, []))),
+                    "total": total,
+                    "range": ranged,
+                }
+            )
+
+        recent_comments = []
+        for row in recent_comment_rows:
+            item = dict(row)
+            item["published_at"] = float(item.get("published_at") or 0)
+            item["published_at_iso"] = timestamp_text(item.get("published_at") or item.get("published_at_text"))
+            item["like_count"] = _number(item.get("like_count"))
+            item["reply_count"] = _number(item.get("reply_count"))
+            recent_comments.append(item)
+
+        accounts.sort(key=lambda item: (item["platform"], item["account_label"]))
+        channels.sort(key=lambda item: item["channel_name"])
+        return {
+            "schema_version": "1.0",
+            "source": "ihouse-system-publish-receipts-and-platform-metrics",
+            "definitions": {
+                "published_video_count": "平台发布记录数；同一制作任务发布到多个平台时按平台分别计数",
+                "production_task_count": "去重后的系统制作任务数",
+                "total": "系统当前保存的全部历史发布数据",
+                "range": f"最近 {days} 天内发布的数据",
+                "unavailable_metrics": "平台指标暂不可读，不等于浏览、点赞或评论为 0",
+            },
+            "generated_at": generated_at,
+            "generated_at_iso": timestamp_text(generated_at),
+            "range": {
+                "days": days,
+                "from": range_since,
+                "from_iso": timestamp_text(range_since),
+                "to": generated_at,
+                "to_iso": timestamp_text(generated_at),
+            },
+            "system": {
+                "account_count": len(accounts),
+                "configured_account_count": sum(1 for item in accounts if item["configured"]),
+                "historical_account_count": sum(1 for item in accounts if not item["configured"]),
+                "published_account_count": sum(1 for item in accounts if item["total"]["published_video_count"] > 0),
+                "supported_platform_count": len(platforms),
+                "configured_platform_count": len(
+                    {item["platform"] for item in accounts if item["configured"]}
+                ),
+                "published_platform_count": sum(
+                    1 for item in platforms if item["total"]["published_video_count"] > 0
+                ),
+                "channel_count": len(channels),
+                "configured_channel_count": sum(1 for item in channels if item["configured"]),
+                "historical_channel_count": sum(1 for item in channels if not item["configured"]),
+                "stored_comment_count": int(comment_count_row["count"] or 0),
+                "total": total_stats,
+                "range": range_stats,
+            },
+            "platforms": platforms,
+            "channels": channels,
+            "accounts": accounts,
+            "top_videos": [content_payload(row) for row in top_rows],
+            "recent_videos": [content_payload(row) for row in recent_rows],
+            "recent_comments": recent_comments,
+            "sync": self.sync_status(),
+        }
+
     def comments(self, platform: str, external_id: str, *, limit: int = 100) -> dict[str, Any]:
         with self._connect() as connection:
             content = connection.execute(

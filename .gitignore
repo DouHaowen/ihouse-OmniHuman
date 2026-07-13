@@ -1,4 +1,5 @@
 .env
+.media-insights-agent-key
 output/
 material_harvest/
 material_library/
