@@ -190,6 +190,16 @@ def refresh_x_access_token(token_store_path: Path) -> str:
     return access_token
 
 
+def get_x_read_access_token(token_store_path: Path) -> str:
+    try:
+        return refresh_x_access_token(token_store_path)
+    except XPublishError:
+        bearer_token = x_env_config().get("bearer_token") or ""
+        if bearer_token:
+            return bearer_token
+        raise
+
+
 def get_x_user(token_store_path: Path) -> dict[str, Any]:
     access_token = refresh_x_access_token(token_store_path)
     response = requests.get(
@@ -215,11 +225,11 @@ def get_x_post_metrics(token_store_path: Path, post_id: str) -> dict[str, Any]:
     post_id = str(post_id or "").strip()
     if not post_id:
         raise XPublishError("读取 X 帖子数据失败：缺少 post_id")
-    access_token = refresh_x_access_token(token_store_path)
+    access_token = get_x_read_access_token(token_store_path)
     response = requests.get(
         f"{X_TWEET_DETAIL_URL}/{quote(post_id, safe='')}",
         params={
-            "tweet.fields": "created_at,public_metrics,organic_metrics,non_public_metrics,text",
+            "tweet.fields": "created_at,public_metrics,text",
             "expansions": "author_id",
         },
         headers={"Authorization": f"Bearer {access_token}"},
@@ -231,11 +241,7 @@ def get_x_post_metrics(token_store_path: Path, post_id: str) -> dict[str, Any]:
     if not isinstance(data, dict) or not data:
         raise XPublishError("读取 X 帖子数据失败：未找到对应帖子")
     public_metrics = data.get("public_metrics") or {}
-    organic_metrics = data.get("organic_metrics") or {}
-    non_public_metrics = data.get("non_public_metrics") or {}
-    view_count = organic_metrics.get("impression_count")
-    if view_count in (None, ""):
-        view_count = non_public_metrics.get("impression_count")
+    view_count = public_metrics.get("impression_count")
     return {
         "platform": "x",
         "post_id": post_id,
@@ -260,7 +266,7 @@ def get_x_post_comments(
     post_id = str(post_id or "").strip()
     if not post_id:
         raise XPublishError("读取 X 回复失败：缺少 post_id")
-    access_token = refresh_x_access_token(token_store_path)
+    access_token = get_x_read_access_token(token_store_path)
     response = requests.get(
         X_RECENT_SEARCH_URL,
         params={

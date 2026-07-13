@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from facebook_publisher import get_facebook_video_comments
 from media_insights import MediaInsightsStore, MediaInsightsSynchronizer, discover_system_publications
-from x_publisher import get_x_post_comments
+from x_publisher import get_x_post_comments, get_x_post_metrics, get_x_read_access_token
 from youtube_publisher import get_youtube_video_comments
 
 
@@ -236,6 +236,39 @@ class PlatformCommentReaderTests(unittest.TestCase):
 
         self.assertEqual(comments[0]["author_name"], "X User")
         self.assertEqual(comments[0]["url"], "https://x.com/xuser/status/reply-1")
+
+    @patch("x_publisher.x_env_config", return_value={"bearer_token": "app-bearer"})
+    @patch("x_publisher.refresh_x_access_token", side_effect=Exception("missing client"))
+    def test_x_read_token_falls_back_only_for_publish_errors(self, _refresh, _config):
+        with self.assertRaises(Exception):
+            get_x_read_access_token(Path("unused.json"))
+
+    @patch("x_publisher.x_env_config", return_value={"bearer_token": "app-bearer"})
+    @patch("x_publisher.refresh_x_access_token")
+    def test_x_read_token_uses_app_bearer_when_oauth_is_unavailable(self, refresh, _config):
+        from x_publisher import XPublishError
+
+        refresh.side_effect = XPublishError("未配置 X_CLIENT_ID")
+
+        self.assertEqual(get_x_read_access_token(Path("unused.json")), "app-bearer")
+
+    @patch("x_publisher.get_x_read_access_token", return_value="token")
+    @patch("x_publisher.requests.get")
+    def test_x_public_impression_count_is_used_as_views(self, request_get, _token):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "data": {
+                "id": "post-2",
+                "text": "test",
+                "public_metrics": {"impression_count": 123, "like_count": 4, "reply_count": 2},
+            }
+        }
+        request_get.return_value = response
+
+        metrics = get_x_post_metrics(Path("unused.json"), "post-2")
+
+        self.assertEqual(metrics["view_count"], 123)
+        self.assertEqual(metrics["like_count"], 4)
 
 
 if __name__ == "__main__":
