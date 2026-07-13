@@ -5371,10 +5371,19 @@ def _media_insights_global_account_config(platform: str) -> dict[str, Any]:
     if platform == "facebook":
         store = load_facebook_token_store(FACEBOOK_TOKEN_STORE_PATH)
         env = facebook_env_config()
+        fallback_page: dict[str, Any] = {}
+        for channel in (_read_opennews_channels_raw().get("channels") or []):
+            for slots in ((channel.get("accounts") or {}).values() if isinstance(channel, dict) else []):
+                facebook = slots.get("facebook") if isinstance(slots, dict) and isinstance(slots.get("facebook"), dict) else {}
+                if facebook.get("page_id") or facebook.get("page_name"):
+                    fallback_page = facebook
+                    break
+            if fallback_page:
+                break
         return {
             "binding_mode": "global",
-            "page_id": store.get("page_id") or env.get("page_id") or "",
-            "page_name": store.get("page_name") or "",
+            "page_id": store.get("page_id") or env.get("page_id") or fallback_page.get("page_id") or "",
+            "page_name": store.get("page_name") or fallback_page.get("page_name") or "",
             "page_access_token": store.get("page_access_token") or env.get("page_access_token") or "",
         }
     if platform == "x":
@@ -5382,10 +5391,19 @@ def _media_insights_global_account_config(platform: str) -> dict[str, Any]:
         meta = store.get("meta") if isinstance(store.get("meta"), dict) else {}
         user = meta.get("user") if isinstance(meta.get("user"), dict) else {}
         debug = _latest_x_browser_account_context() if "_latest_x_browser_account_context" in globals() else {}
+        fallback_x: dict[str, Any] = {}
+        for channel in (_read_opennews_channels_raw().get("channels") or []):
+            for slots in ((channel.get("accounts") or {}).values() if isinstance(channel, dict) else []):
+                x_account = slots.get("x") if isinstance(slots, dict) and isinstance(slots.get("x"), dict) else {}
+                if x_account.get("handle"):
+                    fallback_x = x_account
+                    break
+            if fallback_x:
+                break
         return {
             "binding_mode": "global",
-            "handle": debug.get("handle") or user.get("username") or meta.get("username") or "",
-            "account_label": user.get("name") or "",
+            "handle": debug.get("handle") or user.get("username") or meta.get("username") or fallback_x.get("handle") or "",
+            "account_label": user.get("name") or fallback_x.get("account_label") or "",
             "profile_dir": str(x_browser_profile_dir()),
         }
     if platform == "youtube":

@@ -298,6 +298,7 @@
       search: "",
       dashboard: null,
       selected: null,
+      commentRequestId: 0,
     };
     const $ = (id) => document.getElementById(id);
     const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
@@ -379,9 +380,24 @@
 
     function metricCell(item, key) {
       if (item[key] === null || item[key] === undefined) {
-        return item.metrics_status === "error" ? '<span class="unavailable">暂不可读</span>' : "--";
+        const reason = friendlyPlatformError(item.metrics_error, item.platform);
+        return item.metrics_status === "error" ? `<span class="unavailable" title="${escapeHtml(reason)}">暂不可读</span>` : "--";
       }
       return `<span class="number">${formatNumber(item[key])}</span>`;
+    }
+
+    function friendlyPlatformError(error, platform) {
+      const message = String(error || "").trim();
+      if (platform === "x" && /X_CLIENT_ID|X access_token|X refresh_token|OAuth/i.test(message)) {
+        return "X 数据接口未授权；浏览器自动发布仍正常，仅统计和回复暂不可读";
+      }
+      if (platform === "facebook" && /permission|OAuth|access_token|token/i.test(message)) {
+        return "Facebook 数据读取权限不足，请重新授权 Page 数据权限";
+      }
+      if (platform === "youtube" && /OAuth|refresh_token|client_id|permission/i.test(message)) {
+        return "YouTube 数据读取授权失效，请重新授权对应频道";
+      }
+      return message || "平台暂时无法读取该项数据";
     }
 
     function platformLabel(platform) {
@@ -469,6 +485,7 @@
     async function openComments(platform, externalId) {
       const item = (state.dashboard?.contents || []).find((row) => row.platform === platform && row.external_id === externalId);
       if (!item) return;
+      const requestId = ++state.commentRequestId;
       state.selected = item;
       renderContents(state.dashboard.contents || []);
       $("commentSection").hidden = false;
@@ -479,13 +496,15 @@
       $("commentFeed").innerHTML = '<div class="empty">正在读取评论</div>';
       const errorBar = $("commentError");
       errorBar.classList.remove("show");
+      errorBar.textContent = "";
       try {
         const data = await api(`/api/lab/media-insights/contents/${encodeURIComponent(platform)}/${encodeURIComponent(externalId)}/comments?limit=200`);
+        if (requestId !== state.commentRequestId) return;
         const comments = data.comments || [];
         if (!comments.length) {
           const content = data.content || {};
           if (content.comments_status === "error") {
-            errorBar.textContent = content.comments_error || "平台暂时无法读取评论内容";
+            errorBar.textContent = friendlyPlatformError(content.comments_error, content.platform || platform);
             errorBar.classList.add("show");
           }
           $("commentFeed").innerHTML = '<div class="empty">暂时没有可显示的评论</div>';
@@ -503,6 +522,7 @@
           return `<article class="comment">${avatar}${body}${time}</article>`;
         }).join("");
       } catch (error) {
+        if (requestId !== state.commentRequestId) return;
         errorBar.textContent = error.message || String(error);
         errorBar.classList.add("show");
         $("commentFeed").innerHTML = '<div class="empty">评论读取失败</div>';
