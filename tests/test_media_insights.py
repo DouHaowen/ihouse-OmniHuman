@@ -6,7 +6,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from facebook_publisher import get_facebook_video_comments
-from media_insights import MediaInsightsStore, MediaInsightsSynchronizer, discover_system_publications
+from media_insights import (
+    MediaInsightsStore,
+    MediaInsightsSynchronizer,
+    discover_system_publications,
+    merge_media_account_config,
+)
 from x_publisher import get_x_post_comments, get_x_post_metrics, get_x_read_access_token
 from youtube_publisher import get_youtube_video_comments
 
@@ -70,6 +75,17 @@ class MediaInsightsDiscoveryTests(unittest.TestCase):
 
 
 class MediaInsightsStoreTests(unittest.TestCase):
+    def test_placeholder_account_does_not_override_configured_identity(self):
+        account = merge_media_account_config(
+            "x",
+            {"handle": "opennewsagent", "account_label": "OpenNews"},
+            {"handle": "X 账号", "account_label": "X 账号", "profile_dir": "/tmp/profile"},
+        )
+
+        self.assertEqual(account["handle"], "opennewsagent")
+        self.assertEqual(account["account_label"], "OpenNews")
+        self.assertEqual(account["profile_dir"], "/tmp/profile")
+
     def test_configured_accounts_are_visible_before_any_video_is_indexed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = MediaInsightsStore(Path(temp_dir) / "insights.db")
@@ -175,6 +191,51 @@ class MediaInsightsStoreTests(unittest.TestCase):
             self.assertEqual(item["metrics_status"], "error")
             self.assertIsNone(item["view_count"])
             self.assertIn("权限不足", item["metrics_error"])
+
+    def test_dashboard_sorts_views_before_zero_and_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = MediaInsightsStore(Path(temp_dir) / "insights.db")
+            now = time.time()
+
+            def publication(external_id, published_at):
+                return {
+                    "platform": "youtube",
+                    "external_id": external_id,
+                    "channel_id": "technology",
+                    "channel_name": "科技新闻",
+                    "account_key": "youtube:technology",
+                    "account_label": "OpenNews 科技前沿",
+                    "title": external_id,
+                    "published_at": published_at,
+                    "created_at": published_at,
+                }
+
+            rows = [
+                publication("new-zero", now),
+                publication("older-high", now - 30),
+                publication("newer-low", now - 10),
+                publication("newest-error", now + 10),
+            ]
+            store.upsert_publications(rows)
+            store.save_metrics(rows[0], {"view_count": 0, "like_count": 0, "comment_count": 0})
+            store.save_metrics(rows[1], {"view_count": 500, "like_count": 2, "comment_count": 1})
+            store.save_metrics(rows[2], {"view_count": 20, "like_count": 8, "comment_count": 3})
+            store.save_metrics_error(rows[3], "未授权")
+
+            dashboard = store.dashboard(days=7)
+            self.assertEqual(
+                [item["external_id"] for item in dashboard["contents"]],
+                ["older-high", "newer-low", "new-zero", "newest-error"],
+            )
+            self.assertEqual(dashboard["summary"]["average_view_count"], 520 / 3)
+            self.assertEqual(dashboard["accounts"][0]["analytics_status"], "partial")
+
+            zero_only = store.dashboard(days=7, metric_state="zero")
+            self.assertEqual([item["external_id"] for item in zero_only["contents"]], ["new-zero"])
+            self.assertEqual(zero_only["summary"]["content_count"], 1)
+
+            likes = store.dashboard(days=7, sort_by="likes")
+            self.assertEqual([item["external_id"] for item in likes["contents"][:2]], ["newer-low", "older-high"])
 
 
 class PlatformCommentReaderTests(unittest.TestCase):

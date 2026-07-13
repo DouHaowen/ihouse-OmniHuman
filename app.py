@@ -164,7 +164,7 @@ from x_publisher import (
     upload_video_to_x,
     x_env_config,
 )
-from media_insights import MediaInsightsStore, MediaInsightsSynchronizer
+from media_insights import MediaInsightsStore, MediaInsightsSynchronizer, merge_media_account_config
 from x_browser_publisher import (
     XBrowserPublishError,
     x_browser_auth_ready,
@@ -5470,7 +5470,7 @@ def _enrich_media_insights_publication(item: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(item)
     platform = str(enriched.get("platform") or "").strip().lower()
     discovered_account = enriched.get("publish_account") if isinstance(enriched.get("publish_account"), dict) else {}
-    account = {**_media_insights_account_config(enriched), **discovered_account}
+    account = merge_media_account_config(platform, _media_insights_account_config(enriched), discovered_account)
     identity = _media_insights_account_identity(
         platform,
         account,
@@ -11828,6 +11828,8 @@ async def lab_media_insights_dashboard(
     platform: str = "",
     account_key: str = "",
     search: str = "",
+    sort_by: str = "views",
+    metric_state: str = "",
     limit: int = 50,
     offset: int = 0,
 ):
@@ -11847,6 +11849,8 @@ async def lab_media_insights_dashboard(
         platform=platform,
         account_key=account_key,
         search=search,
+        sort_by=sort_by,
+        metric_state=metric_state,
         limit=limit,
         offset=offset,
         configured_channels=catalog.get("channels") or [],

@@ -18,6 +18,12 @@ PLATFORM_RECORD_KEYS = {
     "x": ("x_publish_records", "post_id", "x_url"),
 }
 
+ACCOUNT_PLACEHOLDERS = {
+    "youtube": {"youtube", "youtube account", "youtube 账号", "全局 youtube"},
+    "facebook": {"facebook", "facebook page", "facebook 账号"},
+    "x": {"x", "twitter", "x account", "x 账号", "twitter 账号"},
+}
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
@@ -46,6 +52,29 @@ def _timestamp(value: Any) -> float:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def merge_media_account_config(
+    platform: str,
+    configured: dict[str, Any] | None,
+    discovered: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep receipt metadata, but never let legacy placeholder labels replace configured identities."""
+    platform = _text(platform).lower()
+    merged = dict(configured or {})
+    receipt = dict(discovered or {})
+    placeholders = ACCOUNT_PLACEHOLDERS.get(platform, set())
+    identity_keys = {
+        "youtube": ("channel_name", "account_label", "label"),
+        "facebook": ("page_name", "account_label", "label"),
+        "x": ("handle", "username", "account_label", "label"),
+    }.get(platform, ("account_label", "label"))
+    for key in identity_keys:
+        value = _text(receipt.get(key))
+        if not value or value.lower().lstrip("@") in placeholders:
+            receipt.pop(key, None)
+    merged.update(receipt)
+    return merged
 
 
 def _workflow_identity(result: dict[str, Any], output_dir: Path) -> tuple[str, str, str]:
@@ -423,6 +452,8 @@ class MediaInsightsStore:
         platform: str = "",
         account_key: str = "",
         search: str = "",
+        sort_by: str = "views",
+        metric_state: str = "",
         limit: int = 50,
         offset: int = 0,
         configured_channels: Iterable[dict[str, Any]] = (),
@@ -431,10 +462,30 @@ class MediaInsightsStore:
         where, params = self._filters(_text(channel_id), _text(platform), _text(account_key), days)
         list_where = where
         list_params = list(params)
+        metric_state = _text(metric_state).lower()
+        if metric_state == "viewed":
+            list_where += " AND metrics_status='ok' AND view_count > 0"
+        elif metric_state == "zero":
+            list_where += " AND metrics_status='ok' AND view_count = 0"
+        elif metric_state == "unavailable":
+            list_where += " AND (metrics_status!='ok' OR view_count IS NULL)"
+        elif metric_state == "ready":
+            list_where += " AND metrics_status='ok'"
         if search:
             list_where += " AND (title LIKE ? OR account_label LIKE ? OR channel_name LIKE ?)"
             pattern = f"%{_text(search)}%"
             list_params.extend([pattern, pattern, pattern])
+        sort_by = _text(sort_by).lower()
+        sort_orders = {
+            "views": "CASE WHEN metrics_status='ok' AND view_count IS NOT NULL THEN 0 ELSE 1 END, view_count DESC, published_at DESC",
+            "likes": "CASE WHEN metrics_status='ok' AND like_count IS NOT NULL THEN 0 ELSE 1 END, like_count DESC, published_at DESC",
+            "comments": "CASE WHEN metrics_status='ok' AND comment_count IS NOT NULL THEN 0 ELSE 1 END, comment_count DESC, published_at DESC",
+            "published": "published_at DESC",
+        }
+        if sort_by not in sort_orders:
+            sort_by = "views"
+        order_by = sort_orders[sort_by]
+        range_since = params[0]
         with self._connect() as connection:
             summary = connection.execute(
                 f"""SELECT COUNT(*) AS content_count,
@@ -442,23 +493,31 @@ class MediaInsightsStore:
                     COALESCE(SUM(like_count), 0) AS like_count,
                     COALESCE(SUM(comment_count), 0) AS comment_count,
                     SUM(CASE WHEN metrics_status='ok' THEN 1 ELSE 0 END) AS metrics_ready_count,
-                    SUM(CASE WHEN metrics_status='error' THEN 1 ELSE 0 END) AS metrics_error_count
-                    FROM contents WHERE {where}""",
-                params,
+                    SUM(CASE WHEN metrics_status='error' THEN 1 ELSE 0 END) AS metrics_error_count,
+                    SUM(CASE WHEN metrics_status='ok' AND view_count IS NOT NULL THEN 1 ELSE 0 END) AS view_ready_count
+                    FROM contents WHERE {list_where}""",
+                list_params,
             ).fetchone()
             content_rows = connection.execute(
-                f"SELECT * FROM contents WHERE {list_where} ORDER BY published_at DESC LIMIT ? OFFSET ?",
+                f"SELECT * FROM contents WHERE {list_where} ORDER BY {order_by} LIMIT ? OFFSET ?",
                 (*list_params, max(1, min(int(limit or 50), 200)), max(0, int(offset or 0))),
             ).fetchall()
             total = connection.execute(f"SELECT COUNT(*) AS count FROM contents WHERE {list_where}", list_params).fetchone()
             channels = connection.execute(
                 """SELECT channel_id, MAX(channel_name) AS channel_name, COUNT(*) AS content_count
-                   FROM contents GROUP BY channel_id ORDER BY channel_name"""
+                   FROM contents WHERE published_at >= ? GROUP BY channel_id ORDER BY channel_name""",
+                (range_since,),
             ).fetchall()
             account_rows = connection.execute(
-                """SELECT account_key, MAX(account_label) AS account_label, platform, COUNT(*) AS content_count
-                   , channel_id FROM contents WHERE account_key != ''
-                   GROUP BY account_key, platform, channel_id ORDER BY account_label"""
+                """SELECT account_key, MAX(account_label) AS account_label, platform,
+                   COUNT(*) AS content_count, channel_id,
+                   SUM(CASE WHEN metrics_status='ok' THEN 1 ELSE 0 END) AS metrics_ready_count,
+                   SUM(CASE WHEN metrics_status='error' THEN 1 ELSE 0 END) AS metrics_error_count,
+                   COALESCE(SUM(view_count), 0) AS view_count,
+                   MAX(published_at) AS latest_published_at
+                   FROM contents WHERE account_key != '' AND published_at >= ?
+                   GROUP BY account_key, platform, channel_id ORDER BY account_label""",
+                (range_since,),
             ).fetchall()
         channel_catalog: dict[str, dict[str, Any]] = {}
         for item in configured_channels:
@@ -468,10 +527,14 @@ class MediaInsightsStore:
                 "channel_id": _text(item.get("channel_id")),
                 "channel_name": _text(item.get("channel_name") or item.get("channel_id")),
                 "content_count": int(item.get("content_count") or 0),
+                "configured": True,
             }
         for row in channels:
             key = _text(row["channel_id"])
-            existing = channel_catalog.setdefault(key, {"channel_id": key, "channel_name": _text(row["channel_name"]), "content_count": 0})
+            existing = channel_catalog.setdefault(
+                key,
+                {"channel_id": key, "channel_name": _text(row["channel_name"]), "content_count": 0, "configured": False},
+            )
             existing["content_count"] = int(row["content_count"] or 0)
             if not existing.get("channel_name"):
                 existing["channel_name"] = _text(row["channel_name"])
@@ -491,6 +554,10 @@ class MediaInsightsStore:
                 "channel_ids": sorted({_text(value) for value in (item.get("channel_ids") or []) if _text(value)}),
                 "target_markets": sorted({_text(value) for value in (item.get("target_markets") or []) if _text(value)}),
                 "content_count": int(item.get("content_count") or 0),
+                "metrics_ready_count": 0,
+                "metrics_error_count": 0,
+                "view_count": 0,
+                "latest_published_at": 0,
                 "configured": True,
             }
         for row in account_rows:
@@ -505,10 +572,21 @@ class MediaInsightsStore:
                     "channel_ids": [],
                     "target_markets": [],
                     "content_count": 0,
+                    "metrics_ready_count": 0,
+                    "metrics_error_count": 0,
+                    "view_count": 0,
+                    "latest_published_at": 0,
                     "configured": False,
                 },
             )
             existing["content_count"] += int(row["content_count"] or 0)
+            existing["metrics_ready_count"] += int(row["metrics_ready_count"] or 0)
+            existing["metrics_error_count"] += int(row["metrics_error_count"] or 0)
+            existing["view_count"] += int(row["view_count"] or 0)
+            existing["latest_published_at"] = max(
+                float(existing.get("latest_published_at") or 0),
+                float(row["latest_published_at"] or 0),
+            )
             channel_value = _text(row["channel_id"])
             if channel_value and channel_value not in existing["channel_ids"]:
                 existing["channel_ids"].append(channel_value)
@@ -516,16 +594,38 @@ class MediaInsightsStore:
                 existing["account_label"] = _text(row["account_label"])
         for item in account_catalog.values():
             item["channel_ids"] = sorted(item["channel_ids"])
+            ready_count = int(item.get("metrics_ready_count") or 0)
+            error_count = int(item.get("metrics_error_count") or 0)
+            if ready_count and error_count:
+                item["analytics_status"] = "partial"
+            elif ready_count:
+                item["analytics_status"] = "ready"
+            elif error_count:
+                item["analytics_status"] = "unavailable"
+            else:
+                item["analytics_status"] = "waiting"
         contents = []
         for row in content_rows:
             item = dict(row)
             item.pop("record_json", None)
             contents.append(item)
+        summary_payload = dict(summary)
+        view_ready_count = int(summary_payload.get("view_ready_count") or 0)
+        summary_payload["average_view_count"] = (
+            float(summary_payload.get("view_count") or 0) / view_ready_count if view_ready_count else None
+        )
+        summary_payload["interaction_count"] = int(summary_payload.get("like_count") or 0) + int(
+            summary_payload.get("comment_count") or 0
+        )
         return {
             "range_days": max(1, min(int(days or 30), 3650)),
-            "summary": dict(summary),
+            "summary": summary_payload,
             "contents": contents,
             "total": int(total["count"] or 0),
+            "offset": max(0, int(offset or 0)),
+            "limit": max(1, min(int(limit or 50), 200)),
+            "sort_by": sort_by,
+            "metric_state": metric_state,
             "channels": sorted(channel_catalog.values(), key=lambda item: item.get("channel_name") or item.get("channel_id")),
             "accounts": sorted(account_catalog.values(), key=lambda item: (item.get("platform") or "", item.get("account_label") or "")),
             "sync": self.sync_status(),

@@ -7,21 +7,25 @@
   <script src="/public/assets/jclaw-lab-sdk.browser.js"></script>
   <style>
     :root {
-      --ink: #17211b;
+      --ink: #18211c;
       --muted: #66716a;
-      --line: #dbe2dd;
+      --line: #d9e1dc;
       --panel: #ffffff;
       --wash: #f4f7f5;
+      --wash-strong: #edf2ef;
       --green: #087a52;
-      --green-soft: #e6f4ed;
-      --coral: #c55335;
-      --coral-soft: #fff0eb;
+      --green-soft: #e4f3eb;
       --blue: #17669a;
-      --blue-soft: #e9f3f9;
+      --blue-soft: #e8f2f8;
+      --coral: #bd4f34;
+      --coral-soft: #fff0eb;
+      --amber: #9a6812;
+      --amber-soft: #fff5df;
       --black: #111713;
-      --shadow: 0 12px 28px rgba(18, 32, 23, .08);
+      --shadow: 0 10px 26px rgba(18, 32, 23, .07);
     }
     * { box-sizing: border-box; }
+    html { background: var(--wash); }
     body {
       margin: 0;
       color: var(--ink);
@@ -29,34 +33,39 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
       letter-spacing: 0;
     }
+    body.drawer-open { overflow: hidden; }
     button, input, select { font: inherit; letter-spacing: 0; }
     button, select { cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+      outline: 3px solid rgba(8, 122, 82, .18);
+      outline-offset: 1px;
+    }
     .shell { min-height: 100vh; }
     .topbar {
       position: sticky;
       top: 0;
-      z-index: 20;
+      z-index: 30;
       display: flex;
       align-items: center;
       justify-content: space-between;
       min-height: 64px;
       padding: 10px max(18px, env(safe-area-inset-left));
       border-bottom: 1px solid var(--line);
-      background: rgba(255,255,255,.96);
+      background: rgba(255, 255, 255, .97);
       backdrop-filter: blur(14px);
     }
     .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
-    .brand img { width: 38px; height: 38px; object-fit: cover; border-radius: 6px; }
+    .brand img { width: 38px; height: 38px; border-radius: 5px; object-fit: cover; }
     .brand h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 760; }
     .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
-    .top-actions { display: flex; align-items: center; gap: 8px; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
     .identity {
       max-width: 150px;
       overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
       color: var(--muted);
       font-size: 12px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .button {
       min-height: 38px;
@@ -65,21 +74,124 @@
       border-radius: 6px;
       color: var(--ink);
       background: #fff;
-      font-weight: 650;
+      font-weight: 680;
     }
-    .button:hover { border-color: #9eaaa2; }
+    .button:hover { border-color: #98a69d; }
     .button.primary { color: #fff; border-color: var(--black); background: var(--black); }
     .button:disabled { cursor: default; opacity: .48; }
-    main { width: min(1440px, 100%); margin: 0 auto; padding: 22px 24px 60px; }
+    main { width: min(1480px, 100%); margin: 0 auto; padding: 18px 22px 48px; }
     .statusline {
       display: flex;
+      align-items: center;
       justify-content: space-between;
-      gap: 16px;
+      gap: 18px;
+      min-height: 24px;
       margin-bottom: 12px;
       color: var(--muted);
       font-size: 12px;
     }
-    .statusline strong { color: var(--ink); font-weight: 650; }
+    .statusline strong { color: var(--ink); font-weight: 680; }
+    .sync-meta { display: flex; align-items: center; gap: 12px; }
+    .coverage { color: var(--green); font-weight: 680; }
+    .workspace { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 18px; align-items: start; }
+    .account-nav {
+      position: sticky;
+      top: 82px;
+      max-height: calc(100vh - 102px);
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+    }
+    .nav-head { padding: 16px 15px 10px; }
+    .nav-head h2 { margin: 0; font-size: 14px; font-weight: 760; }
+    .nav-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .nav-all, .nav-channel, .nav-account {
+      width: 100%;
+      border: 0;
+      color: var(--ink);
+      background: transparent;
+      text-align: left;
+    }
+    .nav-all {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 44px;
+      padding: 0 15px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      font-weight: 720;
+    }
+    .nav-all:hover, .nav-all.active { background: var(--green-soft); color: var(--green); }
+    .channel-group { border-bottom: 1px solid var(--line); }
+    .channel-group:last-child { border-bottom: 0; }
+    .nav-channel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 42px;
+      padding: 0 15px;
+      font-size: 12px;
+      font-weight: 740;
+    }
+    .nav-channel:hover, .nav-channel.active { color: var(--green); background: #f7faf8; }
+    .nav-count { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 620; }
+    .nav-account {
+      display: grid;
+      grid-template-columns: 32px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 52px;
+      padding: 7px 12px 7px 17px;
+      border-top: 1px solid #edf1ee;
+    }
+    .nav-account:hover, .nav-account.active { background: var(--green-soft); }
+    .platform-mark {
+      display: inline-grid;
+      place-items: center;
+      width: 28px;
+      height: 24px;
+      border-radius: 5px;
+      color: var(--green);
+      background: var(--green-soft);
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .platform-mark.facebook { color: var(--blue); background: var(--blue-soft); }
+    .platform-mark.x { color: #fff; background: var(--black); }
+    .nav-account-name { overflow: hidden; font-size: 12px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }
+    .nav-account-meta { display: flex; align-items: center; gap: 5px; margin-top: 3px; color: var(--muted); font-size: 10px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #9aa49e; }
+    .status-dot.ready { background: var(--green); }
+    .status-dot.partial { background: var(--amber); }
+    .status-dot.unavailable { background: var(--coral); }
+    .legacy-nav summary {
+      padding: 13px 15px;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 680;
+    }
+    .content-pane { min-width: 0; }
+    .scope-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin: 1px 0 13px; }
+    .scope-head h2 { margin: 0; font-size: 20px; line-height: 1.25; }
+    .scope-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .scope-status {
+      display: none;
+      max-width: 390px;
+      padding: 8px 10px;
+      border-left: 3px solid var(--amber);
+      color: #73500f;
+      background: var(--amber-soft);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .scope-status.show { display: block; }
+    .mobile-scope { display: none; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
     .summary {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -89,115 +201,201 @@
       box-shadow: var(--shadow);
       overflow: hidden;
     }
-    .metric { min-height: 108px; padding: 19px 20px; border-right: 1px solid var(--line); }
+    .metric { min-height: 98px; padding: 17px 18px; border-right: 1px solid var(--line); }
     .metric:last-child { border-right: 0; }
-    .metric-label { color: var(--muted); font-size: 13px; }
-    .metric-value { margin-top: 8px; font-size: 30px; font-weight: 760; line-height: 1; }
+    .metric-label { color: var(--muted); font-size: 12px; }
+    .metric-value { margin-top: 8px; font-size: 28px; font-weight: 770; line-height: 1; font-variant-numeric: tabular-nums; }
     .metric:nth-child(2) .metric-value { color: var(--green); }
-    .metric:nth-child(3) .metric-value { color: var(--coral); }
-    .metric:nth-child(4) .metric-value { color: var(--blue); }
-    .controls {
-      display: grid;
-      grid-template-columns: 1.1fr 1fr 1fr minmax(200px, 1.4fr) auto;
-      gap: 10px;
-      align-items: end;
-      margin: 18px 0 12px;
+    .metric:nth-child(3) .metric-value { color: var(--blue); }
+    .metric:nth-child(4) .metric-value { color: var(--coral); }
+    .metric-sub { min-height: 14px; margin-top: 8px; color: var(--muted); font-size: 10px; }
+    .toolbar { margin: 16px 0 11px; }
+    .toolbar-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .toolbar-row + .toolbar-row { margin-top: 9px; }
+    .segmented {
+      display: inline-flex;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      overflow: hidden;
     }
-    .field label { display: block; margin: 0 0 6px; color: var(--muted); font-size: 12px; }
-    .field select, .field input {
+    .segmented button {
+      min-width: 70px;
+      padding: 0 12px;
+      border: 0;
+      border-right: 1px solid var(--line);
+      color: var(--muted);
+      background: #fff;
+      font-size: 12px;
+      font-weight: 660;
+      white-space: nowrap;
+    }
+    .segmented button:last-child { border-right: 0; }
+    .segmented button:hover { color: var(--ink); background: var(--wash); }
+    .segmented button.active { color: #fff; background: var(--black); }
+    .platform-segments button.active { color: var(--green); background: var(--green-soft); }
+    .filter-row { display: grid; grid-template-columns: minmax(200px, 1fr) 150px auto; gap: 9px; width: 100%; }
+    .field label { display: block; margin: 0 0 5px; color: var(--muted); font-size: 11px; }
+    .field input, .field select {
       width: 100%;
-      height: 40px;
-      padding: 0 11px;
+      height: 38px;
+      padding: 0 10px;
       border: 1px solid var(--line);
       border-radius: 6px;
       outline: none;
       color: var(--ink);
       background: #fff;
     }
-    .field select:focus, .field input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(8,122,82,.12); }
-    .periods { display: flex; height: 40px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-    .periods button { flex: 1; min-width: 56px; border: 0; border-right: 1px solid var(--line); background: #fff; color: var(--muted); }
-    .periods button:last-child { border-right: 0; }
-    .periods button.active { color: #fff; background: var(--green); }
+    .field input:focus, .field select:focus { border-color: var(--green); }
+    .periods { height: 38px; }
+    .periods button { min-width: 55px; }
+    .errorbar {
+      display: none;
+      margin: 11px 0;
+      padding: 10px 12px;
+      border-left: 3px solid var(--coral);
+      color: #87351f;
+      background: var(--coral-soft);
+      font-size: 12px;
+    }
+    .errorbar.show { display: block; }
     .table-wrap { border: 1px solid var(--line); border-radius: 7px; background: #fff; overflow: hidden; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    th { padding: 11px 12px; color: var(--muted); background: #f9fbfa; font-size: 12px; text-align: left; font-weight: 650; }
-    td { padding: 13px 12px; border-top: 1px solid var(--line); font-size: 13px; vertical-align: middle; }
+    th { height: 40px; padding: 0 11px; color: var(--muted); background: #f8faf9; font-size: 11px; text-align: left; font-weight: 690; }
+    th.numeric, td.numeric { text-align: right; }
+    td { height: 66px; padding: 10px 11px; border-top: 1px solid var(--line); font-size: 12px; vertical-align: middle; }
     tbody tr { cursor: pointer; }
-    tbody tr:hover, tbody tr.selected { background: #f3f8f5; }
-    .title-cell { width: 36%; }
-    .video-title { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-weight: 680; line-height: 1.45; }
-    .video-meta { margin-top: 5px; color: var(--muted); font-size: 11px; }
-    .platform {
-      display: inline-flex;
-      align-items: center;
-      height: 25px;
-      padding: 0 8px;
-      border-radius: 5px;
-      background: var(--green-soft);
-      color: var(--green);
-      font-size: 11px;
-      font-weight: 720;
-      text-transform: uppercase;
-    }
-    .platform.facebook { color: var(--blue); background: var(--blue-soft); }
-    .platform.x { color: #fff; background: var(--black); }
-    .number { font-variant-numeric: tabular-nums; font-weight: 700; }
-    .unavailable { color: var(--coral); font-size: 11px; }
-    .empty { padding: 54px 20px; color: var(--muted); text-align: center; }
+    tbody tr:hover, tbody tr.selected { background: #f2f7f4; }
+    .rank { color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; font-weight: 700; }
+    .rank.top { color: var(--green); }
+    .video-title { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 13px; font-weight: 700; line-height: 1.42; }
+    .video-meta { margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .account-cell { min-width: 0; }
+    .account-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .account-name { overflow: hidden; font-size: 11px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+    .number { font-variant-numeric: tabular-nums; font-weight: 730; }
+    .unavailable { color: #99a39d; font-size: 14px; font-weight: 650; }
+    .empty { padding: 52px 20px; color: var(--muted); text-align: center; }
     .mobile-list { display: none; }
-    .comment-section { margin-top: 20px; border-top: 3px solid var(--black); background: #fff; }
-    .comment-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 18px 18px 14px; border-bottom: 1px solid var(--line); }
-    .comment-head h2 { margin: 0; font-size: 17px; }
-    .comment-head p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
-    .comment-feed { max-height: 520px; overflow: auto; }
-    .comment { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 11px; padding: 15px 18px; border-bottom: 1px solid var(--line); }
-    .avatar { width: 38px; height: 38px; border-radius: 50%; object-fit: cover; background: var(--green-soft); }
-    .avatar-fallback { display: grid; place-items: center; color: var(--green); font-size: 14px; font-weight: 760; }
-    .comment-author { font-size: 13px; font-weight: 700; }
-    .comment-text { margin-top: 4px; white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.55; }
-    .comment-time { color: var(--muted); font-size: 11px; white-space: nowrap; }
-    .link { color: var(--blue); text-decoration: none; font-weight: 650; }
-    .errorbar { display: none; margin: 12px 0; padding: 10px 12px; border-left: 3px solid var(--coral); color: #87351f; background: var(--coral-soft); font-size: 12px; }
-    .errorbar.show { display: block; }
+    .pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 7px 11px; border-top: 1px solid var(--line); }
+    .page-status { color: var(--muted); font-size: 11px; }
+    .page-actions { display: flex; gap: 7px; }
+    .page-button { min-height: 32px; padding: 0 11px; border: 1px solid var(--line); border-radius: 5px; background: #fff; font-size: 11px; font-weight: 660; }
+    .page-button:disabled { cursor: default; opacity: .4; }
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      visibility: hidden;
+      background: rgba(17, 23, 19, .3);
+      opacity: 0;
+      transition: opacity .18s ease, visibility .18s ease;
+    }
+    .drawer-backdrop.open { visibility: visible; opacity: 1; }
+    .comment-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      z-index: 70;
+      display: flex;
+      flex-direction: column;
+      width: min(500px, 100%);
+      height: 100vh;
+      border-left: 1px solid var(--line);
+      background: #fff;
+      box-shadow: -18px 0 40px rgba(17, 23, 19, .14);
+      transform: translateX(102%);
+      transition: transform .2s ease;
+    }
+    .comment-drawer.open { transform: translateX(0); }
+    .drawer-head { padding: 17px 18px 14px; border-bottom: 1px solid var(--line); }
+    .drawer-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
+    .drawer-title { margin: 0; font-size: 17px; line-height: 1.4; }
+    .drawer-meta { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+    .icon-button {
+      display: grid;
+      flex: 0 0 auto;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      color: var(--ink);
+      background: #fff;
+      font-size: 22px;
+      line-height: 1;
+    }
+    .drawer-stats { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 14px; border: 1px solid var(--line); }
+    .drawer-stat { padding: 9px 10px; border-right: 1px solid var(--line); }
+    .drawer-stat:last-child { border-right: 0; }
+    .drawer-stat span { display: block; color: var(--muted); font-size: 10px; }
+    .drawer-stat strong { display: block; margin-top: 3px; font-size: 14px; }
+    .drawer-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+    .link { color: var(--blue); text-decoration: none; font-size: 12px; font-weight: 680; }
+    .comment-feed { flex: 1; overflow: auto; }
+    .comment { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px; padding: 14px 17px; border-bottom: 1px solid var(--line); }
+    .avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; background: var(--green-soft); }
+    .avatar-fallback { display: grid; place-items: center; color: var(--green); font-size: 13px; font-weight: 760; }
+    .comment-author { font-size: 12px; font-weight: 720; }
+    .comment-text { margin-top: 4px; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.55; }
+    .comment-time { color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .drawer-error { margin: 0; }
     .loading { opacity: .58; pointer-events: none; }
+    @media (max-width: 1080px) {
+      .workspace { grid-template-columns: 225px minmax(0, 1fr); gap: 13px; }
+      .segmented button { min-width: 62px; padding: 0 9px; }
+    }
     @media (max-width: 920px) {
+      main { padding: 16px 16px 44px; }
+      .workspace { display: block; }
+      .account-nav { display: none; }
+      .mobile-scope { display: grid; }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .metric:nth-child(2) { border-right: 0; }
       .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
-      .controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .field.search-field { grid-column: 1 / -1; }
-      .period-field { grid-column: 1 / -1; }
+      .toolbar-row { align-items: stretch; flex-direction: column; }
+      .segmented { overflow-x: auto; }
+      .filter-row { grid-template-columns: minmax(180px, 1fr) 150px auto; }
       .desktop-table { display: none; }
       .mobile-list { display: block; }
-      .mobile-item { padding: 15px; border-bottom: 1px solid var(--line); cursor: pointer; }
+      .mobile-item { padding: 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
       .mobile-item:last-child { border-bottom: 0; }
-      .mobile-item.selected { background: #f3f8f5; }
+      .mobile-item.selected { background: #f2f7f4; }
       .mobile-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-      .mobile-title { margin-top: 10px; font-size: 14px; font-weight: 700; line-height: 1.45; }
-      .mobile-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
-      .mobile-metric { padding: 8px; background: var(--wash); }
+      .mobile-rank { color: var(--green); font-size: 11px; font-weight: 750; }
+      .mobile-title { margin-top: 9px; font-size: 14px; font-weight: 710; line-height: 1.45; }
+      .mobile-account { display: flex; align-items: center; gap: 7px; margin-top: 7px; }
+      .mobile-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 11px; }
+      .mobile-metric { min-height: 54px; padding: 8px; background: var(--wash); }
       .mobile-metric span { display: block; color: var(--muted); font-size: 10px; }
-      .mobile-metric strong { display: block; margin-top: 3px; font-size: 14px; }
+      .mobile-metric strong { display: block; margin-top: 4px; font-size: 14px; }
     }
-    @media (max-width: 600px) {
+    @media (max-width: 650px) {
       .topbar { min-height: 58px; padding: 8px 12px; }
       .brand img { width: 34px; height: 34px; }
       .brand h1 { font-size: 16px; }
       .brand p, .identity { display: none; }
       .button { min-height: 36px; padding: 0 10px; font-size: 12px; }
-      main { padding: 14px 12px 42px; }
-      .statusline { display: block; line-height: 1.7; }
-      .statusline span { display: block; }
+      main { padding: 13px 11px 38px; }
+      .statusline { display: block; line-height: 1.75; }
+      .sync-meta { justify-content: space-between; }
+      .scope-head { display: block; }
+      .scope-head h2 { font-size: 18px; }
+      .scope-status { margin-top: 9px; max-width: none; }
+      .mobile-scope { grid-template-columns: 1fr; }
       .summary { box-shadow: none; }
       .metric { min-height: 88px; padding: 14px; }
       .metric-value { font-size: 24px; }
-      .controls { grid-template-columns: 1fr; }
-      .field.search-field, .period-field { grid-column: auto; }
-      .comment { grid-template-columns: 34px minmax(0, 1fr); padding: 14px; }
+      .filter-row { grid-template-columns: 1fr; }
+      .period-field { width: 100%; }
+      .periods { display: flex; }
+      .periods button { flex: 1; }
+      .comment { grid-template-columns: 34px minmax(0, 1fr); padding: 13px; }
       .avatar { width: 34px; height: 34px; }
       .comment-time { grid-column: 2; }
-      .comment-head { padding: 15px 14px; }
+      .drawer-head { padding: 14px; }
     }
   </style>
 </head>
@@ -206,10 +404,7 @@
     <header class="topbar">
       <div class="brand">
         <img src="/public/assets/ihouse-logo.webp" alt="iHouse">
-        <div>
-          <h1>媒体数据中心</h1>
-          <p>系统发布内容</p>
-        </div>
+        <div><h1>媒体数据中心</h1><p>系统发布内容</p></div>
       </div>
       <div class="top-actions">
         <span class="identity" id="identity">连接中</span>
@@ -219,71 +414,101 @@
 
     <main>
       <div class="statusline">
-        <span>统计范围：<strong id="rangeLabel">最近 30 天发布内容</strong></span>
-        <span id="syncLabel">等待首次同步</span>
+        <span>统计范围：<strong id="rangeLabel">最近 30 天</strong></span>
+        <div class="sync-meta"><span class="coverage" id="coverageLabel">数据覆盖 --</span><span id="syncLabel">等待同步</span></div>
       </div>
-      <section class="summary" aria-label="核心数据">
-        <div class="metric"><div class="metric-label">发布视频</div><div class="metric-value" id="contentCount">--</div></div>
-        <div class="metric"><div class="metric-label">累计浏览</div><div class="metric-value" id="viewCount">--</div></div>
-        <div class="metric"><div class="metric-label">累计点赞</div><div class="metric-value" id="likeCount">--</div></div>
-        <div class="metric"><div class="metric-label">累计评论</div><div class="metric-value" id="commentCount">--</div></div>
-      </section>
-
       <div class="errorbar" id="errorBar"></div>
 
-      <section class="controls" aria-label="筛选">
-        <div class="field">
-          <label for="channelFilter">频道</label>
-          <select id="channelFilter"><option value="">全部频道</option></select>
-        </div>
-        <div class="field">
-          <label for="platformFilter">平台</label>
-          <select id="platformFilter">
-            <option value="">全部平台</option>
-            <option value="youtube">YouTube</option>
-            <option value="facebook">Facebook</option>
-            <option value="x">X</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="accountFilter">账号</label>
-          <select id="accountFilter"><option value="">全部账号</option></select>
-        </div>
-        <div class="field search-field">
-          <label for="searchInput">搜索视频</label>
-          <input id="searchInput" type="search" placeholder="标题、频道或账号">
-        </div>
-        <div class="field period-field">
-          <label>时间范围</label>
-          <div class="periods" id="periods">
-            <button type="button" data-days="7">7 天</button>
-            <button class="active" type="button" data-days="30">30 天</button>
-            <button type="button" data-days="90">90 天</button>
+      <div class="workspace">
+        <aside class="account-nav" aria-label="频道与账号">
+          <div class="nav-head"><h2>频道与账号</h2><p id="navRangeLabel">最近 30 天发布记录</p></div>
+          <button class="nav-all active" id="allAccountsBtn" type="button"><span>全部账号</span><span class="nav-count" id="allAccountsCount">0</span></button>
+          <div id="primaryNavigation"></div>
+          <details class="legacy-nav" id="legacyNavigation" hidden>
+            <summary>历史内容</summary>
+            <div id="legacyNavigationBody"></div>
+          </details>
+        </aside>
+
+        <section class="content-pane">
+          <div class="scope-head">
+            <div><h2 id="scopeTitle">全部发布内容</h2><p id="scopeMeta">最近 30 天</p></div>
+            <div class="scope-status" id="scopeStatus"></div>
           </div>
-        </div>
-      </section>
 
-      <section class="table-wrap" id="contentArea">
-        <div class="desktop-table">
-          <table>
-            <thead><tr><th class="title-cell">视频</th><th>平台</th><th>账号</th><th>浏览</th><th>点赞</th><th>评论</th><th>发布时间</th></tr></thead>
-            <tbody id="contentRows"></tbody>
-          </table>
-        </div>
-        <div class="mobile-list" id="mobileList"></div>
-        <div class="empty" id="emptyState">正在读取媒体数据</div>
-      </section>
+          <div class="mobile-scope">
+            <div class="field"><label for="mobileChannelFilter">频道</label><select id="mobileChannelFilter"><option value="">全部频道</option></select></div>
+            <div class="field"><label for="mobileAccountFilter">账号</label><select id="mobileAccountFilter"><option value="">全部账号</option></select></div>
+          </div>
 
-      <section class="comment-section" id="commentSection" hidden>
-        <div class="comment-head">
-          <div><h2 id="commentTitle">评论</h2><p id="commentMeta"></p></div>
-          <a class="link" id="platformLink" href="#" target="_blank" rel="noopener">打开平台</a>
-        </div>
-        <div class="errorbar" id="commentError"></div>
-        <div class="comment-feed" id="commentFeed"></div>
-      </section>
+          <section class="summary" aria-label="核心数据">
+            <div class="metric"><div class="metric-label">发布视频</div><div class="metric-value" id="contentCount">--</div><div class="metric-sub" id="contentSub"></div></div>
+            <div class="metric"><div class="metric-label">累计浏览</div><div class="metric-value" id="viewCount">--</div><div class="metric-sub" id="viewSub"></div></div>
+            <div class="metric"><div class="metric-label">平均浏览</div><div class="metric-value" id="averageViewCount">--</div><div class="metric-sub">按可读视频计算</div></div>
+            <div class="metric"><div class="metric-label">总互动</div><div class="metric-value" id="interactionCount">--</div><div class="metric-sub" id="interactionSub"></div></div>
+          </section>
+
+          <section class="toolbar" aria-label="内容筛选与排序">
+            <div class="toolbar-row">
+              <div class="segmented" id="sortControls" aria-label="排序">
+                <button class="active" type="button" data-sort="views">浏览最多</button>
+                <button type="button" data-sort="published">最新发布</button>
+                <button type="button" data-sort="likes">点赞最多</button>
+                <button type="button" data-sort="comments">评论最多</button>
+              </div>
+              <div class="segmented platform-segments" id="platformControls" aria-label="平台">
+                <button class="active" type="button" data-platform="">全部</button>
+                <button type="button" data-platform="youtube">YouTube</button>
+                <button type="button" data-platform="facebook">Facebook</button>
+                <button type="button" data-platform="x">X</button>
+              </div>
+            </div>
+            <div class="toolbar-row">
+              <div class="filter-row">
+                <div class="field"><label for="searchInput">搜索视频</label><input id="searchInput" type="search" placeholder="标题、频道或账号"></div>
+                <div class="field"><label for="metricStateFilter">数据状态</label><select id="metricStateFilter"><option value="">全部数据</option><option value="viewed">有浏览</option><option value="zero">零浏览</option><option value="unavailable">不可读</option></select></div>
+                <div class="field period-field"><label>时间范围</label><div class="segmented periods" id="periods"><button type="button" data-days="7">7 天</button><button class="active" type="button" data-days="30">30 天</button><button type="button" data-days="90">90 天</button></div></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="table-wrap" id="contentArea">
+            <div class="desktop-table">
+              <table>
+                <colgroup><col style="width:54px"><col><col style="width:190px"><col style="width:78px"><col style="width:72px"><col style="width:72px"><col style="width:108px"></colgroup>
+                <thead><tr><th class="rank">排名</th><th>视频</th><th>发布账号</th><th class="numeric">浏览</th><th class="numeric">点赞</th><th class="numeric">评论</th><th>发布时间</th></tr></thead>
+                <tbody id="contentRows"></tbody>
+              </table>
+            </div>
+            <div class="mobile-list" id="mobileList"></div>
+            <div class="empty" id="emptyState">正在读取媒体数据</div>
+            <div class="pagination" id="pagination" hidden>
+              <span class="page-status" id="pageStatus"></span>
+              <div class="page-actions"><button class="page-button" id="prevPage" type="button">上一页</button><button class="page-button" id="nextPage" type="button">下一页</button></div>
+            </div>
+          </section>
+        </section>
+      </div>
     </main>
   </div>
+
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="comment-drawer" id="commentDrawer" aria-hidden="true" aria-label="视频评论">
+    <div class="drawer-head">
+      <div class="drawer-top">
+        <div><h2 class="drawer-title" id="commentTitle">评论</h2><p class="drawer-meta" id="commentMeta"></p></div>
+        <button class="icon-button" id="closeDrawer" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="drawer-stats">
+        <div class="drawer-stat"><span>浏览</span><strong id="drawerViews">--</strong></div>
+        <div class="drawer-stat"><span>点赞</span><strong id="drawerLikes">--</strong></div>
+        <div class="drawer-stat"><span>评论</span><strong id="drawerComments">--</strong></div>
+      </div>
+      <div class="drawer-actions"><a class="link" id="platformLink" href="#" target="_blank" rel="noopener">打开平台</a></div>
+    </div>
+    <div class="errorbar drawer-error" id="commentError"></div>
+    <div class="comment-feed" id="commentFeed"></div>
+  </aside>
 
   <script>
     const state = {
@@ -296,8 +521,13 @@
       platform: "",
       accountKey: "",
       search: "",
+      sortBy: "views",
+      metricState: "",
+      offset: 0,
+      pageSize: 50,
       dashboard: null,
       selected: null,
+      dashboardRequestId: 0,
       commentRequestId: 0,
     };
     const $ = (id) => document.getElementById(id);
@@ -308,12 +538,8 @@
         window.jclaw.ui.toast({ text: String(message), type: error ? "error" : "success" }).catch(() => {});
       }
       const bar = $("errorBar");
-      if (error) {
-        bar.textContent = message;
-        bar.classList.add("show");
-      } else {
-        bar.classList.remove("show");
-      }
+      bar.textContent = error ? message : "";
+      bar.classList.toggle("show", Boolean(error));
     }
 
     async function setupJClaw() {
@@ -369,7 +595,7 @@
       if (!Number.isFinite(number)) return "--";
       if (number >= 100000000) return `${(number / 100000000).toFixed(number >= 1000000000 ? 0 : 1)}亿`;
       if (number >= 10000) return `${(number / 10000).toFixed(number >= 100000 ? 0 : 1)}万`;
-      return number.toLocaleString("zh-CN");
+      return Math.round(number).toLocaleString("zh-CN");
     }
 
     function formatTime(timestamp, text = "") {
@@ -378,108 +604,231 @@
       return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
     }
 
-    function metricCell(item, key) {
-      if (item[key] === null || item[key] === undefined) {
-        const reason = friendlyPlatformError(item.metrics_error, item.platform);
-        return item.metrics_status === "error" ? `<span class="unavailable" title="${escapeHtml(reason)}">暂不可读</span>` : "--";
-      }
-      return `<span class="number">${formatNumber(item[key])}</span>`;
+    function platformLabel(platform) {
+      return platform === "youtube" ? "YouTube" : platform === "facebook" ? "Facebook" : "X";
+    }
+
+    function platformShort(platform) {
+      return platform === "youtube" ? "YT" : platform === "facebook" ? "FB" : "X";
     }
 
     function friendlyPlatformError(error, platform) {
       const message = String(error || "").trim();
       if (platform === "x" && /X_CLIENT_ID|X access_token|X refresh_token|OAuth/i.test(message)) {
-        return "X 数据接口未授权；浏览器自动发布仍正常，仅统计和回复暂不可读";
+        return "X 发布链路正常，平台统计接口尚未授权";
       }
       if (platform === "facebook" && /permission|OAuth|access_token|token/i.test(message)) {
-        return "Facebook 数据读取权限不足，请重新授权 Page 数据权限";
+        return "Facebook 数据读取权限不足，请重新授权对应 Page";
       }
-      if (platform === "youtube" && /OAuth|refresh_token|client_id|permission/i.test(message)) {
+      if (platform === "youtube" && /OAuth|refresh_token|client_id|permission|unauthorized_client/i.test(message)) {
         return "YouTube 数据读取授权失效，请重新授权对应频道";
       }
       return message || "平台暂时无法读取该项数据";
     }
 
-    function platformLabel(platform) {
-      return platform === "youtube" ? "YouTube" : platform === "facebook" ? "Facebook" : "X";
+    function metricCell(item, key) {
+      if (item[key] === null || item[key] === undefined) {
+        return `<span class="unavailable" title="${escapeHtml(friendlyPlatformError(item.metrics_error, item.platform))}">—</span>`;
+      }
+      return `<span class="number">${formatNumber(item[key])}</span>`;
     }
 
-    function populateFilters(data) {
-      const channel = $("channelFilter");
-      const account = $("accountFilter");
-      const channelValue = channel.value;
-      const accountValue = account.value;
-      channel.innerHTML = '<option value="">全部频道</option>' + (data.channels || []).map((item) =>
-        `<option value="${escapeHtml(item.channel_id)}">${escapeHtml(item.channel_name || item.channel_id)} (${item.content_count})</option>`
-      ).join("");
-      account.innerHTML = '<option value="">全部账号</option>' + (data.accounts || [])
-        .filter((item) => !state.platform || item.platform === state.platform)
-        .filter((item) => !state.channelId || (item.channel_ids || []).includes(state.channelId))
-        .map((item) => `<option value="${escapeHtml(item.account_key)}">${escapeHtml(item.account_label)} · ${platformLabel(item.platform)}</option>`).join("");
-      channel.value = channelValue;
-      account.value = accountValue;
+    function accountStatusLabel(status) {
+      return status === "ready" ? "数据正常" : status === "partial" ? "部分可读" : status === "unavailable" ? "数据不可读" : "等待同步";
     }
 
-    function renderDashboard() {
-      const data = state.dashboard || {};
+    function selectedAccount() {
+      return (state.dashboard?.accounts || []).find((item) => item.account_key === state.accountKey) || null;
+    }
+
+    function selectedChannel() {
+      return (state.dashboard?.channels || []).find((item) => item.channel_id === state.channelId) || null;
+    }
+
+    function resetPageAndLoad() {
+      state.offset = 0;
+      closeCommentDrawer();
+      loadDashboard();
+    }
+
+    function setScope(channelId = "", accountKey = "", platform = "") {
+      state.channelId = channelId || "";
+      state.accountKey = accountKey || "";
+      state.platform = platform || "";
+      document.querySelectorAll("#platformControls button").forEach((button) => button.classList.toggle("active", button.dataset.platform === state.platform));
+      resetPageAndLoad();
+    }
+
+    function renderNavigation(data) {
+      const channels = data.channels || [];
+      const accounts = data.accounts || [];
+      $("allAccountsCount").textContent = formatNumber(channels.reduce((total, channel) => total + Number(channel.content_count || 0), 0));
+      $("allAccountsBtn").classList.toggle("active", !state.channelId && !state.accountKey && !state.platform);
+      $("navRangeLabel").textContent = `最近 ${state.days} 天发布记录`;
+
+      const accountButton = (account, channelId) => {
+        const active = state.accountKey === account.account_key && state.channelId === channelId;
+        return `<button class="nav-account ${active ? "active" : ""}" type="button" data-nav-channel="${escapeHtml(channelId)}" data-nav-account="${escapeHtml(account.account_key)}" data-nav-platform="${escapeHtml(account.platform)}">
+          <span class="platform-mark ${escapeHtml(account.platform)}">${platformShort(account.platform)}</span>
+          <span><span class="nav-account-name">${escapeHtml(account.account_label || "未识别账号")}</span><span class="nav-account-meta"><i class="status-dot ${escapeHtml(account.analytics_status || "waiting")}"></i>${account.configured ? "已绑定" : "历史账号"} · ${accountStatusLabel(account.analytics_status)}</span></span>
+          <span class="nav-count">${formatNumber(account.content_count || 0)}</span>
+        </button>`;
+      };
+      const channelBlock = (channel) => {
+        const channelAccounts = accounts.filter((account) => (account.channel_ids || []).includes(channel.channel_id));
+        const active = state.channelId === channel.channel_id && !state.accountKey;
+        return `<section class="channel-group"><button class="nav-channel ${active ? "active" : ""}" type="button" data-nav-channel="${escapeHtml(channel.channel_id)}"><span>${escapeHtml(channel.channel_name || channel.channel_id)}</span><span class="nav-count">${formatNumber(channel.content_count || 0)}</span></button>${channelAccounts.map((account) => accountButton(account, channel.channel_id)).join("")}</section>`;
+      };
+      const configured = channels.filter((channel) => channel.configured);
+      const legacy = channels.filter((channel) => !channel.configured);
+      $("primaryNavigation").innerHTML = configured.map(channelBlock).join("");
+      $("legacyNavigationBody").innerHTML = legacy.map(channelBlock).join("");
+      $("legacyNavigation").hidden = !legacy.length;
+
+      document.querySelectorAll("[data-nav-channel]").forEach((button) => button.addEventListener("click", () => {
+        setScope(button.dataset.navChannel || "", button.dataset.navAccount || "", button.dataset.navPlatform || "");
+      }));
+
+      const channelSelect = $("mobileChannelFilter");
+      const accountSelect = $("mobileAccountFilter");
+      channelSelect.innerHTML = '<option value="">全部频道</option>' + channels.map((channel) => `<option value="${escapeHtml(channel.channel_id)}">${escapeHtml(channel.channel_name || channel.channel_id)} (${formatNumber(channel.content_count || 0)})</option>`).join("");
+      const visibleAccounts = accounts
+        .filter((account) => !state.channelId || (account.channel_ids || []).includes(state.channelId))
+        .filter((account) => !state.platform || account.platform === state.platform);
+      accountSelect.innerHTML = '<option value="">全部账号</option>' + visibleAccounts.map((account) => `<option value="${escapeHtml(account.account_key)}" data-platform="${escapeHtml(account.platform)}">${escapeHtml(account.account_label)} · ${platformLabel(account.platform)}</option>`).join("");
+      channelSelect.value = state.channelId;
+      accountSelect.value = state.accountKey;
+    }
+
+    function renderScope(data) {
+      const account = selectedAccount();
+      const channel = selectedChannel();
+      const title = account?.account_label || channel?.channel_name || (state.platform ? `${platformLabel(state.platform)} 全部账号` : "全部发布内容");
+      $("scopeTitle").textContent = title;
+      $("scopeMeta").textContent = `最近 ${state.days} 天 · ${formatNumber(data.total || 0)} 条内容 · ${state.sortBy === "views" ? "按浏览量排序" : state.sortBy === "published" ? "按发布时间排序" : state.sortBy === "likes" ? "按点赞排序" : "按评论排序"}`;
+      const notice = $("scopeStatus");
+      if (account && account.analytics_status === "unavailable") {
+        notice.textContent = account.platform === "x" ? "发布账号已绑定，X 平台统计接口尚未授权" : "发布账号已绑定，平台数据当前不可读";
+        notice.classList.add("show");
+      } else if (account && account.analytics_status === "partial") {
+        notice.textContent = "该账号部分视频数据可读，汇总只计算已读取指标";
+        notice.classList.add("show");
+      } else {
+        notice.textContent = "";
+        notice.classList.remove("show");
+      }
+    }
+
+    function renderSummary(data) {
       const summary = data.summary || {};
-      const hasReadyMetrics = Number(summary.metrics_ready_count || 0) > 0 || Number(summary.content_count || 0) === 0;
-      $("contentCount").textContent = formatNumber(summary.content_count ?? 0);
-      $("viewCount").textContent = hasReadyMetrics ? formatNumber(summary.view_count ?? 0) : "--";
-      $("likeCount").textContent = hasReadyMetrics ? formatNumber(summary.like_count ?? 0) : "--";
-      $("commentCount").textContent = hasReadyMetrics ? formatNumber(summary.comment_count ?? 0) : "--";
-      $("rangeLabel").textContent = `最近 ${state.days} 天发布内容`;
-      const sync = data.sync || {};
+      const contentCount = Number(summary.content_count || 0);
       const readyCount = Number(summary.metrics_ready_count || 0);
-      const totalCount = Number(summary.content_count || 0);
-      const coverage = totalCount && readyCount < totalCount ? ` · 已读取 ${readyCount}/${totalCount}` : "";
-      $("syncLabel").textContent = sync.running ? `平台数据同步中${coverage}` : sync.finished_at ? `上次同步 ${formatTime(sync.finished_at)}${coverage}` : `等待首次同步${coverage}`;
-      populateFilters(data);
-      renderContents(data.contents || []);
+      const viewReadyCount = Number(summary.view_ready_count || 0);
+      $("contentCount").textContent = formatNumber(contentCount);
+      $("contentSub").textContent = `已读取 ${formatNumber(readyCount)} 条`;
+      $("viewCount").textContent = viewReadyCount || !contentCount ? formatNumber(summary.view_count || 0) : "--";
+      $("viewSub").textContent = `覆盖 ${formatNumber(viewReadyCount)} 条浏览数据`;
+      $("averageViewCount").textContent = formatNumber(summary.average_view_count);
+      $("interactionCount").textContent = readyCount || !contentCount ? formatNumber(summary.interaction_count || 0) : "--";
+      $("interactionSub").textContent = `点赞 ${formatNumber(summary.like_count || 0)} · 评论 ${formatNumber(summary.comment_count || 0)}`;
+      $("coverageLabel").textContent = `数据覆盖 ${formatNumber(readyCount)}/${formatNumber(contentCount)}`;
     }
 
     function renderContents(contents) {
       $("emptyState").style.display = contents.length ? "none" : "block";
       $("emptyState").textContent = contents.length ? "" : "当前筛选范围内没有系统发布视频";
-      $("contentRows").innerHTML = contents.map((item) => {
+      $("contentRows").innerHTML = contents.map((item, index) => {
+        const rank = state.offset + index + 1;
         const selected = state.selected && state.selected.platform === item.platform && state.selected.external_id === item.external_id;
-        return `<tr class="${selected ? "selected" : ""}" data-platform="${escapeHtml(item.platform)}" data-id="${escapeHtml(item.external_id)}">
-          <td class="title-cell"><div class="video-title">${escapeHtml(item.title || "未命名视频")}</div><div class="video-meta">${escapeHtml(item.channel_name)} · ${escapeHtml(item.target_market || "")}</div></td>
-          <td><span class="platform ${escapeHtml(item.platform)}">${platformLabel(item.platform)}</span></td>
-          <td>${escapeHtml(item.account_label || "未识别账号")}</td>
-          <td>${metricCell(item, "view_count")}</td><td>${metricCell(item, "like_count")}</td><td>${metricCell(item, "comment_count")}</td>
-          <td>${formatTime(item.published_at)}</td>
+        return `<tr class="${selected ? "selected" : ""}" data-content-platform="${escapeHtml(item.platform)}" data-content-id="${escapeHtml(item.external_id)}">
+          <td class="rank ${state.sortBy === "views" && rank <= 3 ? "top" : ""}">${rank}</td>
+          <td><div class="video-title">${escapeHtml(item.title || "未命名视频")}</div><div class="video-meta">${escapeHtml(item.channel_name || "未分类")} · ${escapeHtml(item.target_market || "")}</div></td>
+          <td class="account-cell"><div class="account-line"><span class="platform-mark ${escapeHtml(item.platform)}">${platformShort(item.platform)}</span><span class="account-name">${escapeHtml(item.account_label || "未识别账号")}</span></div></td>
+          <td class="numeric">${metricCell(item, "view_count")}</td><td class="numeric">${metricCell(item, "like_count")}</td><td class="numeric">${metricCell(item, "comment_count")}</td><td>${formatTime(item.published_at)}</td>
         </tr>`;
       }).join("");
-      $("mobileList").innerHTML = contents.map((item) => {
+      $("mobileList").innerHTML = contents.map((item, index) => {
+        const rank = state.offset + index + 1;
         const selected = state.selected && state.selected.platform === item.platform && state.selected.external_id === item.external_id;
-        return `<article class="mobile-item ${selected ? "selected" : ""}" data-platform="${escapeHtml(item.platform)}" data-id="${escapeHtml(item.external_id)}">
-          <div class="mobile-top"><span class="platform ${escapeHtml(item.platform)}">${platformLabel(item.platform)}</span><span class="video-meta">${formatTime(item.published_at)}</span></div>
+        return `<article class="mobile-item ${selected ? "selected" : ""}" data-content-platform="${escapeHtml(item.platform)}" data-content-id="${escapeHtml(item.external_id)}">
+          <div class="mobile-top"><span class="mobile-rank">#${rank}</span><span class="video-meta">${formatTime(item.published_at)}</span></div>
           <div class="mobile-title">${escapeHtml(item.title || "未命名视频")}</div>
-          <div class="video-meta">${escapeHtml(item.channel_name)} · ${escapeHtml(item.account_label || "未识别账号")}</div>
+          <div class="mobile-account"><span class="platform-mark ${escapeHtml(item.platform)}">${platformShort(item.platform)}</span><span class="account-name">${escapeHtml(item.account_label || "未识别账号")}</span><span class="video-meta">${escapeHtml(item.channel_name || "未分类")}</span></div>
           <div class="mobile-metrics"><div class="mobile-metric"><span>浏览</span><strong>${metricCell(item, "view_count")}</strong></div><div class="mobile-metric"><span>点赞</span><strong>${metricCell(item, "like_count")}</strong></div><div class="mobile-metric"><span>评论</span><strong>${metricCell(item, "comment_count")}</strong></div></div>
         </article>`;
       }).join("");
-      document.querySelectorAll("[data-platform][data-id]").forEach((element) => element.addEventListener("click", () => openComments(element.dataset.platform, element.dataset.id)));
+      document.querySelectorAll("[data-content-platform][data-content-id]").forEach((element) => element.addEventListener("click", () => openComments(element.dataset.contentPlatform, element.dataset.contentId)));
+    }
+
+    function renderPagination(data) {
+      const total = Number(data.total || 0);
+      const start = total ? state.offset + 1 : 0;
+      const end = Math.min(state.offset + state.pageSize, total);
+      $("pagination").hidden = total <= state.pageSize;
+      $("pageStatus").textContent = `显示 ${formatNumber(start)}–${formatNumber(end)}，共 ${formatNumber(total)} 条`;
+      $("prevPage").disabled = state.offset <= 0;
+      $("nextPage").disabled = state.offset + state.pageSize >= total;
+    }
+
+    function renderDashboard() {
+      const data = state.dashboard || {};
+      $("rangeLabel").textContent = `最近 ${state.days} 天`;
+      const sync = data.sync || {};
+      $("syncLabel").textContent = sync.running ? "平台数据同步中" : sync.finished_at ? `上次同步 ${formatTime(sync.finished_at)}` : "等待首次同步";
+      document.querySelectorAll("#sortControls button").forEach((button) => button.classList.toggle("active", button.dataset.sort === state.sortBy));
+      document.querySelectorAll("#platformControls button").forEach((button) => button.classList.toggle("active", button.dataset.platform === state.platform));
+      $("metricStateFilter").value = state.metricState;
+      renderNavigation(data);
+      renderScope(data);
+      renderSummary(data);
+      renderContents(data.contents || []);
+      renderPagination(data);
     }
 
     async function loadDashboard() {
+      const requestId = ++state.dashboardRequestId;
       $("appShell").classList.add("loading");
       try {
-        const params = new URLSearchParams({ days: String(state.days), limit: "100" });
+        const params = new URLSearchParams({
+          days: String(state.days),
+          limit: String(state.pageSize),
+          offset: String(state.offset),
+          sort_by: state.sortBy,
+        });
         if (state.channelId) params.set("channel_id", state.channelId);
         if (state.platform) params.set("platform", state.platform);
         if (state.accountKey) params.set("account_key", state.accountKey);
         if (state.search) params.set("search", state.search);
-        state.dashboard = await api(`/api/lab/media-insights/dashboard?${params}`);
+        if (state.metricState) params.set("metric_state", state.metricState);
+        const data = await api(`/api/lab/media-insights/dashboard?${params}`);
+        if (requestId !== state.dashboardRequestId) return;
+        state.dashboard = data;
         renderDashboard();
         toast("");
       } catch (error) {
+        if (requestId !== state.dashboardRequestId) return;
         toast(error.message || String(error), true);
         $("emptyState").textContent = "媒体数据读取失败";
       } finally {
-        $("appShell").classList.remove("loading");
+        if (requestId === state.dashboardRequestId) $("appShell").classList.remove("loading");
       }
+    }
+
+    function openCommentDrawer() {
+      $("drawerBackdrop").classList.add("open");
+      $("commentDrawer").classList.add("open");
+      $("commentDrawer").setAttribute("aria-hidden", "false");
+      document.body.classList.add("drawer-open");
+    }
+
+    function closeCommentDrawer() {
+      state.commentRequestId += 1;
+      state.selected = null;
+      $("drawerBackdrop").classList.remove("open");
+      $("commentDrawer").classList.remove("open");
+      $("commentDrawer").setAttribute("aria-hidden", "true");
+      document.body.classList.remove("drawer-open");
+      if (state.dashboard) renderContents(state.dashboard.contents || []);
     }
 
     async function openComments(platform, externalId) {
@@ -488,9 +837,12 @@
       const requestId = ++state.commentRequestId;
       state.selected = item;
       renderContents(state.dashboard.contents || []);
-      $("commentSection").hidden = false;
+      openCommentDrawer();
       $("commentTitle").textContent = item.title || "评论";
-      $("commentMeta").textContent = `${platformLabel(item.platform)} · ${item.account_label || "未识别账号"}`;
+      $("commentMeta").textContent = `${platformLabel(item.platform)} · ${item.account_label || "未识别账号"} · ${formatTime(item.published_at)}`;
+      $("drawerViews").innerHTML = metricCell(item, "view_count");
+      $("drawerLikes").innerHTML = metricCell(item, "like_count");
+      $("drawerComments").innerHTML = metricCell(item, "comment_count");
       $("platformLink").href = item.url || "#";
       $("platformLink").hidden = !item.url;
       $("commentFeed").innerHTML = '<div class="empty">正在读取评论</div>';
@@ -507,27 +859,22 @@
             errorBar.textContent = friendlyPlatformError(content.comments_error, content.platform || platform);
             errorBar.classList.add("show");
           }
-          $("commentFeed").innerHTML = '<div class="empty">暂时没有可显示的评论</div>';
+          $("commentFeed").innerHTML = '<div class="empty">暂无评论</div>';
           return;
         }
         $("commentFeed").innerHTML = comments.map((comment) => {
           const initial = escapeHtml((comment.author_name || "用").slice(0, 1));
-          const avatar = comment.author_avatar_url
-            ? `<img class="avatar" src="${escapeHtml(comment.author_avatar_url)}" alt="">`
-            : `<div class="avatar avatar-fallback">${initial}</div>`;
+          const avatar = comment.author_avatar_url ? `<img class="avatar" src="${escapeHtml(comment.author_avatar_url)}" alt="">` : `<div class="avatar avatar-fallback">${initial}</div>`;
           const body = `<div><div class="comment-author">${escapeHtml(comment.author_name || "平台用户")}</div><div class="comment-text">${escapeHtml(comment.message || "")}</div></div>`;
-          const time = comment.url
-            ? `<a class="comment-time link" href="${escapeHtml(comment.url)}" target="_blank" rel="noopener">${formatTime(comment.published_at, comment.published_at_text)}</a>`
-            : `<span class="comment-time">${formatTime(comment.published_at, comment.published_at_text)}</span>`;
+          const time = comment.url ? `<a class="comment-time link" href="${escapeHtml(comment.url)}" target="_blank" rel="noopener">${formatTime(comment.published_at, comment.published_at_text)}</a>` : `<span class="comment-time">${formatTime(comment.published_at, comment.published_at_text)}</span>`;
           return `<article class="comment">${avatar}${body}${time}</article>`;
         }).join("");
       } catch (error) {
         if (requestId !== state.commentRequestId) return;
-        errorBar.textContent = error.message || String(error);
+        errorBar.textContent = friendlyPlatformError(error.message || String(error), platform);
         errorBar.classList.add("show");
         $("commentFeed").innerHTML = '<div class="empty">评论读取失败</div>';
       }
-      $("commentSection").scrollIntoView({ behavior: "smooth", block: "start" });
     }
 
     async function syncNow() {
@@ -558,22 +905,48 @@
       }
     }
 
+    $("allAccountsBtn").addEventListener("click", () => setScope());
+    $("sortControls").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-sort]");
+      if (!button) return;
+      state.sortBy = button.dataset.sort || "views";
+      document.querySelectorAll("#sortControls button").forEach((item) => item.classList.toggle("active", item === button));
+      resetPageAndLoad();
+    });
+    $("platformControls").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-platform]");
+      if (!button) return;
+      state.platform = button.dataset.platform || "";
+      if (state.accountKey && selectedAccount()?.platform !== state.platform) state.accountKey = "";
+      document.querySelectorAll("#platformControls button").forEach((item) => item.classList.toggle("active", item === button));
+      resetPageAndLoad();
+    });
+    $("metricStateFilter").addEventListener("change", (event) => { state.metricState = event.target.value; resetPageAndLoad(); });
+    $("mobileChannelFilter").addEventListener("change", (event) => { state.channelId = event.target.value; state.accountKey = ""; state.platform = ""; resetPageAndLoad(); });
+    $("mobileAccountFilter").addEventListener("change", (event) => {
+      state.accountKey = event.target.value;
+      const option = event.target.selectedOptions[0];
+      state.platform = state.accountKey && option?.dataset.platform ? option.dataset.platform : "";
+      resetPageAndLoad();
+    });
     let searchTimer = null;
-    $("channelFilter").addEventListener("change", (event) => { state.channelId = event.target.value; state.accountKey = ""; loadDashboard(); });
-    $("platformFilter").addEventListener("change", (event) => { state.platform = event.target.value; state.accountKey = ""; loadDashboard(); });
-    $("accountFilter").addEventListener("change", (event) => { state.accountKey = event.target.value; loadDashboard(); });
     $("searchInput").addEventListener("input", (event) => {
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => { state.search = event.target.value.trim(); loadDashboard(); }, 320);
+      searchTimer = setTimeout(() => { state.search = event.target.value.trim(); resetPageAndLoad(); }, 320);
     });
     $("periods").addEventListener("click", (event) => {
       const button = event.target.closest("button[data-days]");
       if (!button) return;
       state.days = Number(button.dataset.days || 30);
       document.querySelectorAll("#periods button").forEach((item) => item.classList.toggle("active", item === button));
-      loadDashboard();
+      resetPageAndLoad();
     });
+    $("prevPage").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.pageSize); closeCommentDrawer(); loadDashboard(); });
+    $("nextPage").addEventListener("click", () => { state.offset += state.pageSize; closeCommentDrawer(); loadDashboard(); });
     $("syncBtn").addEventListener("click", syncNow);
+    $("closeDrawer").addEventListener("click", closeCommentDrawer);
+    $("drawerBackdrop").addEventListener("click", closeCommentDrawer);
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeCommentDrawer(); });
 
     (async function main() {
       try {
@@ -584,14 +957,12 @@
         $("identity").textContent = state.user?.display_name || state.user?.displayName || state.user?.username || "已连接";
         $("syncBtn").disabled = !state.canSync;
         await loadDashboard();
+        await window.jclaw.lifecycle.ready().catch(() => {});
       } catch (error) {
-        if (error.status === 401 && !window.jclaw?.isHosted()) {
-          window.location.replace("/?next=%2Flab%2Fmedia-insights");
-          return;
-        }
+        toast(error.message || String(error), true);
         $("identity").textContent = "未连接";
         $("syncBtn").disabled = true;
-        toast(error.message || String(error), true);
+        $("emptyState").textContent = error.status === 401 ? "请先登录" : "媒体数据读取失败";
       }
     })();
   </script>
