@@ -19,24 +19,14 @@
 | `recent_limit` | 20 | 0-100 | 最近发布视频数量 |
 | `comment_limit` | 20 | 0-100 | 最近已回采评论数量 |
 
-## 认证
+## 访问方式
 
-服务端对服务端调用使用单独的只读密钥：
-
-```http
-Authorization: Bearer <MEDIA_INSIGHTS_AGENT_API_KEY>
-```
-
-也支持 `X-Media-Insights-Key` 或 `X-API-Key` 请求头。不要把密钥放在 URL 查询参数、前端代码或日志中。
-
-现有 JClaw 小程序也可以使用 `app=ihouse-media-insights` 的 JClaw Lab JWT，通过 `Authorization: Bearer <JWT>` 或 `X-JClaw-Lab-Token` 调用。
+这是公开只读接口，不需要 API 密钥、登录 Cookie 或 JClaw JWT。调用方直接发起 GET 请求即可。
 
 调用示例：
 
 ```bash
-curl -sS \
-  -H "Authorization: Bearer $MEDIA_INSIGHTS_AGENT_API_KEY" \
-  "https://aiagent.office.ihousejapan.cn/api/external/media-insights/agent-context?days=30&top_limit=10&recent_limit=20&comment_limit=20"
+curl -sS "https://aiagent.office.ihousejapan.cn/api/external/media-insights/agent-context?days=30&top_limit=10&recent_limit=20&comment_limit=20"
 ```
 
 ## 返回内容

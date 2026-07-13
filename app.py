@@ -11821,38 +11821,6 @@ def _require_media_insights_user(request: Request) -> tuple[Optional[dict], Opti
     return _require_lab_or_user(request, expected_app="ihouse-media-insights")
 
 
-def _media_insights_agent_api_keys() -> list[str]:
-    keys: list[str] = []
-    for value in (
-        os.getenv("MEDIA_INSIGHTS_AGENT_API_KEY", ""),
-        os.getenv("MEDIA_INSIGHTS_AGENT_API_KEYS", ""),
-    ):
-        for key in str(value or "").split(","):
-            key = key.strip()
-            if key and key not in keys:
-                keys.append(key)
-    return keys
-
-
-def _require_media_insights_agent_access(request: Request) -> Optional[JSONResponse]:
-    token = _jclaw_lab_token_from_request(request)
-    if token and _verify_jclaw_lab_token(token, expected_app="ihouse-media-insights"):
-        return None
-
-    provided = str(
-        request.headers.get("X-Media-Insights-Key")
-        or request.headers.get("X-API-Key")
-        or _bearer_token_from_request(request)
-        or ""
-    ).strip()
-    keys = _media_insights_agent_api_keys()
-    if not keys:
-        return JSONResponse({"error": "媒体数据 AI 接口密钥未配置"}, status_code=503)
-    if not provided or not any(hmac.compare_digest(provided, key) for key in keys):
-        return JSONResponse({"error": "无效的媒体数据接口凭证"}, status_code=401)
-    return None
-
-
 @app.get("/api/lab/media-insights/me")
 async def lab_media_insights_me(request: Request):
     user, error = _require_media_insights_user(request)
@@ -11901,15 +11869,11 @@ async def lab_media_insights_dashboard(
 
 @app.get("/api/external/media-insights/agent-context")
 async def external_media_insights_agent_context(
-    request: Request,
     days: int = 30,
     top_limit: int = 10,
     recent_limit: int = 20,
     comment_limit: int = 20,
 ):
-    error = _require_media_insights_agent_access(request)
-    if error:
-        return error
     status = MEDIA_INSIGHTS_STORE.sync_status()
     if not status.get("content_count"):
         try:
